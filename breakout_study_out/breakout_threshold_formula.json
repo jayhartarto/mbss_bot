@@ -1,0 +1,252 @@
+{
+  "base_rate": 0.1221,
+  "positive_rows": 187,
+  "weighted_positive_rows": 145.8,
+  "total_rows": 1235,
+  "rules": [
+    {
+      "feature": "intraday_range_pct",
+      "direction": ">=",
+      "threshold": 3.4525,
+      "positive_weighted_median": 5.6573,
+      "positive_median": 5.4348,
+      "negative_median": 3.7037,
+      "hit_rate_if_rule_true": 0.1637,
+      "coverage": 0.5652,
+      "lift": 1.3402
+    },
+    {
+      "feature": "macd_hist",
+      "direction": ">=",
+      "threshold": 1.6646,
+      "positive_weighted_median": 4.6328,
+      "positive_median": 4.5017,
+      "negative_median": 3.1684,
+      "hit_rate_if_rule_true": 0.1438,
+      "coverage": 0.6405,
+      "lift": 1.1771
+    },
+    {
+      "feature": "obv_slope_5_pct",
+      "direction": ">=",
+      "threshold": 1.0723,
+      "positive_weighted_median": 26.1244,
+      "positive_median": 26.3788,
+      "negative_median": 11.593,
+      "hit_rate_if_rule_true": 0.1394,
+      "coverage": 0.6615,
+      "lift": 1.1414
+    },
+    {
+      "feature": "value_traded",
+      "direction": ">=",
+      "threshold": 3551756675.0,
+      "positive_weighted_median": 9806577518.5185,
+      "positive_median": 9810045000.0,
+      "negative_median": 7111833000.0,
+      "hit_rate_if_rule_true": 0.1348,
+      "coverage": 0.6834,
+      "lift": 1.1039
+    },
+    {
+      "feature": "range_10d_pct",
+      "direction": "between",
+      "threshold": [
+        11.8329,
+        33.5067
+      ],
+      "positive_weighted_median": 21.6281,
+      "positive_median": 19.5238,
+      "negative_median": 12.0056,
+      "hit_rate_if_rule_true": 0.1344,
+      "coverage": 0.4543,
+      "lift": 1.1003
+    },
+    {
+      "feature": "macd_bullish",
+      "direction": ">=",
+      "threshold": 1.0,
+      "positive_weighted_median": 1.0,
+      "positive_median": 1.0,
+      "negative_median": 1.0,
+      "hit_rate_if_rule_true": 0.1326,
+      "coverage": 0.8615,
+      "lift": 1.0853
+    },
+    {
+      "feature": "price_vs_sma20_pct",
+      "direction": ">=",
+      "threshold": 1.6474,
+      "positive_weighted_median": 6.1755,
+      "positive_median": 6.172,
+      "negative_median": 3.9718,
+      "hit_rate_if_rule_true": 0.1323,
+      "coverage": 0.6964,
+      "lift": 1.083
+    },
+    {
+      "feature": "adx14",
+      "direction": ">=",
+      "threshold": 21.8848,
+      "positive_weighted_median": 25.5778,
+      "positive_median": 25.7421,
+      "negative_median": 27.5032,
+      "hit_rate_if_rule_true": 0.1274,
+      "coverage": 0.7198,
+      "lift": 1.0431
+    },
+    {
+      "feature": "close_pos_day",
+      "direction": ">=",
+      "threshold": 0.25,
+      "positive_weighted_median": 0.5,
+      "positive_median": 0.5,
+      "negative_median": 0.4286,
+      "hit_rate_if_rule_true": 0.1262,
+      "coverage": 0.732,
+      "lift": 1.0329
+    },
+    {
+      "feature": "cmf20",
+      "direction": ">=",
+      "threshold": -0.1128,
+      "positive_weighted_median": -0.0261,
+      "positive_median": -0.0314,
+      "negative_median": -0.0134,
+      "hit_rate_if_rule_true": 0.125,
+      "coverage": 0.736,
+      "lift": 1.0238
+    },
+    {
+      "feature": "vol_ratio_20",
+      "direction": ">=",
+      "threshold": 0.7094,
+      "positive_weighted_median": 1.1956,
+      "positive_median": 1.1583,
+      "negative_median": 1.1253,
+      "hit_rate_if_rule_true": 0.118,
+      "coverage": 0.7765,
+      "lift": 0.9659
+    },
+    {
+      "feature": "dist_to_20d_high_pct",
+      "direction": "<=",
+      "threshold": 14.4666,
+      "positive_weighted_median": 7.7324,
+      "positive_median": 7.5758,
+      "negative_median": 5.6292,
+      "hit_rate_if_rule_true": 0.1104,
+      "coverage": 0.8283,
+      "lift": 0.9039
+    }
+  ],
+  "drop_risk_formula": {
+    "safe_drawdown_pct": -6.0,
+    "safe_rows": 98,
+    "risky_rows": 131,
+    "base_safe_rate": 0.4479,
+    "rules": [
+      {
+        "feature": "macd_hist",
+        "direction": ">=",
+        "threshold": 3.3342,
+        "safe_weighted_median": 9.7666,
+        "risky_median": 3.6098,
+        "safe_rate_if_rule_true": 0.5492,
+        "lift": 1.2263
+      },
+      {
+        "feature": "adx14",
+        "direction": "<=",
+        "threshold": 28.5159,
+        "safe_weighted_median": 24.7469,
+        "risky_median": 25.7421,
+        "safe_rate_if_rule_true": 0.5004,
+        "lift": 1.1173
+      },
+      {
+        "feature": "value_traded",
+        "direction": ">=",
+        "threshold": 4949096700.0,
+        "safe_weighted_median": 13922191796.875,
+        "risky_median": 10320213000.0,
+        "safe_rate_if_rule_true": 0.4783,
+        "lift": 1.0679
+      },
+      {
+        "feature": "dist_to_20d_high_pct",
+        "direction": "<=",
+        "threshold": 13.6802,
+        "safe_weighted_median": 6.8331,
+        "risky_median": 8.7167,
+        "safe_rate_if_rule_true": 0.4745,
+        "lift": 1.0596
+      },
+      {
+        "feature": "vol_ratio_20",
+        "direction": ">=",
+        "threshold": 0.8011,
+        "safe_weighted_median": 1.3599,
+        "risky_median": 1.2164,
+        "safe_rate_if_rule_true": 0.4644,
+        "lift": 1.0369
+      },
+      {
+        "feature": "cmf20",
+        "direction": ">=",
+        "threshold": -0.1108,
+        "safe_weighted_median": -0.0241,
+        "risky_median": -0.0321,
+        "safe_rate_if_rule_true": 0.4556,
+        "lift": 1.0174
+      },
+      {
+        "feature": "close_pos_day",
+        "direction": ">=",
+        "threshold": 0.2258,
+        "safe_weighted_median": 0.5152,
+        "risky_median": 0.5,
+        "safe_rate_if_rule_true": 0.4334,
+        "lift": 0.9677
+      },
+      {
+        "feature": "range_10d_pct",
+        "direction": "between",
+        "threshold": [
+          10.9091,
+          36.1498
+        ],
+        "safe_weighted_median": 22.4818,
+        "risky_median": 21.5517,
+        "safe_rate_if_rule_true": 0.3857,
+        "lift": 0.8612
+      },
+      {
+        "feature": "rsi14",
+        "direction": "between",
+        "threshold": [
+          47.4073,
+          67.1268
+        ],
+        "safe_weighted_median": 59.2141,
+        "risky_median": 54.8752,
+        "safe_rate_if_rule_true": 0.3708,
+        "lift": 0.8279
+      }
+    ]
+  },
+  "start": "2026-07-15",
+  "positive_mode": "topn",
+  "top_gainers_per_day": 30,
+  "lead_days": 3,
+  "min_top_gainer_return_pct": 4.0,
+  "top_output": 30,
+  "post_break_risk_window": 3,
+  "safe_drawdown_pct": -6.0,
+  "future_window": 3,
+  "breakout_return_pct": 10.0,
+  "index_key": "ISSI",
+  "min_price": 55.0,
+  "min_value_traded": 1000000000.0,
+  "generated_from_tickers": 427
+}

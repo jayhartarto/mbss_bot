@@ -1,0 +1,543 @@
+1114:    /myportfolio brokersum harian).
+1115-    """
+1116-    if not force_rebuild and os.path.exists(ISSI_LIQUID_CACHE_FILE):
+1117-        try:
+1118-            with open(ISSI_LIQUID_CACHE_FILE) as f:
+1119-                cache = json.load(f)
+1120-            built_at = datetime.datetime.strptime(cache.get("built_at", ""), "%Y-%m-%d")
+1121-            age_days = (datetime.datetime.now(WIB).date() - built_at.date()).days
+1122-            if age_days < ISSI_WHITELIST_CACHE_DAYS:
+1123-                print(f"📋 Using cached ISSI liquid whitelist (dibangun {age_days} hari lalu, "
+1124-                      f"valid s/d {ISSI_WHITELIST_CACHE_DAYS} hari): {len(cache.get('eligible_tickers', []))} ticker")
+1125-                return cache.get("eligible_tickers", [])
+1126-        except Exception as e:
+1127-            print(f"⚠️ Failed to read ISSI liquid whitelist cache: {e}. Rebuilding.")
+1128-
+1129-    print("🔄 Building fresh ISSI liquid whitelist via Zapi bulk stock-summary "
+1130-          "(realistis ~14-16 panggilan, sekali per 2 minggu)...")
+1131-
+1132-    TARGET_TRADING_DAYS = 10
+1133-    MAX_CALENDAR_DAYS_BACK = 20  # pengaman kalau ada banyak libur beruntun
+1134-    per_ticker_days = {}  # StockCode -> {"close": last, "lows": [...], "highs": [...], "volumes": [...]}
+1135-    trading_days_collected = 0
+1136-    calendar_days_back = 0
+1137-    calls_made = 0
+1138-
+1139-    while trading_days_collected < TARGET_TRADING_DAYS and calendar_days_back < MAX_CALENDAR_DAYS_BACK:
+1140-        test_date = (datetime.datetime.now(WIB).date() - datetime.timedelta(days=calendar_days_back)).strftime("%Y%m%d")
+1141-        calendar_days_back += 1
+1142-        try:
+1143-            resp = requests.get(
+1144-                f"{ZAPI_BASE_URL}/finance:idx/stock-summary",
+1145-                params={"length": "1000", "start": "0", "date": test_date},
+1146-                headers=ZAPI_HEADERS, timeout=30,
+1147-            )
+1148-            data = resp.json()
+1149-            rows = data.get("data", {}).get("data", [])
+1150-            calls_made += 1
+1151-        except Exception as e:
+1152-            print(f"⚠️ Zapi bulk fetch gagal untuk {test_date}: {e}")
+1153-            continue
+1154-
+1155-        if not rows:
+1156-            continue  # hari libur/weekend, skip tanpa menghitung sebagai trading day
+1157-
+1158-        trading_days_collected += 1
+1159-        for row in rows:
+1160-            code = row.get("StockCode")
+1161-            if not code:
+1162-                continue
+1163-            entry = per_ticker_days.setdefault(code, {"close": None, "lows": [], "highs": [], "volumes": []})
+1164-            if entry["close"] is None:  # baris PERTAMA yang masuk untuk ticker ini = hari PALING BARU
+1165-                entry["close"] = row.get("Close")
+1166-            entry["lows"].append(row.get("Low", 0))
+1167-            entry["highs"].append(row.get("High", 0))
+1168-            entry["volumes"].append(row.get("Volume", 0))
+1169-
+1170-    print(f"📡 Terkumpul {trading_days_collected} hari bursa via {calls_made} panggilan Zapi")
+1171-
+1172-    sharia_full = set(fetch_online_sharia_list(index_key="ISSI"))
+1173-    eligible = []
+1174-    excluded = {}
+1175-    for code, days in per_ticker_days.items():
+1176-        if code not in sharia_full:
+1177-            continue  # bulk data mencakup SEMUA saham IDX, saring ke ISSI saja
+1178-        if days["close"] is None or len(days["volumes"]) < 5:
+1179-            continue  # data tidak cukup, kemungkinan baru IPO/delisting — skip
+1180-        is_eligible, reason = evaluate_liquid_eligibility_from_bulk(
+1181-            days["close"], days["lows"], days["highs"], days["volumes"]
+1182-        )
+1183-        if is_eligible is False:
+1184-            excluded[code] = reason
+1185-        else:
+1186-            eligible.append(code)
+1187-
+1188-    cache = {
+1189-        "built_at": datetime.datetime.now(WIB).strftime("%Y-%m-%d"),
+1190-        "eligible_tickers": eligible, "excluded_count": len(excluded), "calls_used": calls_made,
+1191-    }
+1192-    try:
+1193-        with open(ISSI_LIQUID_CACHE_FILE, "w") as f:
+1194-            json.dump(cache, f, indent=2)
+1195-    except Exception as e:
+1196-        print(f"⚠️ Failed to save ISSI liquid whitelist cache: {e}")
+1197-
+1198-    print(f"✅ ISSI liquid whitelist built: {len(eligible)} eligible (dari {len(sharia_full)} total ISSI), "
+1199-          f"{len(excluded)} tersingkir (harga/frozen/volume rendah), {calls_made} panggilan Zapi terpakai")
+1200-    return eligible
+1201-
+1202-
+1203-
+1204-    """
+1205-    Lightweight structural eligibility check via the SINGULAR endpoint (1 ticker/call).
+1206-    Kept for standalone use; the whitelist build itself now prefers the batch
+1207-    version below for efficiency. Returns (is_eligible, reason). is_eligible=None
+1208-    means "unknown/transient issue, include by default."
+1209-    """
+1210-    hist = get_ohlcv_smart(ticker, limit=15)
+1211-    if hist is None or hist.empty or len(hist) < 10:
+1212-        return None, "insufficient_data_at_check_time"
+1213-    return evaluate_eligibility_from_hist(hist["Close"].iloc[-1], hist["Low"], hist["High"])
+1214-
+1215-
+1216-def check_ticker_eligibility(ticker):
+1217-    """
+1218-    Lightweight structural eligibility check via the SINGULAR endpoint (1 ticker/call).
+1219-    Kept for standalone use; the whitelist build itself now prefers the batch
+1220-    version below for efficiency. Returns (is_eligible, reason). is_eligible=None
+1221-    means "unknown/transient issue, include by default."
+1222-    """
+1223-    hist = get_ohlcv_smart(ticker, limit=15)
+1224-    if hist is None or hist.empty or len(hist) < 10:
+1225-        return None, "insufficient_data_at_check_time"
+1226-    return evaluate_eligibility_from_hist(hist["Close"].iloc[-1], hist["Low"], hist["High"])
+1227-
+1228-
+1229-ITICK_BATCH_SIZE = 3  # confirmed working free-tier limit for region=ID (per iTick support)
+1230-
+1231-# ==========================================
+1232-# 💹 INDEX ALPHA API — real foreign/domestic broker flow (opt-in, budget-limited)
+1233-# ==========================================
+1234-# Confirmed via direct testing: real, accurate data (matched TLKM's independently
+1235-# verified July 17 rally), and date ranges genuinely aggregate across multiple
+1236-# trading days (confirmed via ANTM buy/sell value symmetry and realistic magnitude
+1237-# for a full week). Free tier: 150 requests/month. This is intentionally NEVER
+1238:# called from the daily bulk scan — only from the opt-in /myportfolio brokersum
+1239-# command, scoped to holdings + watchlist (max ~9 tickers), since this is real,
+1240-# budget-limited cost that should only be spent where capital is actually at stake.
+1241-INDEXALPHA_API_TOKEN = os.environ.get("INDEXALPHA_API_TOKEN", "")
+1242-INDEXALPHA_HEADERS = {"accept": "application/json", "Authorization": f"Bearer {INDEXALPHA_API_TOKEN}"}
+1243-INDEXALPHA_BASE_URL = "https://api.indexalpha.id"
+1244-BROKERSUM_LOOKBACK_DAYS = 7  # trading-day window for the aggregated multi-day view
+1245:BROKERSUM_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brokersum_cache.json")
+1246:BROKERSUM_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brokersum_history.json")
+1247-BROKERSUM_HISTORY_MAX_ENTRIES_PER_TICKER = 60  # ~3 bulan pemakaian rutin, cukup untuk analisis tren tanpa file membengkak
+1248-
+1249-# In-memory state: which ticker was just /check'd, waiting for an optional Broker
+1250-# Sum screenshot. Ephemeral (lost on restart) is fine — this is a short-lived,
+1251-# per-session UI flow, not data worth persisting. {chat_id: {"ticker": str, "expires_at": datetime}}
+1252-PENDING_BROKERSUM_CHECKS = {}
+1253-PENDING_BROKERSUM_TIMEOUT_MINUTES = 5
+1254-
+1255-
+1256-def fetch_broker_summary_raw(ticker: str, from_date: str, to_date: str, investor: str = "all"):
+1257-    """
+1258-    Raw fetch from Index Alpha's broker-summary endpoint. Returns the list of
+1259-    per-broker records, or None on failure. investor: 'all', 'f' (foreign), 'd'
+1260-    (domestic), 'or'.
+1261-
+1262-    Paces every call with a fixed delay AFTER it (not just relying on the 150/month
+1263-    budget) — the free tier also has a separate 10 requests/minute cap that was
+1264:    missed initially, causing every call in a multi-ticker /myportfolio brokersum
+1265-    run to fail with a rate-limit rejection (success:False, error:None) once more
+1266-    than ~10 requests fired in quick succession.
+1267-    """
+1268-    try:
+1269-        resp = requests.get(
+1270-            f"{INDEXALPHA_BASE_URL}/stocks/broker-summary",
+1271-            params={"ticker": ticker, "from": from_date, "to": to_date, "investor": investor},
+1272-            headers=INDEXALPHA_HEADERS,
+1273-            timeout=20,
+1274-        )
+1275-        data = resp.json()
+1276-        if not data.get("success"):
+1277-            print(f"⚠️ Index Alpha error for {ticker} ({investor}): {data.get('error')}")
+1278-            return None
+1279-        return data.get("data", [])
+1280-    except Exception as e:
+1281-        print(f"⚠️ Index Alpha fetch failed for {ticker} ({investor}): {e}")
+1282-        return None
+1283-    finally:
+1284-        # ~8.5 req/min, safely under the confirmed 10/min free-tier cap, applied
+1285-        # regardless of success/failure so pacing holds even after an error.
+1286-        time.sleep(7)
+1287-
+1288-
+1289-# ===========================================================================
+1290-# 📦 SQLITE OHLCV LAYER
+1291-# Menyimpan data harian iTick + 4H Yahoo Finance secara lokal — supaya
+1292-# saham yang sama tidak perlu di-fetch ulang tiap panggilan. Alur:
+1293-#   - Initial populate: yfinance batch (sekali jalan, dapat 2 tahun histori)
+1294-#   - Update harian: iTick delta (cuma 2-3 bar baru per ticker, bukan 500)
+1295-#   - 4H: Yahoo Finance native (2 bar/hari, untuk high conviction check)
+1296-# ===========================================================================
+1297-
+1298-def init_ohlcv_db():
+1299-    """Buat tabel kalau belum ada — idempotent, aman dipanggil berulang."""
+1300-    conn = sqlite3.connect(OHLCV_DB_FILE)
+1301-    conn.execute("""
+1302-        CREATE TABLE IF NOT EXISTS ohlcv_daily (
+1303-            ticker TEXT NOT NULL,
+1304-            date TEXT NOT NULL,
+1305-            open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+1306-            PRIMARY KEY (ticker, date)
+1307-        )
+1308-    """)
+1309-    conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_ticker_date ON ohlcv_daily(ticker, date)")
+1310-    conn.execute("""
+1311-        CREATE TABLE IF NOT EXISTS ohlcv_4h (
+1312-            ticker TEXT NOT NULL,
+1313-            datetime TEXT NOT NULL,
+1314-            open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+1315-            PRIMARY KEY (ticker, datetime)
+1316-        )
+1317-    """)
+1318-    conn.execute("CREATE INDEX IF NOT EXISTS idx_4h_ticker_dt ON ohlcv_4h(ticker, datetime)")
+1319-    conn.execute("""
+1320-        CREATE TABLE IF NOT EXISTS db_metadata (
+1321-            key TEXT PRIMARY KEY,
+1322-            value TEXT,
+1323-            updated_at TEXT
+1324-        )
+1325-    """)
+1326-    conn.commit()
+1327-    conn.close()
+1328-
+1329-
+1330-def upsert_ohlcv_daily(ticker: str, df: pd.DataFrame):
+1331-    """Simpan/update bar harian ke SQLite — INSERT OR REPLACE (upsert)."""
+1332-    if df is None or df.empty:
+1333-        return
+1334-    conn = sqlite3.connect(OHLCV_DB_FILE)
+1335-    rows = [
+1336-        (ticker, str(idx.date() if hasattr(idx, 'date') else idx),
+1337-         row.get("Open"), row.get("High"), row.get("Low"), row.get("Close"), row.get("Volume"))
+1338-        for idx, row in df.iterrows()
+1339-    ]
+1340-    conn.executemany(
+1341-        "INSERT OR REPLACE INTO ohlcv_daily(ticker, date, open, high, low, close, volume) VALUES(?,?,?,?,?,?,?)",
+1342-        rows
+1343-    )
+1344-    conn.commit()
+1345-    conn.close()
+1346-
+1347-
+1348-def get_ohlcv_daily_from_db(ticker: str, limit: int = 500) -> pd.DataFrame:
+1349-    """Ambil bar harian dari SQLite, diurutkan ascending (lama ke baru)."""
+1350-    conn = sqlite3.connect(OHLCV_DB_FILE)
+1351-    rows = conn.execute(
+1352-        "SELECT date, open, high, low, close, volume FROM ohlcv_daily "
+1353-        "WHERE ticker=? ORDER BY date DESC LIMIT ?",
+1354-        (ticker, limit)
+1355-    ).fetchall()
+1356-    conn.close()
+1357-    if not rows:
+1358-        return pd.DataFrame()
+1359-    df = pd.DataFrame(rows, columns=["date","Open","High","Low","Close","Volume"])
+1360-    df["date"] = pd.to_datetime(df["date"])
+1361-    df = df.set_index("date").sort_index()
+1362-    return df
+1363-
+1364-
+1365-def get_latest_daily_date_in_db(ticker: str) -> str | None:
+1366-    """Return tanggal bar terbaru untuk ticker ini di DB, atau None kalau kosong."""
+1367-    conn = sqlite3.connect(OHLCV_DB_FILE)
+1368-    row = conn.execute(
+1369-        "SELECT MAX(date) FROM ohlcv_daily WHERE ticker=?", (ticker,)
+1370-    ).fetchone()
+1371-    conn.close()
+1372-    return row[0] if row and row[0] else None
+1373-
+6172:async def handle_brokersum_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+6173-    chat_id = update.effective_chat.id
+6174-    pending = PENDING_BROKERSUM_CHECKS.get(chat_id)
+6175-
+6176-    if not pending:
+6177:        # No recent /check waiting for a photo — don't guess which ticker this is for.
+6178-        return
+6179-    if datetime.datetime.now(WIB) > pending["expires_at"]:
+6180-        PENDING_BROKERSUM_CHECKS.pop(chat_id, None)
+6181-        await safe_reply(update.message, "⏱️ Waktu untuk kirim screenshot sudah lewat. Jalankan /check lagi kalau masih ingin menambahkan.")
+6182-        return
+6183-
+6184-    ticker = pending["ticker"]
+6185-    PENDING_BROKERSUM_CHECKS.pop(chat_id, None)  # consume the pending state either way
+6186-
+6187-    await safe_reply(update.message, f"🔍 Membaca screenshot untuk {ticker}...")
+6188-
+6189-    try:
+6190:        photo = update.message.photo[-1]  # highest resolution available
+6191:        photo_file = await context.bot.get_file(photo.file_id)
+6192:        image_bytes = await photo_file.download_as_bytearray()
+6193-
+6194-        extracted = await asyncio.to_thread(
+6195-            extract_brokersum_from_screenshot, bytes(image_bytes), "image/jpeg", ticker
+6196-        )
+6197-    except Exception as e:
+6198-        await safe_reply(update.message, f"⚠️ Gagal memproses gambar: {e}\nHasil /check {ticker} sebelumnya tidak berubah.")
+6199-        return
+6200-
+6201-    if not extracted.get("success"):
+6202-        reason = extracted.get("reason_if_failed", "tidak jelas")
+6203-        await safe_reply(
+6204-            update.message,
+6205-            f"⚠️ Tidak bisa membaca data Broker Sum dari gambar ini ({reason}).\n"
+6206-            f"Hasil /check {ticker} sebelumnya tidak berubah — silakan coba screenshot lain kalau mau."
+6207-        )
+6208-        return
+6209-
+6210-    brokersum = compute_brokersum_from_screenshot_data(extracted)
+6211-    if brokersum is None:
+6212-        await safe_reply(
+6213-            update.message,
+6214-            f"⚠️ Gemini menandai ekstraksi berhasil, tapi angka inti (buy/sell/net asing) "
+6215-            f"ternyata tidak terbaca sama sekali.\n"
+6216-            f"Hasil /check {ticker} sebelumnya tidak berubah — silakan coba screenshot lain kalau mau."
+6217-        )
+6218-        return
+6219-    await safe_reply(
+6220-        update.message,
+6221-        f"✅ Berhasil dibaca dari screenshot:\n"
+6222-        f"Net Foreign Flow: {brokersum['net_foreign_flow_pct']}% (Rp{brokersum['net_foreign_flow_idr']:,})\n"
+6223-        f"Konsentrasi: {brokersum['broker_concentration_pct']}%\n\n"
+6224-        f"Menerapkan ke analisis {ticker}..."
+6225-    )
+6226-
+6227-    try:
+6228-        scoring = await asyncio.wait_for(asyncio.to_thread(compute_factor_scoring, ticker), timeout=1800)
+6229-    except Exception as e:
+6230-        await safe_reply(update.message, f"⚠️ Gagal mengambil ulang data {ticker} untuk menerapkan brokersum: {e}")
+6231-        return
+6232-    if not scoring:
+6233-        await safe_reply(update.message, f"⚠️ Gagal mengambil ulang data {ticker}.")
+6234-        return
+6235-
+6236-    brokersum["proxy_agreement"] = "not_available"
+6237-    cmf = scoring.get("cmf")
+6238-    obv_divergence = scoring.get("obv_divergence")
+6239-    if cmf is not None and isinstance(cmf, (int, float)):
+6240-        proxy_bullish = cmf > 0
+6241-        real_bullish = brokersum["net_foreign_flow_pct"] > 0
+6242-        if obv_divergence == "bearish_divergence" and brokersum["net_foreign_flow_pct"] > 5:
+6243-            brokersum["proxy_agreement"] = "CONTRADICTION: proxy showed bearish OBV divergence but real foreign flow (screenshot) is net positive"
+6244-        elif obv_divergence == "bullish_divergence" and brokersum["net_foreign_flow_pct"] < -5:
+6245-            brokersum["proxy_agreement"] = "CONTRADICTION: proxy showed bullish OBV divergence but real foreign flow (screenshot) is net negative"
+6246-        elif proxy_bullish == real_bullish:
+6247-            brokersum["proxy_agreement"] = "confirms_proxy"
+6248-        else:
+6249-            brokersum["proxy_agreement"] = "diverges_from_proxy"
+6250-
+6251-    scoring["brokersum"] = brokersum
+6252-    apply_brokersum_adjustment(scoring, brokersum)
+6253-
+6254-    # Cache under the same trading-day-aware key Index Alpha uses, so this doesn't
+6255-    # get needlessly re-fetched from Index Alpha for the same ticker/day, and vice versa.
+6256-    brokersum["trend"] = compute_brokersum_trend(ticker, brokersum["net_foreign_flow_idr"])
+6257-    cache = _load_brokersum_cache()
+6258-    cache[ticker] = {"date": get_last_published_trading_day(), "data": brokersum}
+6259-    _save_brokersum_cache(cache)
+6260-    append_brokersum_history(ticker, brokersum)
+6261-
+6262-    analysis_text = ask_gemini_to_analyze([scoring], SINGLE_CHECK_INSTRUCTION)
+6263-    await safe_reply(update.message, analysis_text)
+6264-
+6265-
+6266-async def show_version(update: Update, context: ContextTypes.DEFAULT_TYPE):
+6267-    await safe_reply(
+6268-        update.message,
+6269-        f"📌 Scoring formula version: {SCORING_FORMULA_VERSION}\n\n"
+6270-        "Skor dari versi formula yang berbeda tidak bisa dibandingkan langsung — "
+6271-        "jika skor untuk saham yang sama terlihat berbeda antar hari, cek dulu apakah "
+6272-        "versi formulanya berubah sebelum menganggap itu ketidakkonsistenan data."
+6273-    )
+6274-
+6275-
+6276-GLOSSARY_TEXT = """📖 KAMUS ISTILAH BOT
+6277-
+6278-━━━ SKOR FAKTOR ━━━
+6279-Nilai (Value): valuasi saham — PE, PB, yield dividen. Tinggi = murah secara fundamental.
+6280-Momentum: arah & kekuatan tren harga — RSI, MACD, SMA, pola chart.
+6281-Sentimen: tekanan beli/jual dari volume — CMF, OBV, rasio volume.
+6282-Final: gabungan tertimbang dari ketiganya (30% Nilai, 40% Momentum, 30% Sentimen).
+6283-
+6284-━━━ INDIKATOR TEKNIKAL ━━━
+6285-RSI (Relative Strength Index): 0-100, mengukur jenuh beli/jual berdasarkan riwayat harga saham itu sendiri (adaptif). Sekitar 45-55 = netral sehat; mendekati 65-75+ = mulai jenuh beli.
+6286-MACD: indikator TIMING — beda dari RSI. RSI = "apakah harga sudah jenuh", MACD = "apakah momentum baru saja berbalik arah". Cross bullish/bearish = momentum baru berubah arah, sinyal timing yang lebih segar.
+6287-SMA50: rata-rata harga 50 hari — konteks tren menengah. "Di Bawah SMA50: True" = tren menengah masih lemah meski jangka pendek terlihat oke.
+6288-CMF (Chaikin Money Flow): -1 sampai +1. Apakah volume besar itu benar tekanan BELI (closing dekat harga tertinggi hari itu) atau tekanan JUAL (closing dekat terendah) — bukan cuma "volume tinggi = bagus".
+6289-OBV Divergence: membandingkan arah harga vs arah volume kumulatif. "bearish_divergence" = harga tenang/naik tapi volume sebenarnya menunjukkan distribusi diam-diam (jual). "bullish_divergence" = kebalikannya (akumulasi diam-diam).
+6290-Rentang 10 hari (day_range_pct_10d): seberapa jauh harga bergerak dalam 10 hari terakhir (tertinggi vs terendah). Rendah = harga "beku"/kurang aktif — TAPI ini bisa juga berarti ada akumulasi/distribusi diam-diam (lihat OBV Divergence), bukan otomatis berarti "tidak menarik".
+6291-Pola Chart (lower_highs_bearish): rangkaian puncak harga yang makin menurun — sinyal pelemahan meski indikator lain terlihat oke.
+6292-
+6293-━━━ DATA FUNDAMENTAL ━━━
+6294-PE (Price-to-Earnings): harga saham dibanding laba per saham. Rendah = relatif murah, TAPI PE sangat rendah (<3) bisa juga tanda laba tidak wajar/sementara.
+6295-PB (Price-to-Book): harga saham dibanding nilai buku aset. <1 = secara teori diperdagangkan di bawah nilai aset bersihnya.
+6296-Yield Dividen: dividen tahunan dibagi harga saham, dalam %. Makin tinggi = makin menarik untuk strategi dividend capture.
+6297-
+6298-━━━ DATA BROKER RIIL (Index Alpha, opt-in /myportfolio brokersum, maks 5 saham/hari) ━━━
+6299-Net Foreign Flow %: real net beli-jual ASING (bukan domestik — dibatasi jadi asing-saja karena limit keras 5x/hari), -100% sampai +100%. Ini DATA ASLI, bukan proksi seperti CMF/OBV.
+6300-Broker Concentration %: seberapa terkonsentrasi net-buy asing pada beberapa broker teratas. Tinggi (>25%) = sinyal lebih kuat (sedikit pemain besar bergerak) dibanding net-buy yang sama tapi tersebar di banyak broker.
+6301-Proxy Agreement: apakah data broker riil ini SESUAI atau BERTENTANGAN dengan CMF/OBV kita. "CONTRADICTION" = perlu perhatian ekstra, dua sumber data saling bertolak belakang.
+6302-Brokersum Adjusted: jika True, data riil ini SUDAH mengubah skor Sentimen & Final serta keputusan sistem (bukan cuma catatan tambahan) — hanya terjadi jika Broker Concentration cukup tinggi (≥10%) untuk dipercaya.
+6303-
+6304-━━━ KEPUTUSAN SISTEM (dihitung otomatis, bukan pilihan AI) ━━━
+6305-BELI KUAT: skor tinggi, tidak ada flag risiko.
+6306-BELI / AKUMULASI: skor cukup baik, ATAU skor tinggi tapi ada 1 flag caution (jadi diturunkan dari BELI KUAT).
+6307-TAHAN: skor sedang, ATAU ada flag serius (distress finansial/pola lower-highs) yang membatasi ke level ini.
+6308-HINDARI / JUAL: skor rendah.
+6309-SINYAL CAMPURAN: skor komponen (Nilai/Momentum/Sentimen) saling bertentangan tajam, ATAU skor berada tepat di garis batas ditambah flag caution — sengaja TIDAK memberi kepastian palsu saat data memang tidak jelas arahnya.
+6310-
+6311-━━━ FLAG LAINNYA ━━━
+6312-Overbought Caution: RSI mendekati area jenuh beli KHUSUS untuk saham ini (adaptif, bukan angka baku).
+6313-Distress: PE/PB negatif (laba/ekuitas negatif) — tanda masalah keuangan nyata.
+6314-Dekat Harga Dasar: harga di bawah ~Rp70, potensi saham "beku"/distressed (mis. WEGE, GIAA).
+6315-PE Tidak Wajar Rendah: PE di bawah ~3, mungkin laba tidak berulang, bukan murah sungguhan.
+6316-Lonjakan Volume: volume 3x+ normal — bisa jadi berita besar atau likuiditas tipis, bukan otomatis bullish.
+6317-
+6318-Ketik /check, /myportfolio, atau /testbrief untuk melihat istilah-istilah ini dalam analisis nyata."""
+6319-
+6320-
+6321-async def show_glossary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+6322-    await safe_reply(update.message, GLOSSARY_TEXT)
+6323-
+6324-
+6325-async def show_whitelist_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+6326-    if not os.path.exists(WHITELIST_CACHE_FILE):
+6327-        await safe_reply(update.message, "📋 Belum ada whitelist tersimpan — akan dibuat otomatis saat brief berikutnya jalan.")
+6328-        return
+6329-    try:
+6330-        with open(WHITELIST_CACHE_FILE) as f:
+6331-            cache = json.load(f)
+6332-        eligible = cache.get("eligible_tickers", [])
+6333-        excluded = cache.get("excluded_tickers", {})
+6334-        excluded_lines = "\n".join(f"- {t}: {r}" for t, r in list(excluded.items())[:20])
+6335-        await safe_reply(
+6336-            update.message,
+6337-            f"📋 Whitelist bulan {cache.get('generated_month')}:\n"
+6338-            f"Eligible: {len(eligible)} saham\n"
+6339-            f"Excluded: {len(excluded)} saham\n\n{excluded_lines}"
+6340-        )
+6341-    except Exception as e:
+6342-        await safe_reply(update.message, f"⚠️ Gagal membaca whitelist: {e}")
+6343-
+6344-
+6345-async def rebuild_whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+6346-    await safe_reply(update.message, "🔄 Membangun ulang whitelist bulanan, ini akan memakan waktu beberapa menit...")
+6347-    try:
+6348-        sharia_universe = await asyncio.to_thread(fetch_online_sharia_list)
+6349-        eligible = await asyncio.to_thread(load_or_build_whitelist, list(sharia_universe), True)
+6350-        await safe_reply(update.message, f"✅ Whitelist selesai dibangun ulang: {len(eligible)} saham eligible.")
+6351-    except Exception as e:
+6352-        await safe_reply(update.message, f"⚠️ Gagal membangun ulang whitelist: {e}")
+6353-
+6354-
+6355-STARTUP_DISCLAIMER = (
+6356-    "⚠️ CATATAN PENTING (ditampilkan sekali saat bot aktif):\n"
+6357-    "Semua analisis dari bot ini HANYA berdasarkan data harga, volume, dan rasio "
+6358-    "valuasi dasar. TIDAK termasuk data net buy/sell broker asing/lokal, dan TIDAK "
+6359-    "mencakup pengumuman resmi IDX secara menyeluruh (laporan keuangan formal, aksi "
+6360-    "korporasi) — hanya berita publik yang tersedia.\n\n"
+6361-    "Ini adalah alat bantu screening berbasis data, BUKAN saran keuangan profesional. "
+6362-    "Selalu lakukan verifikasi independen sebelum mengambil keputusan investasi.\n\n"
+6363-    "Catatan ini tidak akan diulang lagi di setiap pesan — cukup jadi pengingat bahwa "
+6364-    "bot sedang aktif."
+6365-)
+6366-
+6367-
+6368-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+6369-    await safe_reply(update.message, STARTUP_DISCLAIMER)
+6370-    await safe_reply(update.message, 
+6371-        "🤖 Sharia Stock Bot aktif.\n\n"
+6372-        "Perintah analisa:\n"
+--
+8695:    app.add_handler(MessageHandler(filters.PHOTO, handle_brokersum_photo))
+8696-    app.add_handler(CommandHandler("buy", buy_position))
+8697-    app.add_handler(CommandHandler("sell", sell_position))
+8698-    app.add_handler(CommandHandler("addcash", add_cash_command))
+8699-    app.add_handler(CommandHandler("withdrawcash", withdraw_cash_command))
+8700-    app.add_handler(CommandHandler("resetportfolio", reset_portfolio_command))
+8701-    app.add_handler(CommandHandler("watchlist", watchlist_command))
+8702-    app.add_handler(CommandHandler("setentrydate", set_entry_date_command))
+8703-    app.add_handler(CommandHandler("summary", portfolio_summary))
+8704-    app.add_handler(CommandHandler("order", order_command))
+8705-    app.add_handler(CommandHandler(["myportfolio", "portofolio"], my_portfolio))
+8706-    app.add_handler(CommandHandler("testbrief", test_morning_brief))
+8707-    app.add_handler(CommandHandler("screendaytrade", screen_daytrade))
+8708-    app.add_handler(CommandHandler("executiongate", executiongate_command))
+8709-    app.add_handler(CommandHandler("winrate", show_winrate))
+8710-
+8711-    async def db_stats_command(update, context):
+8712-        stats = get_db_stats()
+8713-        if not stats:
+8714-            await update.message.reply_text("📦 DB belum ada atau kosong. Jalankan /populatedb dulu.")
+8715-            return
+8716-        await update.message.reply_text(
+8717-            f"📦 OHLCV Database\n"
+8718-            f"Daily: {stats['daily_tickers']} ticker, {stats['daily_rows']:,} bar\n"
+8719-            f"4H: {stats['h4_tickers']} ticker\n"
+8720-            f"Ukuran: {stats['size_mb']} MB\n\n"
+8721-            f"Last update: {stats.get('last_ohlcv_update_at') or '-'}\n"
+8722-            f"Updated s/d: {stats.get('last_ohlcv_update_marker') or '-'}\n"
+8723-            f"Night scan: {stats.get('last_nightly_scan_at') or '-'}\n"
+8724-            f"Night marker: {stats.get('last_nightly_scan_marker') or '-'}"
+8725-        )
+8726-
+8727-    async def populate_db_command(update, context):
+8728-        """
+8729-        Populate DB dari yfinance — ISSI saja, deduplicate.
+8730-        ISSI bisa ratusan ticker, proses bisa 10-20 menit — bot tetap bisa digunakan
+8731-        selama proses berlangsung karena dijalankan di background thread.
+8732-        """
+8733-        await update.message.reply_text(
+8734-            "📥 Memulai populate DB dari yfinance (ISSI, 2 tahun histori)...\n"
+8735-            "Proses bisa 10-20 menit. Bot tetap bisa digunakan selama ini."
+8736-        )
+8737-        try:
+8738-            issi = set(fetch_online_sharia_list(index_key="ISSI"))
+8739-            all_tickers = list(issi)
+8740-            await update.message.reply_text(
+8741-                f"📋 Total: {len(all_tickers)} ticker ISSI unik"
+8742-            )
+8743-            stats_payload = await asyncio.to_thread(populate_from_yfinance, all_tickers, "2y", 50)
+8744-            stats = get_db_stats()
+8745-            msg = (
+8746-                f"✅ DB berhasil dipopulate!\n"
+8747-                f"{stats.get('daily_tickers', 0)} ticker, {stats.get('daily_rows', 0):,} bar, "
+8748-                f"{stats.get('size_mb', 0)} MB\n"
+8749-                f"Updated s/d: {stats.get('last_ohlcv_update_marker') or stats_payload.get('latest_marker') or '-'}"
+8750-            )
+8751-            await update.message.reply_text(msg)
+8752-            try:
+8753-                await context.bot.send_message(
+8754-                    chat_id=TELEGRAM_CHAT_ID,
+8755-                    text=(
+8756-                        f"✅ DB update sukses\n"
+8757-                        f"Universe: ISSI\n"
+8758-                        f"Ticker: {stats_payload.get('tickers', len(all_tickers))}\n"
+8759-                        f"Updated s/d: {stats_payload.get('latest_marker') or stats.get('last_ohlcv_update_marker') or '-'}\n"
+8760-                        f"Rows written: {stats_payload.get('rows_written', 0):,}"
+8761-                    ),
+8762-                )
+8763-            except Exception as notify_error:
+8764-                print(f"⚠️ Gagal kirim notifikasi DB update: {notify_error}")
+8765-        except Exception as e:
+8766-            await update.message.reply_text(f"⚠️ Gagal populate DB: {e}")
+8767-
+8768-    app.add_handler(CommandHandler("dbstats", db_stats_command))
+8769-    app.add_handler(CommandHandler("dbstatus", db_stats_command))
+8770-    app.add_handler(CommandHandler("populatedb", populate_db_command))
+8771-    app.add_handler(CommandHandler("testopening", test_opening_dynamics))
+8772-    app.add_handler(CommandHandler("testopening", test_opening_dynamics))
+8773-    app.add_error_handler(global_error_handler)
+8774-
+8775-    # No automatic scheduling — hosted on a request-driven webhook (PythonAnywhere

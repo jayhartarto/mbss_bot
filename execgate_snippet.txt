@@ -1,0 +1,221 @@
+6877:async def executiongate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+6878-    status = get_executiongate_session_status()
+6879-    if not status["allowed"]:
+6880-        await safe_reply(update.message, f"⛔ /executiongate hanya aktif saat market live atau break siang. Status sekarang: {status['label']}.")
+6881-        return
+6882-
+6883-    await safe_reply(update.message, f"🧭 Execution Gate berjalan ({status['label']}). Mengambil 12 autopick screendaytrade + 8 top gainer 30 menit pertama...")
+6884-
+6885-    try:
+6886-        sharia_universe = list(fetch_online_sharia_list())
+6887-        wl = await asyncio.to_thread(load_or_build_whitelist, sharia_universe)
+6888-        autopicks = await asyncio.wait_for(asyncio.to_thread(get_executiongate_screendaytrade_autopicks, EXECUTION_GATE_AUTOPICKS), timeout=1800)
+6889-        for r in autopicks:
+6890-            r["executiongate_source"] = "screendaytrade"
+6891-        topg = await asyncio.wait_for(asyncio.to_thread(fetch_first30_top_gainers, wl, EXECUTION_GATE_TOP_GAINERS), timeout=1800)
+6892-
+6893-        scored_by_ticker = {r.get("ticker"): r for r in autopicks if r.get("ticker")}
+6894-        watch = list(scored_by_ticker.values())
+6895-        for tg in topg:
+6896-            t = tg.get("ticker")
+6897-            if not t or t in scored_by_ticker:
+6898-                continue
+6899-            base = compute_factor_scoring(t, include_quote_check=False)
+6900-            if not base:
+6901-                continue
+6902-            base["executiongate_source"] = f"top30m +{tg.get('first30_change_pct')}%"
+6903-            base["first30_change_pct"] = tg.get("first30_change_pct")
+6904-            watch.append(base)
+6905-            if len(watch) >= EXECUTION_GATE_MAX_WATCHLIST:
+6906-                break
+6907-
+6908-        evaluated = await asyncio.wait_for(asyncio.to_thread(evaluate_executiongate_watchlist, watch[:EXECUTION_GATE_MAX_WATCHLIST]), timeout=1800)
+6909-    except asyncio.TimeoutError:
+6910-        await safe_reply(update.message, "⏱️ Execution Gate timeout. Coba ulang beberapa menit lagi atau pastikan cache screendaytrade sudah tersedia.")
+6911-        return
+6912-    except Exception as e:
+6913-        await safe_reply(update.message, f"⚠️ Execution Gate gagal: {str(e)[:200]}")
+6914-        return
+6915-
+6916-    lines = [f"🧭 EXECUTION GATE — {status['label']}\n"]
+6917-    lines.append("ENTER sangat ketat: harga harus sehat vs VWAP, active breakout valid, vol pace hidup, risk/RR tidak buruk.\n")
+6918-    shown = 0
+6919-    for r in evaluated[:EXECUTION_GATE_MAX_WATCHLIST]:
+6920-        shown += 1
+6921-        icon = "🟢" if r["decision"] == "ENTER" else ("🟡" if r["decision"] == "WATCH" else "🔴")
+6922-        vp = r.get("vol_pace") if r.get("vol_pace") is not None else "-"
+6923-        lines.append(
+6924-            f"{shown}. {icon} {r['ticker']} — {r['decision']} ({r.get('gate_score',0)}/100) [{r.get('source','?')}]\n"
+6925-            f"   Breakout {r.get('breakout_score',0)}/100 | Risk {r.get('risk_score',0)}/100 | Active {r.get('active_score',0)}/100 {r.get('active_label','')}\n"
+6926-            f"   Harga {smart_round_price(r.get('price',0))} | VWAP dist {r.get('vwap_dist','-')}% | Vol pace {vp}x | Trigger {r.get('trigger') or '-'}\n"
+6927-            f"   Aksi: {r.get('action','-')} | Alasan: {', '.join(r.get('reasons',[])[:4])}\n"
+6928-        )
+6929-    lines.append("\nRule: ENTER boleh dipertimbangkan; WATCH tunggu /check membaik; FAIL no entry.")
+6930-    await send_long_message(update.message, "\n".join(lines))
+6931-
+6932-DAYTRADE_FINAL_PICKS_COUNT = 12  # executiongate needs wider radar: 12 screendaytrade autopicks
+6933-DAYTRADE_MIN_RR_FOR_PRIORITY = 1.0  # RR@max minimal dianggap "sehat" untuk prioritas kandidat
+6934-
+6935-
+6936-def filter_and_rank_daytrade_candidates(results, count=DAYTRADE_FINAL_PICKS_COUNT):
+6937-    """
+6938-    Filter + ranking day trade — fallback bertingkat supaya tidak pernah kosong,
+6939-    tapi tetap transparan kriteria mana yang dipakai.
+6940-
+6941-    Prioritas (tier tertinggi yang punya >= count kandidat yang dipakai):
+6942-    - Tier 1a: HIGH CONVICTION + BUY/STRONG_BUY + RR >= 1.0 (ideal sempurna)
+6943-    - Tier 1b: BUY/STRONG_BUY + RR >= 1.0 (tanpa high conviction)
+6944-    - Tier 2:  BUY/STRONG_BUY saja (RR bervariasi)
+6945-    - Tier 3:  fallback semua (termasuk MIXED_SIGNALS)
+6946-    """
+6947-    BUY_ACTIONS = ("STRONG_BUY", "BUY_ACCUMULATE")
+6948-
+6949-    def has_rr(r):
+6950-        rr = r.get("targets", {}).get("risk_reward_at_max")
+6951-        return rr is not None and rr >= DAYTRADE_MIN_RR_FOR_PRIORITY
+6952-
+6953-    def is_high_conviction(r):
+6954-        return r.get("high_conviction", {}).get("is_high_conviction", False)
+6955-
+6956-    tier1a = [r for r in results if r.get("action_id") in BUY_ACTIONS and has_rr(r) and is_high_conviction(r)]
+6957-    if len(tier1a) >= count:
+6958-        ranked = sorted(tier1a, key=compute_daytrade_score, reverse=True)
+6959-        return ranked[:count], "🔥 High Conviction + beli/akumulasi + RR sehat"
+6960-
+6961-    tier1b = [r for r in results if r.get("action_id") in BUY_ACTIONS and has_rr(r)]
+6962-    if len(tier1b) >= count:
+6963-        ranked = sorted(tier1b, key=compute_daytrade_score, reverse=True)
+6964-        return ranked[:count], "sinyal beli/akumulasi + RR sehat (kandidat high conviction kurang dari cukup hari ini)"
+6965-
+6966-    tier2 = [r for r in results if r.get("action_id") in BUY_ACTIONS]
+6967-    if len(tier2) >= count:
+6968-        ranked = sorted(tier2, key=compute_daytrade_score, reverse=True)
+6969-        return ranked[:count], "sinyal beli/akumulasi (RR bervariasi)"
+6970-
+6971-    ranked = sorted(results, key=compute_daytrade_score, reverse=True)
+6972-    return ranked[:count], "⚠️ sinyal beli/akumulasi terbatas hari ini, termasuk sinyal campuran"
+6973-
+6974-
+6975-def _v5_float(x, default=0.0):
+6976-    try:
+6977-        if x is None or x == "N/A": return default
+6978-        return float(x)
+6979-    except Exception:
+6980-        return default
+6981-
+6982-
+6983-def compute_entry_room_score_v5(scoring: dict) -> dict:
+6984-    """Score whether there is still a healthy entry room instead of chasing near high/TP."""
+6985-    price = _v5_float(scoring.get("price"), 0)
+6986-    high = _v5_float(scoring.get("intraday_high"), 0) or price
+6987-    low = _v5_float(scoring.get("intraday_low"), 0) or price
+6988-    rr = _v5_float((scoring.get("targets") or {}).get("risk_reward_at_max"), 0)
+6989-    tp1 = _v5_float((scoring.get("targets") or {}).get("tp_1"), 0)
+6990-    rsi = _v5_float(scoring.get("rsi"), 0)
+6991-    cmf = _v5_float(scoring.get("cmf"), 0)
+6992-    vol_ratio = _v5_float(scoring.get("vol_ratio"), 0)
+6993-    range10 = _v5_float(scoring.get("day_range_pct_10d"), 0)
+6994-    dist_high_pct = ((high - price) / max(price, 1e-9) * 100) if high and price else 0
+6995-    upside_tp1_pct = ((tp1 - price) / max(price, 1e-9) * 100) if tp1 and price else 0
+6996-    close_pos = ((price - low) / max(high - low, 1e-9)) if high and low and high > low else 0.5
+6997-
+6998-    score = 50
+6999-    reasons = []
+7000-    if rr >= 1.0: score += 18; reasons.append("RR sehat")
+7001-    elif rr >= 0.8: score += 12; reasons.append("RR cukup")
+7002-    elif rr >= 0.6: score += 4; reasons.append("RR tipis")
+7003-    elif rr > 0: score -= 15; reasons.append("RR entry atas buruk")
+7004-
+7005-    if upside_tp1_pct >= 6: score += 14; reasons.append("ruang ke TP1 cukup")
+7006-    elif upside_tp1_pct >= 4: score += 8; reasons.append("ruang ke TP1 sedang")
+7007-    elif upside_tp1_pct > 0: score -= 8; reasons.append("TP1 terlalu dekat")
+7008-
+7009-    if 1.0 <= dist_high_pct <= 3.5: score += 12; reasons.append("belum terlalu dekat high")
+7010-    elif 0.3 <= dist_high_pct < 1.0: score += 3; reasons.append("dekat high")
+7011-    elif dist_high_pct < 0.3 and close_pos > 0.85: score -= 10; reasons.append("rawan chase dekat high")
+7012-    elif dist_high_pct > 5.0: score -= 4; reasons.append("masih jauh dari high, tunggu trigger")
+7013-
+7014-    if rsi >= 82: score -= 15; reasons.append("RSI overheat")
+7015-    elif rsi >= 75: score -= 7; reasons.append("RSI panas")
+7016-    if cmf < -0.10: score -= 10; reasons.append("CMF negatif")
+7017-    elif cmf >= 0.10: score += 5; reasons.append("CMF positif")
+7018-    if range10 > 40: score -= 6; reasons.append("range sangat liar")
+7019-    if vol_ratio < 0.7: score -= 8; reasons.append("volume belum hidup")
+7020-
+7021-    score = int(max(0, min(100, score)))
+7022-    if score >= 70: label = "ROOM BAGUS"
+7023-    elif score >= 55: label = "ROOM CUKUP"
+7024-    elif score >= 40: label = "ROOM SEMPIT"
+7025-    else: label = "CHASE RISK"
+7026-    return {"score": score, "label": label, "dist_high_pct": round(dist_high_pct, 2), "upside_tp1_pct": round(upside_tp1_pct, 2), "reasons": reasons[:4]}
+7027-
+7028-
+7029-def compute_continuation_chance_v5(scoring: dict) -> dict:
+7030-    """Next-day breakout continuation chance for stocks that already moved/broke out."""
+7031-    breakout = _score_breakout_chance_v4(scoring)
+7032-    risk = _score_breakout_drop_risk_v4(scoring)
+7033-    price = _v5_float(scoring.get("price"), 0)
+7034-    high = _v5_float(scoring.get("intraday_high"), 0) or price
+7035-    low = _v5_float(scoring.get("intraday_low"), 0) or price
+7036-    close_pos = ((price - low) / max(high - low, 1e-9)) if high and low and high > low else 0.5
+7037-    vol_ratio = _v5_float(scoring.get("vol_ratio"), 0)
+7038-    cmf = _v5_float(scoring.get("cmf"), 0)
+7039-    adx = _v5_float(scoring.get("adx"), 0)
+7040-    rsi = _v5_float(scoring.get("rsi"), 0)
+7041-    rs = _v5_float(scoring.get("relative_strength_vs_ihsg"), 0)
+7042-    macd_ok = scoring.get("macd_state") == "bullish" or scoring.get("macd_cross_direction") == "bullish"
+7043-    ret1 = _v5_float(scoring.get("ret_1d_pct"), 0)
+7044-
+7045-    score = 0
+7046-    reasons = []
+7047-    if close_pos >= 0.75: score += 18; reasons.append("close dekat high")
+7048-    elif close_pos >= 0.50: score += 10; reasons.append("close cukup kuat")
+7049-    else: score -= 8; reasons.append("close kurang kuat")
+7050-    if vol_ratio >= 1.5: score += 16; reasons.append("volume confirm")
+7051-    elif vol_ratio >= 1.0: score += 9; reasons.append("volume cukup")
+7052-    if cmf >= 0.10: score += 14; reasons.append("CMF akumulasi")
+7053-    elif cmf >= -0.05: score += 6
+7054-    else: score -= 10; reasons.append("CMF negatif")
+7055-    if macd_ok: score += 10; reasons.append("MACD bullish")
+7056-    if adx >= 25: score += 10; reasons.append("trend kuat")
+7057-    elif adx >= 20: score += 5
+7058-    if rs >= 2: score += 8; reasons.append("RS unggul")
+7059-    elif rs < -1: score -= 6; reasons.append("RS lemah")
+7060-    score += int(breakout["score"] * 0.12)
+7061-    score += int(risk["score"] * 0.10)
+7062-    if rsi >= 83: score -= 12; reasons.append("RSI overheat")
+7063-    if ret1 >= 10: score -= 8; reasons.append("sudah naik tinggi")
+7064-    score = int(max(0, min(100, score)))
+7065-    if score >= 70: label = "LANJUT KUAT"
+7066-    elif score >= 55: label = "LANJUT MUNGKIN"
+7067-    elif score >= 40: label = "BUTUH VALIDASI"
+7068-    else: label = "RAWAN FADE"
+7069-    return {"score": score, "label": label, "close_pos": round(close_pos, 2), "reasons": reasons[:4]}
+7070-
+7071-
+7072-def compute_activity_score_v5(scoring: dict) -> dict:
+7073-    """Liquidity/activity score so /screendaytrade avoids quiet stocks for daytrade."""
+7074-    price = _v5_float(scoring.get("price"), 0)
+7075-    value_traded = _v5_float(scoring.get("value_traded"), 0)
+7076-    if value_traded <= 0:
+7077-        # fallback if value_traded was not stored
+7078-        vol = _v5_float(scoring.get("volume"), 0)
+7079-        value_traded = price * vol
+7080-    vol_ratio = _v5_float(scoring.get("vol_ratio"), 0)
+7081-    range10 = _v5_float(scoring.get("day_range_pct_10d"), 0)
+7082-    intraday_range = _v5_float(scoring.get("intraday_range_pct"), 0)
+7083-    ret1 = _v5_float(scoring.get("ret_1d_pct"), 0)
+7084-    reasons = []
+7085-    score = 0
+7086-
+7087-    # Value traded is the most important proxy because yfinance does not provide IDX orderbook/frequency.
+7088-    if value_traded >= 100_000_000_000:
+7089-        score += 45; reasons.append("value sangat besar")
+7090-    elif value_traded >= 25_000_000_000:
+7091-        score += 38; reasons.append("value besar")
+7092-    elif value_traded >= 10_000_000_000:
+7093-        score += 30; reasons.append("value aktif")
+7094-    elif value_traded >= 5_000_000_000:
+7095-        score += 22; reasons.append("value cukup")
+7096-    elif value_traded >= 3_000_000_000:
+7097-        score += 14; reasons.append("value minimum")

@@ -1,0 +1,19 @@
+{
+  "trading_day_marker": "2026-07-31",
+  "formula_version": "3.14.12",
+  "scored": {
+    "AALI": {
+      "ticker": "AALI",
+      "name": "PT Astra Agro Lestari Tbk",
+      "sector": "Consumer Defensive",
+      "price": 6875,
+      "as_of_date": "2026-07-31",
+      "data_freshness_warning": null,
+      "intraday_high": null,
+      "intraday_low": null,
+      "pe": 7.1,
+      "pb": 0.6,
+      "is_unusually_low_pe": false,
+      "dividend_yield_pct": 6.66,
+      "is_financial_distress_flag": false,
+      "is_near_price_floor": 

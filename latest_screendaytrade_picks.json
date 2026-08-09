@@ -1,0 +1,113 @@
+{
+  "picks": [
+    {
+      "ticker": "TMPO",
+      "positive_bias_score": 82.5,
+      "positive_lane": "PRIORITY FRESH",
+      "fresh_score": 76.5,
+      "continuation_lane_score": 72.5,
+      "price": 149,
+      "saved_at": "2026-08-07T20:06:38.229195+07:00"
+    },
+    {
+      "ticker": "BULL",
+      "positive_bias_score": 73.7,
+      "positive_lane": "EXTENDED / CHASE WATCH",
+      "fresh_score": 73.6,
+      "continuation_lane_score": 77.7,
+      "price": 456,
+      "saved_at": "2026-08-07T20:06:38.229220+07:00"
+    },
+    {
+      "ticker": "JKON",
+      "positive_bias_score": 65.3,
+      "positive_lane": "LOW EDGE / CHASE",
+      "fresh_score": 64.1,
+      "continuation_lane_score": 73.3,
+      "price": 90,
+      "saved_at": "2026-08-07T20:06:38.229227+07:00"
+    },
+    {
+      "ticker": "MCAS",
+      "positive_bias_score": 64.0,
+      "positive_lane": "SECONDARY WATCH",
+      "fresh_score": 66.5,
+      "continuation_lane_score": 74.0,
+      "price": 296,
+      "saved_at": "2026-08-07T20:06:38.229232+07:00"
+    },
+    {
+      "ticker": "DSSA",
+      "positive_bias_score": 62.7,
+      "positive_lane": "SECONDARY WATCH",
+      "fresh_score": 72.7,
+      "continuation_lane_score": 66.6,
+      "price": 975,
+      "saved_at": "2026-08-07T20:06:38.229237+07:00"
+    },
+    {
+      "ticker": "HRTA",
+      "positive_bias_score": 62.7,
+      "positive_lane": "LOW EDGE / CHASE",
+      "fresh_score": 70.7,
+      "continuation_lane_score": 69.2,
+      "price": 2150,
+      "saved_at": "2026-08-07T20:06:38.229242+07:00"
+    },
+    {
+      "ticker": "ISAT",
+      "positive_bias_score": 62.5,
+      "positive_lane": "SECONDARY WATCH",
+      "fresh_score": 70.8,
+      "continuation_lane_score": 72.5,
+      "price": 2170,
+      "saved_at": "2026-08-07T20:06:38.229248+07:00"
+    },
+    {
+      "ticker": "ICBP",
+      "positive_bias_score": 61.2,
+      "positive_lane": "LOW EDGE / CHASE",
+      "fresh_score": 68.9,
+      "continuation_lane_score": 79.2,
+      "price": 7750,
+      "saved_at": "2026-08-07T20:06:38.229252+07:00"
+    },
+    {
+      "ticker": "BKSL",
+      "positive_bias_score": 60.0,
+      "positive_lane": "SECONDARY WATCH",
+      "fresh_score": 67.5,
+      "continuation_lane_score": 70.0,
+      "price": 76,
+      "saved_at": "2026-08-07T20:06:38.229256+07:00"
+    },
+    {
+      "ticker": "MAPI",
+      "positive_bias_score": 57.0,
+      "positive_lane": "SECONDARY WATCH",
+      "fresh_score": 67.0,
+      "continuation_lane_score": 61.0,
+      "price": 1605,
+      "saved_at": "2026-08-07T20:06:38.229261+07:00"
+    },
+    {
+      "ticker": "ANTM",
+      "positive_bias_score": 56.8,
+      "positive_lane": "LOW EDGE / CHASE",
+      "fresh_score": 62.6,
+      "continuation_lane_score": 64.8,
+      "price": 3160,
+      "saved_at": "2026-08-07T20:06:38.229335+07:00"
+    },
+    {
+      "ticker": "TOTL",
+      "positive_bias_score": 54.0,
+      "positive_lane": "LOW EDGE / CHASE",
+      "fresh_score": 67.0,
+      "continuation_lane_score": 72.0,
+      "price": 1300,
+      "saved_at": "2026-08-07T20:06:38.229343+07:00"
+    }
+  ],
+  "saved_at": "2026-08-07T20:06:38.230149+07:00"
+}

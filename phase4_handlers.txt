@@ -1,0 +1,245 @@
+372:from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
+373-from telegram.request import HTTPXRequest
+374-import base64
+375-# google-genai SDK diganti REST API langsung (tidak butuh cryptography/cffi)
+376-GEMINI_REST_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+377-GEMINI_MODEL    = "gemini-3.1-flash-lite"
+378-
+379-def _gemini_rest(contents: list, system_instruction: str = None, model: str = None, timeout: int = 60) -> str:
+380-    url  = GEMINI_REST_URL.format(model=model or GEMINI_MODEL)
+381-    body = {"contents": contents}
+382-    if system_instruction:
+383-        body["system_instruction"] = {"parts": [{"text": system_instruction}]}
+384-    resp = requests.post(url, params={"key": GEMINI_API_KEY}, json=body, timeout=timeout)
+385-    resp.raise_for_status()
+386-    data = resp.json()
+387-    try:
+388-        return data["candidates"][0]["content"]["parts"][0]["text"]
+389-    except (KeyError, IndexError) as e:
+390-        raise ValueError(f"Unexpected Gemini response structure: {data}") from e
+391-
+392-def _gemini_text(prompt: str, system_instruction: str = None, **kwargs) -> str:
+393-    return _gemini_rest([{"role": "user", "parts": [{"text": prompt}]}], system_instruction=system_instruction, **kwargs)
+394-
+395-def _gemini_image_text(image_bytes: bytes, mime_type: str, text_prompt: str, **kwargs) -> str:
+396-    return _gemini_rest([{"role": "user", "parts": [
+397-        {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}},
+398-        {"text": text_prompt},
+399-    ]}], **kwargs)
+400-
+401-# ==========================================
+402-# 🔇 SILENCE NOISY DEBUG LOGS (yfinance / urllib3 / requests)
+403-# ==========================================
+404-logging.basicConfig(level=logging.WARNING)
+405-for _noisy in ("yfinance", "urllib3", "peewee", "httpx", "httpcore"):
+406-    logging.getLogger(_noisy).setLevel(logging.WARNING)
+407-
+408-# ==========================================
+409-# 🔐 CONFIG — dibaca dari .env (lihat mbss.env untuk template)
+410-# ==========================================
+411-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+412-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+413-GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
+414-
+415-_missing = [k for k, v in {
+416-    "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+417-    "TELEGRAM_CHAT_ID":   TELEGRAM_CHAT_ID,
+418-    "GEMINI_API_KEY":     GEMINI_API_KEY,
+419-    "ZAPI_API_KEY":       os.environ.get("ZAPI_API_KEY", ""),
+420-    "INDEXALPHA_API_TOKEN": os.environ.get("INDEXALPHA_API_TOKEN", ""),
+421-}.items() if not v]
+422-if _missing:
+423-    print(f"⚠️ Key berikut KOSONG (cek file .env): {', '.join(_missing)}")
+424-else:
+425-    print("✅ Semua API keys loaded dari .env")
+426-
+427-  # Gemini diakses via REST (_gemini_text / _gemini_image_text), tidak perlu client SDK
+428-
+429-WIB = datetime.timezone(datetime.timedelta(hours=7))  # Asia/Jakarta, no DST
+430-
+431-# ==========================================
+432-# 🕌 DYNAMIC SHARIA (JII) FILTER
+433-# ==========================================
+434-_ihsg_cache = {"date": None, "return_today": None}
+435-
+436-
+437-def get_ihsg_return_today():
+438-    """
+439-    Return % IHSG (Jakarta Composite Index, ^JKSE) HARI INI SAJA (close terakhir
+440-    vs close sebelumnya) — DIGANTI dari versi 10-hari kumulatif atas permintaan
+441-    user: untuk swing pendek, perbandingan 10 hari kurang responsif/relevan
+442-    dibanding kondisi harian. Di-cache per hari (bukan per panggilan) karena
+443-    dipanggil berulang kali untuk SETIAP saham dalam satu scan.
+444-    """
+445-    today_str = datetime.datetime.now(WIB).strftime("%Y-%m-%d")
+446-    if _ihsg_cache["date"] == today_str and _ihsg_cache.get("return_today") is not None:
+447-        return _ihsg_cache["return_today"]
+448-
+449-    try:
+450-        hist = get_yf_ticker("^JKSE").history(period="5d", timeout=15)
+451-        if len(hist) < 2:
+452-            return None
+453-        ihsg_return = ((hist["Close"].iloc[-1] - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2]) * 100
+454-        _ihsg_cache["date"] = today_str
+455-        _ihsg_cache["return_today"] = ihsg_return
+456-        return ihsg_return
+457-    except Exception as e:
+458-        print(f"⚠️ Gagal fetch IHSG untuk Relative Strength harian: {e}")
+459-        return None
+460-
+461-
+462-def fetch_macro_context():
+463-    """
+464-    Pulls broad market context known to meaningfully influence IDX day-to-day:
+465-    the overnight Wall Street close (the single biggest external driver of how
+466-    Asian markets open), regional Asian markets, USD/IDR (affects capital flows
+467-    and export/commodity stocks differently), and crude oil (a major input for
+468-    Indonesia's commodity-heavy index). All via yfinance — same free source as
+469-    stock data, no new signup.
+470-    """
+471-    tickers = {
+472-        "S&P 500 (Wall St overnight)": "^GSPC",
+473-        "Nikkei 225 (Japan)": "^N225",
+474-        "Hang Seng (Hong Kong)": "^HSI",
+475-        "USD/IDR": "IDR=X",
+476-        "Crude Oil WTI": "CL=F",
+477-    }
+478-    context = {}
+479-    for label, symbol in tickers.items():
+480-        try:
+481-            hist = get_yf_ticker(symbol).history(period="5d", timeout=15)
+482-            if len(hist) >= 2:
+483-                pct_change = (hist["Close"].iloc[-1] - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2] * 100
+484-                context[label] = round(pct_change, 2)
+485-        except Exception as e:
+486-            print(f"⚠️ Failed to fetch macro ticker {symbol}: {e}")
+487-    return context
+488-
+489-
+490-def fetch_company_news(ticker, company_name, max_items=5):
+491-    """
+492-    Pulls recent real news scoped to a SPECIFIC company (not general market news) —
+--
+8692:    app.add_handler(CallbackQueryHandler(skip_brokersum_callback, pattern="^skip_brokersum$"))
+8693:    app.add_handler(CallbackQueryHandler(quick_check_callback, pattern="^qchk_"))
+8694:    app.add_handler(CallbackQueryHandler(order_clear_callback, pattern="^orderclear_"))
+8695-    app.add_handler(MessageHandler(filters.PHOTO, handle_brokersum_photo))
+8696-    app.add_handler(CommandHandler("buy", buy_position))
+8697-    app.add_handler(CommandHandler("sell", sell_position))
+8698-    app.add_handler(CommandHandler("addcash", add_cash_command))
+8699-    app.add_handler(CommandHandler("withdrawcash", withdraw_cash_command))
+8700-    app.add_handler(CommandHandler("resetportfolio", reset_portfolio_command))
+8701-    app.add_handler(CommandHandler("watchlist", watchlist_command))
+8702-    app.add_handler(CommandHandler("setentrydate", set_entry_date_command))
+8703-    app.add_handler(CommandHandler("summary", portfolio_summary))
+8704-    app.add_handler(CommandHandler("order", order_command))
+8705-    app.add_handler(CommandHandler(["myportfolio", "portofolio"], my_portfolio))
+8706-    app.add_handler(CommandHandler("testbrief", test_morning_brief))
+8707-    app.add_handler(CommandHandler("screendaytrade", screen_daytrade))
+8708-    app.add_handler(CommandHandler("executiongate", executiongate_command))
+8709-    app.add_handler(CommandHandler("winrate", show_winrate))
+8710-
+8711-    async def db_stats_command(update, context):
+8712-        stats = get_db_stats()
+8713-        if not stats:
+8714-            await update.message.reply_text("📦 DB belum ada atau kosong. Jalankan /populatedb dulu.")
+8715-            return
+8716-        await update.message.reply_text(
+8717-            f"📦 OHLCV Database\n"
+8718-            f"Daily: {stats['daily_tickers']} ticker, {stats['daily_rows']:,} bar\n"
+8719-            f"4H: {stats['h4_tickers']} ticker\n"
+8720-            f"Ukuran: {stats['size_mb']} MB\n\n"
+8721-            f"Last update: {stats.get('last_ohlcv_update_at') or '-'}\n"
+8722-            f"Updated s/d: {stats.get('last_ohlcv_update_marker') or '-'}\n"
+8723-            f"Night scan: {stats.get('last_nightly_scan_at') or '-'}\n"
+8724-            f"Night marker: {stats.get('last_nightly_scan_marker') or '-'}"
+8725-        )
+8726-
+8727-    async def populate_db_command(update, context):
+8728-        """
+8729-        Populate DB dari yfinance — ISSI saja, deduplicate.
+8730-        ISSI bisa ratusan ticker, proses bisa 10-20 menit — bot tetap bisa digunakan
+8731-        selama proses berlangsung karena dijalankan di background thread.
+8732-        """
+8733-        await update.message.reply_text(
+8734-            "📥 Memulai populate DB dari yfinance (ISSI, 2 tahun histori)...\n"
+8735-            "Proses bisa 10-20 menit. Bot tetap bisa digunakan selama ini."
+8736-        )
+8737-        try:
+8738-            issi = set(fetch_online_sharia_list(index_key="ISSI"))
+8739-            all_tickers = list(issi)
+8740-            await update.message.reply_text(
+8741-                f"📋 Total: {len(all_tickers)} ticker ISSI unik"
+8742-            )
+8743-            stats_payload = await asyncio.to_thread(populate_from_yfinance, all_tickers, "2y", 50)
+8744-            stats = get_db_stats()
+8745-            msg = (
+8746-                f"✅ DB berhasil dipopulate!\n"
+8747-                f"{stats.get('daily_tickers', 0)} ticker, {stats.get('daily_rows', 0):,} bar, "
+8748-                f"{stats.get('size_mb', 0)} MB\n"
+8749-                f"Updated s/d: {stats.get('last_ohlcv_update_marker') or stats_payload.get('latest_marker') or '-'}"
+8750-            )
+8751-            await update.message.reply_text(msg)
+8752-            try:
+8753-                await context.bot.send_message(
+8754-                    chat_id=TELEGRAM_CHAT_ID,
+8755-                    text=(
+8756-                        f"✅ DB update sukses\n"
+8757-                        f"Universe: ISSI\n"
+8758-                        f"Ticker: {stats_payload.get('tickers', len(all_tickers))}\n"
+8759-                        f"Updated s/d: {stats_payload.get('latest_marker') or stats.get('last_ohlcv_update_marker') or '-'}\n"
+8760-                        f"Rows written: {stats_payload.get('rows_written', 0):,}"
+8761-                    ),
+8762-                )
+8763-            except Exception as notify_error:
+8764-                print(f"⚠️ Gagal kirim notifikasi DB update: {notify_error}")
+8765-        except Exception as e:
+8766-            await update.message.reply_text(f"⚠️ Gagal populate DB: {e}")
+8767-
+8768-    app.add_handler(CommandHandler("dbstats", db_stats_command))
+8769-    app.add_handler(CommandHandler("dbstatus", db_stats_command))
+8770-    app.add_handler(CommandHandler("populatedb", populate_db_command))
+8771-    app.add_handler(CommandHandler("testopening", test_opening_dynamics))
+8772-    app.add_handler(CommandHandler("testopening", test_opening_dynamics))
+8773-    app.add_error_handler(global_error_handler)
+8774-
+8775-    # No automatic scheduling — hosted on a request-driven webhook (PythonAnywhere
+8776-    # free web app) with no persistent background process to run a JobQueue.
+8777-    # Morning brief / nightly scan / opening dynamics are triggered manually via
+8778-    # /testbrief, /screendaytrade, /testopening instead.
+8779-
+8780-    return app
+8781-
+8782-
+8783-if __name__ == "__main__":
+8784-    import sys
+8785-
+8786-    # ── CLI mode: python bot_db.py --populatedb ──────────────────
+8787-    if "--populatedb" in sys.argv:
+8788-        print("📥 Mode: populate DB dari command line (tanpa Telegram)")
+8789-        init_ohlcv_db()
+8790-        issi = set(fetch_online_sharia_list(index_key="ISSI"))
+8791-        tickers = list(issi)
+8792-        print(f"📋 {len(tickers)} ticker ISSI akan di-populate...")
+8793-        stats = populate_from_yfinance(tickers, period="2y", batch_size=50)
+8794-        db = get_db_stats()
+8795-        print(f"\n✅ Selesai!")
+8796-        print(f"   Ticker   : {db.get('daily_tickers', 0)}")
+8797-        print(f"   Total bar: {db.get('daily_rows', 0):,}")
+8798-        print(f"   Ukuran DB: {db.get('size_mb', 0)} MB")
+8799-        print(f"   Updated   : {stats.get('latest_marker', '-')}")
+8800-        sys.exit(0)
+8801-
+8802-    # ── CLI mode: python bot_db.py --dbstats ─────────────────────
+8803-    if "--dbstats" in sys.argv:
+8804-        init_ohlcv_db()
+8805-        db = get_db_stats()
+8806-        print(f"📦 OHLCV Database")
+8807-        print(f"   Daily : {db.get('daily_tickers', 0)} ticker, {db.get('daily_rows', 0):,} bar")
+8808-        print(f"   4H    : {db.get('h4_tickers', 0)} ticker")
+8809-        print(f"   Size  : {db.get('size_mb', 0)} MB")
+8810-        sys.exit(0)
+8811-
+8812-    # ── Normal mode: jalankan bot Telegram ───────────────────────
+8813-    print("📡 Bot starting: listening for commands + daily 04:00 WIB brief scheduled...")
+8814-

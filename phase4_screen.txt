@@ -1,0 +1,481 @@
+7433:async def screen_daytrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+7434-    """
+7435-    Screening khusus day trade — TERPISAH dari brief pagi (bobot berbeda: fokus
+7436-    volatilitas/momentum/aktivitas sekarang, bukan value seimbang), dan TIDAK
+7437-    memakai Index Alpha sama sekali (data broker EOD, lag 1 hari, tidak cocok
+7438-    untuk horizon day trade jam-menit — kuota Index Alpha sebaiknya disimpan
+7439-    untuk /myportfolio yang horizonnya swing 2-10 hari, sesuai kesepakatan).
+7440-
+7441-    Opsi "/screendaytrade issi" — universe JAUH lebih luas (ISSI, ratusan saham
+7442-    syariah, bukan cuma ISSI yang 70) dengan filter likuiditas tambahan
+7443-    (harga + volume rata-rata 10hr bursa >= 500rb lembar). Cache 2 MINGGU (14 hari kalender dari waktu build
+7444-    Sabtu) — build pertama di minggu itu MAHAL (bisa 30+ menit), builds
+7445-    berikutnya dalam minggu yang sama pakai cache, gratis/cepat.
+7446-    """
+7447-    use_issi = len(context.args) > 0 and context.args[0].lower() == "issi"
+7448-
+7449-    if use_issi:
+7450-        await safe_reply(
+7451-            update.message,
+7452-            "🔎 Screening universe ISSI (lebih luas dari ISSI), mohon tunggu — "
+7453-            "kalau ini pemakaian pertama dalam 2 minggu terakhir, build whitelist likuid bisa "
+7454-            "makan waktu beberapa menit (via Zapi bulk, jauh lebih cepat dari sebelumnya). "
+7455-            "Setelah itu, pemakaian berikutnya dalam 2 minggu ini akan instan (pakai cache)."
+7456-        )
+7457-        tickers = await asyncio.to_thread(load_or_build_issi_liquid_whitelist)
+7458-    else:
+7459-        await safe_reply(update.message, "🔎 Screening kandidat day trade, mohon tunggu (~beberapa menit, sama seperti /testbrief)...")
+7460-        sharia_universe = fetch_online_sharia_list()
+7461-        tickers = await asyncio.to_thread(load_or_build_whitelist, list(sharia_universe))
+7462-
+7463-    scan_timeout = 5400  # 90 menit: cukup untuk universe besar dan cache Yahoo
+7464-    try:
+7465-        # fetch_tickers_scored_with_cache() cek cache scan malam dulu — kalau
+7466-        # dipanggil setelah jam 22:00 di hari yang sama, mode "issi" (universe
+7467-        # SAMA dengan yang di-scan job malam) bisa jadi nyaris instan.
+7468-        results, skip_reasons = await asyncio.wait_for(
+7469-            asyncio.to_thread(fetch_tickers_scored_with_cache, tickers), timeout=scan_timeout
+7470-        )
+7471-    except asyncio.TimeoutError:
+7472-        await safe_reply(update.message, f"⏱️ Screening melebihi batas waktu {scan_timeout // 60} menit. Coba lagi nanti.")
+7473-        return
+7474-
+7475-    if not results:
+7476-        await safe_reply(update.message, "⚠️ Tidak ada data yang berhasil diambil. Coba lagi nanti.")
+7477-        return
+7478-
+7479-    # Stage 1 V5: setup lane + active closing momentum lane. Stage 2: live intraday breakout on shortlist only.
+7480-    pre_candidates, filter_tier_note = select_screendaytrade_v5_candidates(results, count=max(DAYTRADE_FINAL_PICKS_COUNT, 20))
+7481-    live_pool = await asyncio.to_thread(
+7482-        enrich_live_breakout_for_candidates, pre_candidates, 25, True
+7483-    )
+7484-    ready_pool = [r for r in live_pool if r.get("active_breakout", {}).get("available") and r["active_breakout"].get("score", 0) >= 60]
+7485-    if len(ready_pool) >= DAYTRADE_FINAL_PICKS_COUNT:
+7486-        top_candidates = sorted(ready_pool, key=lambda r: compute_scalping_readiness(r)["score"], reverse=True)[:DAYTRADE_FINAL_PICKS_COUNT]
+7487-        filter_tier_note = filter_tier_note + " + V4 breakout chance/risk + live active breakout >=60"
+7488-    else:
+7489-        top_candidates = sorted(live_pool, key=lambda r: compute_scalping_readiness(r)["score"], reverse=True)[:DAYTRADE_FINAL_PICKS_COUNT]
+7490-        filter_tier_note = filter_tier_note + " + V4 breakout chance/risk (fallback karena kandidat READY terbatas)"
+7491-
+7492-    # Kunci picks hari ini untuk uji winrate — idempotent (tidak duplikat kalau
+7493-    # /screendaytrade dipanggil berkali-kali di hari yang sama).
+7494-    await asyncio.to_thread(lock_daily_daytrade_picks, top_candidates)
+7495-
+7496-    lines = ["⚡ SCREENING DAY TRADE - RADAR BREAKOUT V5 ACTIVITY\n"]
+7497-    lines.append(f"Kriteria: {filter_tier_note}\n")
+7498-    lines.append("Catatan: Ini RADAR, bukan entry final. Entry live wajib lewat /executiongate atau /check.\n")
+7499-    lines.append("Legend: B=Breakout, C=Continuation, Act=Activity/Liquidity, VolQ=Volume Breakout Quality, Room=Entry Room, Risk=risiko teknikal.\n")
+7500-
+7501-    for i, r in enumerate(top_candidates, 1):
+7502-        v5 = compute_daytrade_v5_summary(r)
+7503-        ab = r.get("active_breakout", {})
+7504-        src_live = ""
+7505-        if ab.get("available"):
+7506-            src_live = f" | Active {ab.get('score')}/100 {ab.get('label')}"
+7507-        room = v5["room"]
+7508-        cont = v5["continuation"]
+7509-        risk = v5["risk"]
+7510-        br = v5["breakout"]
+7511-        volq = v5["volq"]
+7512-        lines.append(
+7513-            f"{i}. {r['ticker']} — {v5['label']}\n"
+7514-            f"   Total {v5['total']}/100 | B {br['score']} | C {cont['score']} | Act {v5['activity']['score']} | VolQ {volq['score']} | Room {room['score']} | Risk {risk['score']}{src_live}\n"
+7515-            f"   Harga {r.get('price')} | Valid >{v5['valid_level']} | Ideal {v5['ideal']} | Invalid <{v5['invalid']}\n"
+7516-            f"   Room: {room['label']} ({room['dist_high_pct']}% ke high, upside TP1 {room['upside_tp1_pct']}%) | VolQ: {volq['label']} | Continuation: {cont['label']}\n"
+7517-            f"   Note: {v5['note']}"
+7518-        )
+7519-
+7520-    await safe_reply(update.message, "\n\n".join(lines))
+7521-
+7522-
+7523-STATUS_LABEL_ID = {
+7524-    "pending_entry": "⏳ Menunggu Entry",
+7525-    "pending_resolution": "🔄 Berjalan",
+7526-    "win": "✅ Win",
+7527-    "lose": "❌ Lose",
+7528-    "win_timebased": "✅ Win (time-based)",
+7529-    "lose_timebased": "❌ Lose (time-based)",
+7530-}
+7531-
+7532-
+7533-async def show_winrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+7534-    """
+7535-    Scorecard uji winrate rekomendasi /screendaytrade — TP1/cut_loss ASLI dari
+7536-    rekomendasi hari itu (bukan angka tetap terpisah), entry = harga OPEN hari
+7537-    bursa setelah pick dikunci. Saham yang sama BISA muncul di beberapa tanggal
+7538-    — ini SENGAJA (tiap hari = sinyal/keputusan independen yang diuji terpisah,
+7539-    bukan "apakah saham X bagus secara umum").
+7540-    """
+7541-    history = load_daytrade_picks_history()
+7542-    if not history:
+7543-        await safe_reply(update.message, "📊 Belum ada data winrate — /screendaytrade perlu dijalankan dulu untuk mulai mengunci picks.")
+7544-        return
+7545-
+7546-    history_sorted = sorted(history, key=lambda p: (p["pick_date"], p["ticker"]))
+7547-
+7548-    today_str = get_current_trading_day_close_marker()
+7549-    lines = ["📊 WINRATE STOCKPICK — /screendaytrade\n", f"Today: {today_str}\n"]
+7550-    lines.append("Saham // Tanggal Pick // P/L // Status")
+7551-    for p in history_sorted:
+7552-        pnl_str = f"{p['pnl_pct']:+.1f}%" if p["pnl_pct"] is not None else "-"
+7553-        status_str = STATUS_LABEL_ID.get(p["status"], p["status"])
+7554-        lines.append(f"{p['ticker']} // {p['pick_date']} // {pnl_str} // {status_str}")
+7555-
+7556-    lines.append("\nSummary Winrate")
+7557-    by_date = {}
+7558-    for p in history_sorted:
+7559-        by_date.setdefault(p["pick_date"], []).append(p)
+7560-
+7561-    for pick_date, picks in sorted(by_date.items()):
+7562-        resolved = [p for p in picks if p["status"] in ("win", "lose", "win_timebased", "lose_timebased")]
+7563-        pending = [p for p in picks if p["status"] in ("pending_entry", "pending_resolution")]
+7564-        if not resolved and pending:
+7565-            lines.append(f"{pick_date}: {len(pending)} pick masih berjalan, belum ada hasil final")
+7566-            continue
+7567-        wins = [p for p in resolved if p["status"] in ("win", "win_timebased")]
+7568-        winrate_pct = (len(wins) / len(resolved) * 100) if resolved else 0
+7569-        total_gain = sum(p["pnl_pct"] for p in resolved if p["pnl_pct"] is not None)
+7570-        pending_note = f" ({len(pending)} masih berjalan)" if pending else ""
+7571-        lines.append(f"{pick_date}: {winrate_pct:.0f}% Win ({len(wins)}/{len(resolved)}); Total gain {total_gain:+.1f}%{pending_note}")
+7572-
+7573-    # Ringkasan keseluruhan — bukti agregat apakah stockpick genuinely solid
+7574-    all_resolved = [p for p in history if p["status"] in ("win", "lose", "win_timebased", "lose_timebased")]
+7575-    if all_resolved:
+7576-        all_wins = [p for p in all_resolved if p["status"] in ("win", "win_timebased")]
+7577-        overall_winrate = len(all_wins) / len(all_resolved) * 100
+7578-        overall_gain = sum(p["pnl_pct"] for p in all_resolved if p["pnl_pct"] is not None)
+7579-        avg_gain = overall_gain / len(all_resolved)
+7580-        lines.append(f"\n📈 KESELURUHAN ({len(all_resolved)} pick selesai): {overall_winrate:.0f}% Win — "
+7581-                      f"rata-rata {avg_gain:+.2f}%/pick, total {overall_gain:+.1f}%")
+7582-
+7583-    await safe_reply(update.message, "\n".join(lines))
+7584-
+7585-
+7586-async def test_morning_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
+7587-    await safe_reply(update.message, "🧪 Menjalankan Morning Brief manual, mohon tunggu...")
+7588-    await run_morning_brief(context)
+7589-
+7590-
+7591-async def test_opening_dynamics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+7592-    await safe_reply(update.message, "🧪 Menjalankan Opening Dynamics manual, mohon tunggu...")
+7593-    await run_opening_dynamics(context)
+7594-
+7595-
+7596-# ==========================================
+7597-# 💼 PORTFOLIO COMMANDS
+7598-# ==========================================
+7599-async def buy_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
+7600-    if len(context.args) < 3:
+7601-        await safe_reply(update.message, 
+7602-            "Cara pakai: /buy TICKER HARGA LOT\nContoh: /buy TLKM 2850 10"
+7603-        )
+7604-        return
+7605-    ticker = context.args[0].upper().strip()
+7606-    try:
+7607-        price = float(context.args[1])
+7608-        lots = int(context.args[2])
+7609-        if price <= 0 or lots <= 0:
+7610-            raise ValueError
+7611-    except ValueError:
+7612-        await safe_reply(update.message, "⚠️ Harga dan lot harus angka positif.")
+7613-        return
+7614-
+7615-    success, error_message, position = add_position(ticker, price, lots)
+7616-    if not success:
+7617-        await safe_reply(update.message, error_message)
+7618-        return
+7619-    await safe_reply(update.message, 
+7620-        f"✅ Tercatat: {ticker}\n"
+7621-        f"Total: {position['lots']} lot @ avg Rp{position['avg_price']:,.0f}\n"
+7622-        f"Cash tersisa: Rp{get_cash_balance():,.0f}"
+7623-    )
+7624-
+7625-
+7626-async def sell_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
+7627-    if len(context.args) < 3:
+7628-        await safe_reply(update.message, 
+7629-            "Cara pakai: /sell TICKER LOT HARGA\nContoh: /sell TLKM 5 2850"
+7630-        )
+7631-        return
+7632-    ticker = context.args[0].upper().strip()
+7633-    try:
+7634-        lots = int(context.args[1])
+7635-        sell_price = float(context.args[2])
+7636-        if lots <= 0 or sell_price <= 0:
+7637-            raise ValueError
+7638-    except ValueError:
+7639-        await safe_reply(update.message, "⚠️ Lot dan harga harus angka positif.")
+7640-        return
+7641-
+7642-    success, message = reduce_position(ticker, lots, sell_price)
+7643-    await safe_reply(update.message, ("✅ " if success else "⚠️ ") + message)
+7644-
+7645-
+7646-async def add_cash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+7647-    if len(context.args) < 1:
+7648-        await safe_reply(update.message, "Cara pakai: /addcash JUMLAH\nContoh: /addcash 5000000")
+7649-        return
+7650-    try:
+7651-        amount = float(context.args[0])
+7652-        if amount <= 0:
+7653-            raise ValueError
+2228:    Ranking khusus untuk /screendaytrade — BEDA dari final_score brief pagi
+2229-    (Value 25% + Momentum 45% + Sentiment 30%). Untuk kebutuhan "saham mana yang
+2230-    lagi bergerak SEKARANG", value/fundamental kurang relevan; yang penting
+2231-    aktivitas/momentum saat ini. Tidak memakai brokersum sama sekali (data EOD
+2232-    1 hari lag, tidak cocok untuk horizon day trade jam-menit).
+2233-
+2234-    Komponen (bobot direvisi lagi untuk menambahkan risk:reward):
+2235-    - volatility (20%): day_range_pct_10d — seberapa "hidup" saham ini akhir2 ini
+2236-    - volume_activity (15%): vol_ratio — apakah hari ini ramai dibanding biasanya
+2237-    - momentum_freshness (15%): MACD cross dengan PELURUHAN presisi per hari —
+2238-      cross 1 hari lalu jauh lebih fresh/relevan untuk day trade daripada cross
+2239-      4-5 hari lalu, meski status "bullish"-nya sama.
+2240-    - breakout_proximity (10%): seberapa dekat harga ke intraday high — dekat
+2241-      high = berpotensi breakout lanjut hari ini
+2242-    - ema21_momentum (10%): apakah harga di atas/bawah EMA21 — sinyal arah
+2243-      jangka pendek tambahan
+2244-    - adx_component (15%): ADX TINGGI = kriteria POSITIF (beda dari swing
+2245-      scoring, di sana ADX rendah jadi pengali kepercayaan yang MENGURANGI
+2246-      skor) — day trade justru mencari saham dengan tren jelas.
+2247-    - risk_reward_component (15%, BARU): risk_reward_at_max — SENGAJA dipisah
+2248-      dari core Value/Momentum/Sentiment/Final (yang dipakai /check, dst),
+2249-      karena RR menjawab pertanyaan BERBEDA ("apakah harga SEKARANG entry yang
+2250-      menguntungkan") dari "apakah saham ini bagus secara teknikal/fundamental".
+2251:      Untuk /screendaytrade khusus, timing entry itu sentral ke tujuan command
+2252-      ini, jadi masuk akal jadi komponen skor di sini — TIDAK di core scoring.
+2253-    """
+2254-    volatility = min(10.0, scoring.get("day_range_pct_10d", 0) or 0)
+2255-    volume_activity = min(10.0, (scoring.get("vol_ratio", 1.0) or 1.0) * 3.0)
+2256-
+2257-    momentum_freshness = 5.0  # baseline netral
+2258-    macd_cross_days_ago = scoring.get("macd_cross_days_ago")
+2259-    macd_cross_direction = scoring.get("macd_cross_direction")
+2260-    if macd_cross_days_ago is not None:
+2261-        decay = max(0.0, 1 - (macd_cross_days_ago / 5))
+2262-        if macd_cross_direction == "bullish":
+2263-            momentum_freshness = 5.0 + (5.0 * decay)
+2264-        elif macd_cross_direction == "bearish":
+2265-            momentum_freshness = 5.0 - (4.0 * decay)
+2266-    elif scoring.get("macd_state") == "bullish":
+2267-        momentum_freshness = 6.5
+2268-
+2269-    breakout_proximity = 5.0
+2270-    price = scoring.get("price")
+2271-    intraday_high = scoring.get("intraday_high")
+2272-    intraday_low = scoring.get("intraday_low")
+2273-    if price and intraday_high and intraday_low and intraday_high > intraday_low:
+2274-        position_in_range = (price - intraday_low) / (intraday_high - intraday_low)
+2275-        breakout_proximity = position_in_range * 10.0
+2276-
+2277-    ema21_momentum = 5.0
+2278-    is_below_ema21 = scoring.get("is_below_ema21")
+2279-    if is_below_ema21 is not None:
+2280-        ema21_momentum = 3.0 if is_below_ema21 else 8.0
+2281-
+2282-    adx_component = min(10.0, (scoring.get("adx", 0) or 0) / 4.0)
+2283-
+2284-    # Risk:Reward — pakai RR@entry-atas (paling realistis untuk day trade breakout
+2285-    # buying). RR=1.0 -> skor 4 (median), RR=2.5+ -> skor maksimal 10, RR<=0/tidak
+2286-    # ada data -> netral (5.0), bukan dihukum (karena bisa jadi data tidak cukup,
+2287-    # bukan berarti benar-benar buruk).
+2288-    rr_at_max = scoring.get("targets", {}).get("risk_reward_at_max")
+2289-    if rr_at_max is None:
+2290-        risk_reward_component = 5.0
+2291-    else:
+2292-        risk_reward_component = min(10.0, max(0.0, rr_at_max * 4.0))
+2293-
+2294-    daytrade_score = (
+2295-        volatility * 0.20 + volume_activity * 0.15
+2296-        + momentum_freshness * 0.15 + breakout_proximity * 0.10
+2297-        + ema21_momentum * 0.10 + adx_component * 0.15
+2298-        + risk_reward_component * 0.15
+2299-    )
+2300-    return round(daytrade_score, 2)
+2301-
+2302-
+2303-def compute_brokersum_priority(scoring: dict, total_stock_value: float = 0) -> float:
+2304-    """
+2305-    Ranks a stock's priority for spending scarce daily Index Alpha budget (5
+2306-    calls/day, 1 call/ticker = 5 tickers/day max). Combines:
+2307-    - urgency: how close price is to cut_loss or take_profit (closer = more
+2308-      time-sensitive, a wrong call here costs money NOW)
+2309-    - volatility: day_range_pct_10d — is this stock actively "in play"
+2310-    - ambiguity: MIXED_SIGNALS / active OBV divergence / overbought caution —
+2311-      cases where our own proxy is ALREADY uncertain, so real data resolves the
+2312-      most (a quiet stock with OBV divergence can be MORE worth checking than an
+2313-      obviously trending one — see the ANTM case: flat net masked real activity)
+2314-    - size: bigger positions deserve scrutiny regardless of how exciting the
+2315-      technicals look, since more capital is on the line if the call is wrong
+2316-
+2317-    Watchlist entries (no position yet) get a flat modest size baseline.
+2318-    """
+2319-    price = scoring.get("price", 0)
+2320-    targets = scoring.get("targets", {})
+2321-    tp1 = targets.get("tp_1")
+2322-    cut_loss = targets.get("cut_loss")
+2323-
+2324-    if price and tp1 and cut_loss:
+2325-        dist_to_cutloss_pct = abs((price - cut_loss) / price * 100)
+2326-        dist_to_tp_pct = abs((tp1 - price) / price * 100)
+2327-        closest_dist_pct = min(dist_to_cutloss_pct, dist_to_tp_pct)
+2328-        urgency = max(0.0, 10.0 - closest_dist_pct)
+2329-    else:
+2330-        urgency = 0.0
+2331-
+2332-    volatility = min(10.0, scoring.get("day_range_pct_10d", 0) or 0)
+2333-
+2334-    ambiguity = 0.0
+2335-    if scoring.get("action_id") == "MIXED_SIGNALS":
+2336-        ambiguity += 5.0
+2337-    if scoring.get("obv_divergence") in ("bearish_divergence", "bullish_divergence"):
+2338-        ambiguity += 3.0
+2339-    if scoring.get("is_overbought_caution"):
+2340-        ambiguity += 2.0
+2341-    ambiguity = min(10.0, ambiguity)
+2342-
+2343-    market_value = scoring.get("market_value_idr")
+2344-    if market_value and total_stock_value > 0:
+2345-        size = min(10.0, (market_value / total_stock_value) * 10)
+2346-    else:
+2347-        size = 3.0  # flat baseline for watchlist (not owned yet, no position size)
+2348-
+2349-    priority = urgency * 0.35 + volatility * 0.25 + ambiguity * 0.30 + size * 0.10
+2350-    return round(priority, 2)
+2351-
+2352-
+2353-def apply_brokersum_adjustment(scoring: dict, brokersum: dict) -> dict:
+2354-    """
+2355-    Lets REAL broker flow data actually influence the score and decision, not
+2356-    just sit alongside it as narrative context. Only adjusts when
+2357-    broker_concentration_pct >= 10% — below that, the signal is too diffuse/
+2358-    noisy to trust (mirrors the ANTM lesson: concentration is what makes this
+2359-    data meaningful, not raw net flow alone).
+2360-
+2361-    Adjustment is capped at ±3 points on sentiment_score, scaled by how
+2362-    concentrated the flow is (full weight at 40%+ concentration). At
+2363-    sentiment's 0.3 weight on final_score, that bounds the total swing to
+2364-    about ±0.9 on final_score — real influence, not something that alone
+2365-    flips a HOLD into a STRONG BUY by itself.
+2366-
+2367-    Re-runs decide_action() with the adjusted scores so the actual decision
+2368-    (not just the displayed number) reflects real data when available.
+2369-    """
+2370-    concentration_pct = brokersum.get("broker_concentration_pct", 0)
+2371-    if concentration_pct < 10:
+2372-        scoring["brokersum_adjusted"] = False
+2373-        return scoring
+2374-
+2375-    net_foreign_flow_pct = brokersum.get("net_foreign_flow_pct", 0)
+2376-    concentration_factor = min(1.0, concentration_pct / 40)
+2377-    adjustment = (net_foreign_flow_pct / 100) * 3.0 * concentration_factor
+2378-
+2379-    old_sentiment = scoring["scores"]["sentiment"]
+2380-    new_sentiment = max(1.0, min(10.0, old_sentiment + adjustment))
+2381-
+2382-    value_score = scoring["scores"]["value"]
+2383-    momentum_score = scoring["scores"]["momentum"]
+2384-    new_final = (value_score * 0.25) + (momentum_score * 0.45) + (new_sentiment * 0.30)
+2385-
+2386-    decision = decide_action(
+2387-        final_score=new_final, value_score=value_score, momentum_score=momentum_score,
+2388-        sentiment_score=new_sentiment, is_financial_distress_flag=scoring.get("is_financial_distress_flag", False),
+2389-        chart_pattern=scoring.get("chart_pattern", "none"), is_overbought_caution=scoring.get("is_overbought_caution", False),
+2390-        obv_divergence=scoring.get("obv_divergence", "none"), is_volume_spike_anomaly=scoring.get("is_volume_spike_anomaly", False),
+2391-        is_near_price_floor=scoring.get("is_near_price_floor", False), is_unusually_low_pe=scoring.get("is_unusually_low_pe", False),
+2392-        macd_bearish_cross=scoring.get("macd_bearish_cross", False), is_below_sma50=scoring.get("is_below_sma50", False),
+2393-    )
+2394-
+2395-    scoring["scores"]["sentiment"] = round(new_sentiment, 1)
+2396-    scoring["scores"]["final"] = round(new_final, 1)
+2397-    scoring["action_id"] = decision["action_id"]
+2398-    scoring["action_label_id"] = decision["action_label_id"]
+2399-    scoring["action_ceiling_applied"] = decision["ceiling_applied"]
+2400-    scoring["action_component_spread"] = decision["component_spread"]
+2401-    scoring["brokersum_adjusted"] = True
+2402-    scoring["brokersum_adjustment_applied"] = round(adjustment, 2)
+2403-    return scoring
+2404-
+2405-
+2406-def extract_brokersum_from_screenshot(image_bytes: bytes, mime_type: str, expected_ticker: str) -> dict:
+2407-    """
+2408-    Uses Gemini's vision capability to read a Broker Sum screenshot from the
+2409-    user's own trading app — free, doesn't touch Index Alpha's quota at all.
+2410-    Deliberately conservative: if the image doesn't clearly show real Broker Sum
+2411-    data matching the expected ticker, returns success=False rather than
+2412-    guessing — a misread number here would silently feed into real score
+2413-    adjustment (apply_brokersum_adjustment), so this must fail loudly, not
+2414-    quietly produce a plausible-looking wrong number.
+2415-
+2416-    NOTE: not live-tested against the real Gemini vision API from this
+2417-    environment (no network access to verify) — built from the documented
+2418-    google-genai SDK pattern. Verify on first real use.
+2419-    """
+2420-    extraction_prompt = f"""
+2421-You are extracting data from a screenshot of an Indonesian stock trading app's
+2422-"Broker Sum" (broker summary) screen for ticker {expected_ticker}.
+2423-
+2424-Return ONLY valid JSON, no markdown, no commentary, in this exact shape:
+2425-{{
+2426-  "success": true or false,
+2427-  "ticker_visible": "the ticker shown in the image, or null",
+2428-  "reason_if_failed": "brief reason if success=false, else null",
+2429-  "foreign_buy_value_idr": number or null,
+2430-  "foreign_sell_value_idr": number or null,
+2431-  "foreign_net_value_idr": number or null,
+2432-  "top_brokers": [{{"code": "XX", "net_idr": number}}, ...] or []
+2433-}}
+2434-
+2435-REQUIRED for success=true (this is the only thing that actually matters — the
+2436-AGGREGATE totals, usually under a "Total Value" or "Foreign" section header):
+2437-- foreign_buy_value_idr and foreign_sell_value_idr (or foreign_net_value_idr
+2438-  directly if that's what's shown). These are the ONLY fields required for a
+2439-  successful extraction.
+2440-
+2441-OPTIONAL, NEVER a reason to fail the whole extraction:
+2442-- "top_brokers" (per-broker monetary net breakdown) is a NICE-TO-HAVE bonus,
+2443-  not a requirement. Many broker summary screens only show VOLUME (lot count)
+2444-  per broker, not a monetary value per broker — that is completely normal and
+2445-  expected. If you cannot determine a reliable Rupiah net_idr value per
+2446-  individual broker, simply return "top_brokers": [] (empty list) and still
+2447-  set success=true, AS LONG AS the required aggregate totals above are
+2448-  readable. Do NOT fail the entire extraction just because top_brokers can't
+2449-  be populated — that field existing or not has no bearing on success.
+2450-
+2451-ASSUMPTION — the user always sends screenshots from the "Foreign" tab specifically
+2452-(they've confirmed this directly). DO NOT try to determine or second-guess which
+2453-tab is selected — treat whatever aggregate Buy/Sell/Net totals are shown on
+2454-screen as the foreign-only values directly, regardless of their magnitude. Large
+2455-absolute values are completely normal for big, liquid stocks and are never a
+2456-reason for doubt on their own.
+2457-
+2458-NUMBER FORMAT — Indonesian trading apps commonly show values with suffixes.
+2459-These are FOUR DISTINCT magnitudes, do not confuse them:
+2460-- "K" = thousand = x1,000 (e.g. "1.35 K" = 1,350)
+2461-- "M" = million = x1,000,000 (e.g. "93.10 M" = 93,100,000)
+2462-- "B" = billion = x1,000,000,000 (e.g. "51.65 B" = 51,650,000,000)
+2463-- "T" = trillion = x1,000,000,000,000 (e.g. "2.49 T" = 2,490,000,000,000)
+2464-B and T are NOT the same magnitude — T is 1,000x larger than B. Always convert
+2465-to the FULL raw number in the JSON output using the correct multiplier above.
+2466-
+2467-success=false ONLY if: the image isn't clearly a Broker Sum screen, the ticker
+2468-shown doesn't match "{expected_ticker}", OR the REQUIRED aggregate buy/sell/net
+2469-values above are genuinely illegible/not visible. Do not guess a number you
+2470-can't actually read — leave that specific field null and explain in
+2471-reason_if_failed. But do not fail success on top_brokers alone.
+--
+2645:    di /check dan /myportfolio (horizon swing), TIDAK di /screendaytrade — sama
+2646-    alasan strukturalnya dengan kenapa Index Alpha juga tidak dipakai di situ.
+2647-
+2648-    CATATAN PENTING: ForeignBuy/ForeignSell dari Zapi adalah VOLUME LEMBAR,
+2649-    BUKAN nilai Rupiah (beda dari Index Alpha yang langsung kasih value) —
+2650-    net_foreign_flow_idr di sini adalah ESTIMASI (volume x harga penutupan),
+2651-    bukan angka pasti seperti dari Index Alpha.
+2652-    """
+2653-    try:
+2654-        params = {"length": "1", "start": "0", "code": ticker}
+2655-        if date_str:
+2656-            params["date"] = date_str
+2657-        resp = requests.get(
+2658-            f"{ZAPI_BASE_URL}/finance:idx/stock-summary",
+2659-            params=params, headers=ZAPI_HEADERS, timeout=20,

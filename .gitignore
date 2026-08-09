@@ -1,0 +1,9 @@
+.env
+*.db
+cache/
+daytrade_picks_history.json
+brokersum_cache.json
+brokersum_history.json
+failed_fetch_tracking.json
+__pycache__/
+*.pyc

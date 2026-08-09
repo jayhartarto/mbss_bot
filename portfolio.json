@@ -1,0 +1,757 @@
+{
+  "positions": {
+    "RGAS": {
+      "lots": 50,
+      "avg_price": 248.0,
+      "entry_date": "2026-07-29"
+    },
+    "JGLE": {
+      "lots": 421,
+      "avg_price": 75.62,
+      "entry_date": "2026-08-03"
+    },
+    "SLIS": {
+      "lots": 1342,
+      "avg_price": 81.0,
+      "entry_date": "2026-08-05"
+    },
+    "BKSL": {
+      "lots": 400,
+      "avg_price": 75.0,
+      "entry_date": "2026-08-05"
+    },
+    "ICON": {
+      "lots": 80,
+      "avg_price": 145.0,
+      "entry_date": "2026-08-05"
+    }
+  },
+  "cash": 8946077.0,
+  "realized_pnl_log": [
+    {
+      "date": "2026-07-21",
+      "ticker": "ACES",
+      "lots": 26,
+      "sell_price": 356.0,
+      "avg_cost": 371.0,
+      "pnl_idr": -39000.0
+    },
+    {
+      "date": "2026-07-21",
+      "ticker": "ANTM",
+      "lots": 12,
+      "sell_price": 3070.0,
+      "avg_cost": 3050.0,
+      "pnl_idr": 24000.0
+    },
+    {
+      "date": "2026-07-21",
+      "ticker": "NZIA",
+      "lots": 50,
+      "sell_price": 146.0,
+      "avg_cost": 148.0,
+      "pnl_idr": -10000.0
+    },
+    {
+      "date": "2026-07-21",
+      "ticker": "ANTM",
+      "lots": 5,
+      "sell_price": 3070.0,
+      "avg_cost": 3050.0,
+      "pnl_idr": 10000.0
+    },
+    {
+      "date": "2026-07-21",
+      "ticker": "RAJA",
+      "lots": 6,
+      "sell_price": 910.0,
+      "avg_cost": 11.05,
+      "pnl_idr": 539370.0
+    },
+    {
+      "date": "2026-07-21",
+      "ticker": "RALS",
+      "lots": 382,
+      "sell_price": 23.0,
+      "avg_cost": 19.19,
+      "pnl_idr": 145542.0
+    },
+    {
+      "date": "2026-07-21",
+      "ticker": "RAJA",
+      "lots": 1834,
+      "sell_price": 11.0,
+      "avg_cost": 11.05,
+      "pnl_idr": -9170.0
+    },
+    {
+      "date": "2026-07-21",
+      "ticker": "RALS",
+      "lots": 369,
+      "sell_price": 19.0,
+      "avg_cost": 19.19,
+      "pnl_idr": -7011.0
+    },
+    {
+      "date": "2026-07-21",
+      "ticker": "TPIA",
+      "lots": 2230,
+      "sell_price": 12.0,
+      "avg_cost": 12.0,
+      "pnl_idr": 0.0
+    },
+    {
+      "date": "2026-07-21",
+      "ticker": "RAJA",
+      "lots": 16,
+      "sell_price": 960.0,
+      "avg_cost": 11.05,
+      "pnl_idr": 1518320.0
+    },
+    {
+      "date": "2026-07-21",
+      "ticker": "RALS",
+      "lots": 27,
+      "sell_price": 384.0,
+      "avg_cost": 19.19,
+      "pnl_idr": 984987.0
+    },
+    {
+      "date": "2026-07-22",
+      "ticker": "ANTM",
+      "lots": 5,
+      "sell_price": 3080.0,
+      "avg_cost": 3050.0,
+      "pnl_idr": 15000.0
+    },
+    {
+      "date": "2026-07-22",
+      "ticker": "ANTM",
+      "lots": 5,
+      "sell_price": 3090.0,
+      "avg_cost": 3050.0,
+      "pnl_idr": 20000.0
+    },
+    {
+      "date": "2026-07-22",
+      "ticker": "TPIA",
+      "lots": 12,
+      "sell_price": 2300.0,
+      "avg_cost": 2230.0,
+      "pnl_idr": 84000.0
+    },
+    {
+      "date": "2026-07-22",
+      "ticker": "ANTM",
+      "lots": 5,
+      "sell_price": 3120.0,
+      "avg_cost": 3050.0,
+      "pnl_idr": 35000.0
+    },
+    {
+      "date": "2026-07-22",
+      "ticker": "JGLE",
+      "lots": 100,
+      "sell_price": 69.5,
+      "avg_cost": 62.0,
+      "pnl_idr": 75000.0
+    },
+    {
+      "date": "2026-07-22",
+      "ticker": "ERAA",
+      "lots": 15,
+      "sell_price": 406.0,
+      "avg_cost": 376.0,
+      "pnl_idr": 45000.0
+    },
+    {
+      "date": "2026-07-23",
+      "ticker": "DEWA",
+      "lots": 20,
+      "sell_price": 460.0,
+      "avg_cost": 436.0,
+      "pnl_idr": 48000.0
+    },
+    {
+      "date": "2026-07-23",
+      "ticker": "ACES",
+      "lots": 50,
+      "sell_price": 360.0,
+      "avg_cost": 371.0,
+      "pnl_idr": -55000.0
+    },
+    {
+      "date": "2026-07-23",
+      "ticker": "ERAA",
+      "lots": 10,
+      "sell_price": 418.0,
+      "avg_cost": 376.0,
+      "pnl_idr": 42000.0
+    },
+    {
+      "date": "2026-07-23",
+      "ticker": "JPFA",
+      "lots": 11,
+      "sell_price": 2140.0,
+      "avg_cost": 2066.36,
+      "pnl_idr": 81004.0
+    },
+    {
+      "date": "2026-07-23",
+      "ticker": "CTRA",
+      "lots": 8,
+      "sell_price": 595.0,
+      "avg_cost": 570.0,
+      "pnl_idr": 20000.0
+    },
+    {
+      "date": "2026-07-23",
+      "ticker": "ACES",
+      "lots": 50,
+      "sell_price": 364.0,
+      "avg_cost": 371.0,
+      "pnl_idr": -35000.0
+    },
+    {
+      "date": "2026-07-23",
+      "ticker": "SIDO",
+      "lots": 55,
+      "sell_price": 378.0,
+      "avg_cost": 376.0,
+      "pnl_idr": 11000.0
+    },
+    {
+      "date": "2026-07-24",
+      "ticker": "KOTA",
+      "lots": 100,
+      "sell_price": 125.0,
+      "avg_cost": 128.0,
+      "pnl_idr": -30000.0
+    },
+    {
+      "date": "2026-07-24",
+      "ticker": "MYOH",
+      "lots": 18,
+      "sell_price": 1100.0,
+      "avg_cost": 1045.0,
+      "pnl_idr": 99000.0
+    },
+    {
+      "date": "2026-07-24",
+      "ticker": "RAJA",
+      "lots": 11,
+      "sell_price": 885.0,
+      "avg_cost": 929.0,
+      "pnl_idr": -48400.0
+    },
+    {
+      "date": "2026-07-24",
+      "ticker": "RAJA",
+      "lots": 5,
+      "sell_price": 890.0,
+      "avg_cost": 929.0,
+      "pnl_idr": -19500.0
+    },
+    {
+      "date": "2026-07-27",
+      "ticker": "MNCN",
+      "lots": 30,
+      "sell_price": 204.0,
+      "avg_cost": 210.0,
+      "pnl_idr": -18000.0
+    },
+    {
+      "date": "2026-07-27",
+      "ticker": "TLKM",
+      "lots": 15,
+      "sell_price": 2580.0,
+      "avg_cost": 2783.0,
+      "pnl_idr": -304500.0
+    },
+    {
+      "date": "2026-07-27",
+      "ticker": "KOTA",
+      "lots": 60,
+      "sell_price": 122.0,
+      "avg_cost": 128.0,
+      "pnl_idr": -36000.0
+    },
+    {
+      "date": "2026-07-27",
+      "ticker": "TLKM",
+      "lots": 15,
+      "sell_price": 2550.0,
+      "avg_cost": 2783.0,
+      "pnl_idr": -349500.0
+    },
+    {
+      "date": "2026-07-28",
+      "ticker": "ADHI",
+      "lots": 40,
+      "sell_price": 160.0,
+      "avg_cost": 162.0,
+      "pnl_idr": -8000.0
+    },
+    {
+      "date": "2026-07-28",
+      "ticker": "ERAA",
+      "lots": 25,
+      "sell_price": 386.0,
+      "avg_cost": 408.11,
+      "pnl_idr": -55275.0
+    },
+    {
+      "date": "2026-07-28",
+      "ticker": "AKSI",
+      "lots": 25,
+      "sell_price": 246.0,
+      "avg_cost": 248.0,
+      "pnl_idr": -5000.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "ANTM",
+      "lots": 5,
+      "sell_price": 2900.0,
+      "avg_cost": 3065.0,
+      "pnl_idr": -82500.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "KOTA",
+      "lots": 40,
+      "sell_price": 135.0,
+      "avg_cost": 126.58,
+      "pnl_idr": 33680.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "MCAS",
+      "lots": 25,
+      "sell_price": 10.0,
+      "avg_cost": 322.0,
+      "pnl_idr": -780000.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "MCAS",
+      "lots": 10,
+      "sell_price": 288.0,
+      "avg_cost": 10.0,
+      "pnl_idr": 278000.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "INTD",
+      "lots": 256,
+      "sell_price": 9.0,
+      "avg_cost": 37.96,
+      "pnl_idr": -741376.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "ANTM",
+      "lots": 5,
+      "sell_price": 2850.0,
+      "avg_cost": 3065.0,
+      "pnl_idr": -107500.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "BRIS",
+      "lots": 6,
+      "sell_price": 1775.0,
+      "avg_cost": 1856.19,
+      "pnl_idr": -48714.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "BRIS",
+      "lots": 5,
+      "sell_price": 1765.0,
+      "avg_cost": 1856.19,
+      "pnl_idr": -45595.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "ERAA",
+      "lots": 25,
+      "sell_price": 382.0,
+      "avg_cost": 408.11,
+      "pnl_idr": -65275.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "ERAA",
+      "lots": 15,
+      "sell_price": 380.0,
+      "avg_cost": 408.11,
+      "pnl_idr": -42165.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "KOTA",
+      "lots": 66,
+      "sell_price": 128.0,
+      "avg_cost": 126.58,
+      "pnl_idr": 9372.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "SMSM",
+      "lots": 12,
+      "sell_price": 1715.0,
+      "avg_cost": 1720.0,
+      "pnl_idr": -6000.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "KICI",
+      "lots": 35,
+      "sell_price": 194.0,
+      "avg_cost": 196.0,
+      "pnl_idr": -7000.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "BUMI",
+      "lots": 27,
+      "sell_price": 160.0,
+      "avg_cost": 170.0,
+      "pnl_idr": -27000.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "TIPA",
+      "lots": 1,
+      "sell_price": 2160.0,
+      "avg_cost": 2160.0,
+      "pnl_idr": 0.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "TPIA",
+      "lots": 2180,
+      "sell_price": 10.0,
+      "avg_cost": 10.9,
+      "pnl_idr": -196200.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "TPIA",
+      "lots": 2180,
+      "sell_price": 7.0,
+      "avg_cost": 10.9,
+      "pnl_idr": -850200.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "TPIA",
+      "lots": 22,
+      "sell_price": 2200.0,
+      "avg_cost": 1687.02,
+      "pnl_idr": 1128556.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "GPRA",
+      "lots": 200,
+      "sell_price": 99.0,
+      "avg_cost": 66.83,
+      "pnl_idr": 643400.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "GPRA",
+      "lots": 103,
+      "sell_price": 67.0,
+      "avg_cost": 66.83,
+      "pnl_idr": 1751.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "AUTO",
+      "lots": 10,
+      "sell_price": 2710.0,
+      "avg_cost": 4.0,
+      "pnl_idr": 2706000.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "AUTO",
+      "lots": 2700,
+      "sell_price": 10.0,
+      "avg_cost": 4.0,
+      "pnl_idr": 1620000.0
+    },
+    {
+      "date": "2026-07-29",
+      "ticker": "MCAS",
+      "lots": 278,
+      "sell_price": 1.0,
+      "avg_cost": 10.0,
+      "pnl_idr": -250200.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "ICBP",
+      "lots": 4,
+      "sell_price": 7075.0,
+      "avg_cost": 7050.0,
+      "pnl_idr": 10000.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "ERAA",
+      "lots": 75,
+      "sell_price": 410.0,
+      "avg_cost": 408.11,
+      "pnl_idr": 14175.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "DEWA",
+      "lots": 45,
+      "sell_price": 474.0,
+      "avg_cost": 450.22,
+      "pnl_idr": 107010.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "BULL",
+      "lots": 25,
+      "sell_price": 420.0,
+      "avg_cost": 416.0,
+      "pnl_idr": 10000.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "ELSA",
+      "lots": 13,
+      "sell_price": 680.0,
+      "avg_cost": 674.23,
+      "pnl_idr": 7501.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "AUTO",
+      "lots": 11,
+      "sell_price": 2800.0,
+      "avg_cost": 2704.0,
+      "pnl_idr": 105600.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "DWGL",
+      "lots": 28,
+      "sell_price": 366.0,
+      "avg_cost": 338.0,
+      "pnl_idr": 78400.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "PMJS",
+      "lots": 100,
+      "sell_price": 111.0,
+      "avg_cost": 108.0,
+      "pnl_idr": 30000.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "BAIK",
+      "lots": 10,
+      "sell_price": 780.0,
+      "avg_cost": 745.0,
+      "pnl_idr": 35000.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "IATA",
+      "lots": 250,
+      "sell_price": 75.0,
+      "avg_cost": 71.0,
+      "pnl_idr": 100000.0
+    },
+    {
+      "date": "2026-07-31",
+      "ticker": "IATA",
+      "lots": 250,
+      "sell_price": 74.0,
+      "avg_cost": 71.0,
+      "pnl_idr": 75000.0
+    },
+    {
+      "date": "2026-08-03",
+      "ticker": "ADHI",
+      "lots": 60,
+      "sell_price": 156.0,
+      "avg_cost": 162.0,
+      "pnl_idr": -36000.0
+    },
+    {
+      "date": "2026-08-03",
+      "ticker": "DOSS",
+      "lots": 200,
+      "sell_price": 154.0,
+      "avg_cost": 187.0,
+      "pnl_idr": -660000.0
+    },
+    {
+      "date": "2026-08-03",
+      "ticker": "BULL",
+      "lots": 50,
+      "sell_price": 434.0,
+      "avg_cost": 456.0,
+      "pnl_idr": -110000.0
+    },
+    {
+      "date": "2026-08-03",
+      "ticker": "FWCT",
+      "lots": 75,
+      "sell_price": 94.0,
+      "avg_cost": 102.0,
+      "pnl_idr": -60000.0
+    },
+    {
+      "date": "2026-08-03",
+      "ticker": "JGLE",
+      "lots": 225,
+      "sell_price": 66.0,
+      "avg_cost": 61.0,
+      "pnl_idr": 112500.0
+    },
+    {
+      "date": "2026-08-04",
+      "ticker": "GRIA",
+      "lots": 294,
+      "sell_price": 133.0,
+      "avg_cost": 135.0,
+      "pnl_idr": -58800.0
+    },
+    {
+      "date": "2026-08-04",
+      "ticker": "ANTM",
+      "lots": 10,
+      "sell_price": 2890.0,
+      "avg_cost": 3065.0,
+      "pnl_idr": -175000.0
+    },
+    {
+      "date": "2026-08-04",
+      "ticker": "RALS",
+      "lots": 52,
+      "sell_price": 376.0,
+      "avg_cost": 379.63,
+      "pnl_idr": -18876.0
+    },
+    {
+      "date": "2026-08-04",
+      "ticker": "BACH",
+      "lots": 43,
+      "sell_price": 1070.0,
+      "avg_cost": 1012.0,
+      "pnl_idr": 249400.0
+    },
+    {
+      "date": "2026-08-04",
+      "ticker": "FWCT",
+      "lots": 100,
+      "sell_price": 95.0,
+      "avg_cost": 102.0,
+      "pnl_idr": -70000.0
+    },
+    {
+      "date": "2026-08-04",
+      "ticker": "JGLE",
+      "lots": 597,
+      "sell_price": 70.0,
+      "avg_cost": 75.62,
+      "pnl_idr": -335514.0
+    },
+    {
+      "date": "2026-08-05",
+      "ticker": "BRIS",
+      "lots": 10,
+      "sell_price": 1815.0,
+      "avg_cost": 1856.19,
+      "pnl_idr": -41190.0
+    },
+    {
+      "date": "2026-08-05",
+      "ticker": "INTD",
+      "lots": 34,
+      "sell_price": 264.0,
+      "avg_cost": 37.96,
+      "pnl_idr": 768536.0
+    },
+    {
+      "date": "2026-08-05",
+      "ticker": "FWCT",
+      "lots": 75,
+      "sell_price": 94.0,
+      "avg_cost": 102.0,
+      "pnl_idr": -60000.0
+    },
+    {
+      "date": "2026-08-05",
+      "ticker": "KOTA",
+      "lots": 198,
+      "sell_price": 79.0,
+      "avg_cost": 151.36,
+      "pnl_idr": -1432728.0
+    },
+    {
+      "date": "2026-08-05",
+      "ticker": "JGLE",
+      "lots": 199,
+      "sell_price": 89.0,
+      "avg_cost": 75.62,
+      "pnl_idr": 266262.0
+    },
+    {
+      "date": "2026-08-05",
+      "ticker": "FORE",
+      "lots": 38,
+      "sell_price": 760.0,
+      "avg_cost": 760.0,
+      "pnl_idr": 0.0
+    },
+    {
+      "date": "2026-08-05",
+      "ticker": "KOBX",
+      "lots": 139,
+      "sell_price": 167.0,
+      "avg_cost": 185.0,
+      "pnl_idr": -250200.0
+    },
+    {
+      "date": "2026-08-05",
+      "ticker": "MERI",
+      "lots": 207,
+      "sell_price": 115.0,
+      "avg_cost": 133.0,
+      "pnl_idr": -372600.0
+    },
+    {
+      "date": "2026-08-05",
+      "ticker": "BRNA",
+      "lots": 74,
+      "sell_price": 705.0,
+      "avg_cost": 732.0,
+      "pnl_idr": -199800.0
+    },
+    {
+      "date": "2026-08-05",
+      "ticker": "IATA",
+      "lots": 312,
+      "sell_price": 96.0,
+      "avg_cost": 94.0,
+      "pnl_idr": 62400.0
+    }
+  ],
+  "watchlist": [
+    "JKON",
+    "GPRA",
+    "KOTA"
+  ]
+}
