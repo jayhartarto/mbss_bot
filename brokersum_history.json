@@ -1,0 +1,530 @@
+{
+  "TPIA": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": 626090000000,
+      "net_foreign_flow_pct": 14.4,
+      "broker_concentration_pct": 0.0
+    },
+    {
+      "date": "2026-07-30",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 4.6
+    },
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 4.7
+    }
+  ],
+  "RALS": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": 285140000,
+      "net_foreign_flow_pct": 23.3,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "VKTR": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": -30550000000,
+      "net_foreign_flow_pct": -20.2,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "SIDO": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": -24380000000,
+      "net_foreign_flow_pct": -78.4,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "WIFI": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": -9020000000,
+      "net_foreign_flow_pct": -5.6,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "ACES": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": 4988526800,
+      "net_foreign_flow_pct": 29.6,
+      "broker_concentration_pct": 33.6
+    },
+    {
+      "date": "2026-07-22",
+      "net_foreign_flow_idr": 5465171600,
+      "net_foreign_flow_pct": 29.1,
+      "broker_concentration_pct": 30.1
+    },
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 2230000000,
+      "net_foreign_flow_pct": 25.6,
+      "broker_concentration_pct": 86.8
+    }
+  ],
+  "ANTM": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": 256014443000,
+      "net_foreign_flow_pct": 14.7,
+      "broker_concentration_pct": 29.5
+    },
+    {
+      "date": "2026-07-30",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 10.2
+    }
+  ],
+  "CTRA": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": 1755132000,
+      "net_foreign_flow_pct": 5.3,
+      "broker_concentration_pct": 10.6
+    },
+    {
+      "date": "2026-07-22",
+      "net_foreign_flow_idr": -1517305500,
+      "net_foreign_flow_pct": -3.7,
+      "broker_concentration_pct": 7.4
+    }
+  ],
+  "ERAA": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": -7090000000,
+      "net_foreign_flow_pct": -30.7,
+      "broker_concentration_pct": 0.0
+    },
+    {
+      "date": "2026-07-24",
+      "net_foreign_flow_idr": -6290102800,
+      "net_foreign_flow_pct": -4.6,
+      "broker_concentration_pct": 18.2
+    },
+    {
+      "date": "2026-07-27",
+      "net_foreign_flow_idr": -3930537000,
+      "net_foreign_flow_pct": -2.8,
+      "broker_concentration_pct": 18.4
+    }
+  ],
+  "BULL": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": -27460000000,
+      "net_foreign_flow_pct": -31.1,
+      "broker_concentration_pct": 0.0
+    },
+    {
+      "date": "2026-07-27",
+      "net_foreign_flow_idr": -9511485000,
+      "net_foreign_flow_pct": -2.7,
+      "broker_concentration_pct": 0.3
+    },
+    {
+      "date": "2026-07-29",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 0.0
+    },
+    {
+      "date": "2026-07-30",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 5.4
+    },
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": -14440000000,
+      "net_foreign_flow_pct": -4.5,
+      "broker_concentration_pct": 31.2
+    }
+  ],
+  "DSSA": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": 259220000000,
+      "net_foreign_flow_pct": 29.0,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "INET": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": -11410000000,
+      "net_foreign_flow_pct": -10.5,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "BUMI": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": -119820000000,
+      "net_foreign_flow_pct": -14.5,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "BMTR": [
+    {
+      "date": "2026-07-21",
+      "net_foreign_flow_idr": -1660000000,
+      "net_foreign_flow_pct": -7.9,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "KOTA": [
+    {
+      "date": "2026-07-22",
+      "net_foreign_flow_idr": -1120000000,
+      "net_foreign_flow_pct": -2.2,
+      "broker_concentration_pct": 0.0
+    },
+    {
+      "date": "2026-07-30",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 2.5
+    },
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 18910000000,
+      "net_foreign_flow_pct": 6.2,
+      "broker_concentration_pct": 17.8
+    },
+    {
+      "date": "2026-08-04",
+      "net_foreign_flow_idr": 12740000000,
+      "net_foreign_flow_pct": 5.2,
+      "broker_concentration_pct": 0.1
+    }
+  ],
+  "BRIS": [
+    {
+      "date": "2026-07-23",
+      "net_foreign_flow_idr": 3184403500,
+      "net_foreign_flow_pct": 2.5,
+      "broker_concentration_pct": 10.3
+    }
+  ],
+  "AKRA": [
+    {
+      "date": "2026-07-23",
+      "net_foreign_flow_idr": 13906972000,
+      "net_foreign_flow_pct": 7.7,
+      "broker_concentration_pct": 16.2
+    },
+    {
+      "date": "2026-07-29",
+      "net_foreign_flow_idr": 55820000000,
+      "net_foreign_flow_pct": 22.9,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "MNCN": [
+    {
+      "date": "2026-07-23",
+      "net_foreign_flow_idr": 1115725400,
+      "net_foreign_flow_pct": 1.3,
+      "broker_concentration_pct": 2.0
+    },
+    {
+      "date": "2026-07-24",
+      "net_foreign_flow_idr": -3047134200,
+      "net_foreign_flow_pct": -3.4,
+      "broker_concentration_pct": 0.3
+    }
+  ],
+  "TLKM": [
+    {
+      "date": "2026-07-24",
+      "net_foreign_flow_idr": 3262918000,
+      "net_foreign_flow_pct": 0.1,
+      "broker_concentration_pct": 14.2
+    }
+  ],
+  "ICBP": [
+    {
+      "date": "2026-07-24",
+      "net_foreign_flow_idr": 64643402500,
+      "net_foreign_flow_pct": 34.7,
+      "broker_concentration_pct": 38.2
+    },
+    {
+      "date": "2026-07-27",
+      "net_foreign_flow_idr": 66616540000,
+      "net_foreign_flow_pct": 34.7,
+      "broker_concentration_pct": 39.2
+    }
+  ],
+  "AALI": [
+    {
+      "date": "2026-07-24",
+      "net_foreign_flow_idr": -12154430000,
+      "net_foreign_flow_pct": -40.8,
+      "broker_concentration_pct": 0.8
+    }
+  ],
+  "MCAS": [
+    {
+      "date": "2026-07-27",
+      "net_foreign_flow_idr": 68658200,
+      "net_foreign_flow_pct": 56.8,
+      "broker_concentration_pct": 56.9
+    }
+  ],
+  "INTD": [
+    {
+      "date": "2026-07-27",
+      "net_foreign_flow_idr": -2228800,
+      "net_foreign_flow_pct": -100.0,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "FAST": [
+    {
+      "date": "2026-07-30",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 13.3
+    },
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": -875267400,
+      "net_foreign_flow_pct": -42.6,
+      "broker_concentration_pct": 1.6
+    }
+  ],
+  "YELO": [
+    {
+      "date": "2026-07-30",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 67.2
+    }
+  ],
+  "MLPT": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 2970000000,
+      "net_foreign_flow_pct": 13.9,
+      "broker_concentration_pct": 113.7
+    }
+  ],
+  "SIMP": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": -7073484000,
+      "net_foreign_flow_pct": -18.3,
+      "broker_concentration_pct": 4.8
+    }
+  ],
+  "SGER": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 760280000,
+      "net_foreign_flow_pct": 11.3,
+      "broker_concentration_pct": 43.5
+    }
+  ],
+  "SRSN": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": -143387900,
+      "net_foreign_flow_pct": -2.1,
+      "broker_concentration_pct": 12.9
+    }
+  ],
+  "OPMS": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 11898400,
+      "net_foreign_flow_pct": 0.2,
+      "broker_concentration_pct": 0.6
+    }
+  ],
+  "DMAS": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 14270000000,
+      "net_foreign_flow_pct": 51.1,
+      "broker_concentration_pct": 137.8
+    }
+  ],
+  "FPNI": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": -1313387000,
+      "net_foreign_flow_pct": -69.0,
+      "broker_concentration_pct": 2.1
+    }
+  ],
+  "UCID": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": -1045346000,
+      "net_foreign_flow_pct": -20.0,
+      "broker_concentration_pct": 34.1
+    }
+  ],
+  "ULTJ": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": -4928236000,
+      "net_foreign_flow_pct": -28.0,
+      "broker_concentration_pct": 16.2
+    }
+  ],
+  "IATA": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 6280000000,
+      "net_foreign_flow_pct": 18.1,
+      "broker_concentration_pct": 95.9
+    },
+    {
+      "date": "2026-08-04",
+      "net_foreign_flow_idr": 1840000000,
+      "net_foreign_flow_pct": 1.0,
+      "broker_concentration_pct": 6.8
+    }
+  ],
+  "DOOH": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 11270000000,
+      "net_foreign_flow_pct": 19.6,
+      "broker_concentration_pct": 63.0
+    }
+  ],
+  "DEWA": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": -13810000000,
+      "net_foreign_flow_pct": -2.2,
+      "broker_concentration_pct": 0.0
+    }
+  ],
+  "HRTA": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": -6970000000,
+      "net_foreign_flow_pct": -15.3,
+      "broker_concentration_pct": 5.7
+    }
+  ],
+  "BIRD": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 505890000,
+      "net_foreign_flow_pct": 13.2,
+      "broker_concentration_pct": 164.3
+    }
+  ],
+  "MPMX": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": -1070000000,
+      "net_foreign_flow_pct": -22.5,
+      "broker_concentration_pct": 33.6
+    }
+  ],
+  "INDF": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 4470000000,
+      "net_foreign_flow_pct": 1.0,
+      "broker_concentration_pct": 61.1
+    }
+  ],
+  "GGRP": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 21540000,
+      "net_foreign_flow_pct": 64.5,
+      "broker_concentration_pct": 180.9
+    }
+  ],
+  "CLEO": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 493310000,
+      "net_foreign_flow_pct": 22.0,
+      "broker_concentration_pct": 0.1
+    }
+  ],
+  "UNVR": [
+    {
+      "date": "2026-07-31",
+      "net_foreign_flow_idr": 18610000000,
+      "net_foreign_flow_pct": 17.8,
+      "broker_concentration_pct": 114.4
+    }
+  ],
+  "WTON": [
+    {
+      "date": "2026-08-03",
+      "net_foreign_flow_idr": 56880000,
+      "net_foreign_flow_pct": 82.7,
+      "broker_concentration_pct": 89.1
+    }
+  ],
+  "GRIA": [
+    {
+      "date": "2026-08-03",
+      "net_foreign_flow_idr": 18590000,
+      "net_foreign_flow_pct": 7.8,
+      "broker_concentration_pct": 172.3
+    }
+  ],
+  "MERI": [
+    {
+      "date": "2026-08-04",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 3.0
+    }
+  ],
+  "KOBX": [
+    {
+      "date": "2026-08-04",
+      "net_foreign_flow_idr": -103380000,
+      "net_foreign_flow_pct": -1.6,
+      "broker_concentration_pct": 2.6
+    }
+  ],
+  "BRNA": [
+    {
+      "date": "2026-08-04",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 8.8
+    }
+  ],
+  "MDKA": [
+    {
+      "date": "2026-08-04",
+      "net_foreign_flow_idr": 115140000000,
+      "net_foreign_flow_pct": 30.2,
+      "broker_concentration_pct": 190.1
+    }
+  ],
+  "IKBI": [
+    {
+      "date": "2026-08-05",
+      "net_foreign_flow_idr": 0,
+      "net_foreign_flow_pct": 0.0,
+      "broker_concentration_pct": 18.8
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "SMRU": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-01",
+    "blacklisted_since": "2026-08-01"
+  },
+  "LMAS": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-01",
+    "blacklisted_since": "2026-08-01"
+  },
+  "JSKY": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-01",
+    "blacklisted_since": "2026-08-01"
+  },
+  "CPRI": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-01",
+    "blacklisted_since": "2026-08-01"
+  },
+  "IIKP": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-01",
+    "blacklisted_since": "2026-08-01"
+  },
+  "PLAS": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-01",
+    "blacklisted_since": "2026-08-01"
+  },
+  "CBMF": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-01",
+    "blacklisted_since": "2026-08-01"
+  },
+  "SCPI": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-01",
+    "blacklisted_since": "2026-08-01"
+  },
+  "LCGP": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-01",
+    "blacklisted_since": "2026-08-01"
+  },
+  "GAMA": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-01",
+    "blacklisted_since": "2026-08-01"
+  },
+  "GIAA": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-02",
+    "blacklisted_since": "2026-08-02"
+  },
+  "GMFI": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-02",
+    "blacklisted_since": "2026-08-02"
+  },
+  "HOKI": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-02",
+    "blacklisted_since": "2026-08-02"
+  },
+  "MLIA": {
+    "consecutive_fails": 3,
+    "last_attempt": "2026-08-03",
+    "blacklisted_since": "2026-08-03"
+  }
+}
