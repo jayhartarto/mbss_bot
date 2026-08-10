@@ -49,6 +49,7 @@ import engine.legacy_core as core
 import engine.nightly as nightly_engine
 import engine.broker as broker_engine
 import engine.scoring as scoring_engine
+import engine.market as market_engine
 
 
 # ---------------------------------------------------------------------
@@ -261,7 +262,7 @@ async def screen_daytrade(update, context):
                 f"{i}. {r['ticker']} — {ab.get('label', '-')} ({ab.get('score', 0)}/100)\n"
                 f"   Harga {r.get('price')} | VWAP {ab.get('vwap', '-')} (jarak {ab.get('vwap_distance_pct', '-')}%) | Vol pace {ab.get('volume_pace_ratio', '-')}x\n"
                 f"   Trigger {ab.get('trigger_price', '-')} | Invalid <{ab.get('invalidation_level', '-')}\n"
-                f"   {ab.get('notes', '') or '-'}"
+                f"   {ab.get('notes', '') or '-'}{market_engine.format_sector_tag(r.get('sector'))}"
             )
 
         # MBSS v2 (user request — kasus TALF/IATA/SGRO): bagian TERPISAH untuk
@@ -302,7 +303,7 @@ async def screen_daytrade(update, context):
             f"   Total {v5['total']}/100 | Bias {r.get('_positive_bias', '-')}/100 | Lane {r.get('_positive_lane', '-')} | B {br['score']} | C {cont['score']} | Act {v5['activity']['score']} | VolQ {volq['score']} | Room {room['score']} | Safety {risk['score']}{src_live}\n"
             f"   Harga {r.get('price')} | Valid >{v5['valid_level']} | Ideal {v5['ideal']} | Invalid <{v5['invalid']}\n"
             f"   Room: {room['label']} ({room['dist_high_pct']}% ke high, upside TP1 {room['upside_tp1_pct']}%) | VolQ: {volq['label']} | Continuation: {cont['label']}\n"
-            f"   Note: {v5['note']}"
+            f"   Note: {v5['note']}{market_engine.format_sector_tag(r.get('sector'))}"
         )
 
     await core.safe_reply(update.message, "\n\n".join(lines))
@@ -742,6 +743,7 @@ def _gptpick_format_item(scoring: dict) -> str:
         f"  Buy {buy} | TP1 {tp1} | SL {sl} | RR@max {rr_text}"
         f"{rr_warning}\n"
         f"  {', '.join(g.get('reasons', [])) if g.get('reasons') else '—'}"
+        f"{market_engine.format_sector_tag(scoring.get('sector'), prefix=chr(10) + '  ')}"
     )
 
 
@@ -1012,12 +1014,18 @@ async def high_conviction_command(update, context):
             streak_str += f", {streak_hc}x khusus /hc"
 
         daytrade_note = f" | DT {r['_daytrade_score_hc']:.1f}" if "_daytrade_score_hc" in r else ""
+
+        sector_note = ""
+        sector_info = market_engine.get_sector_rank_info(r.get("sector"))
+        if sector_info:
+            sector_note = f"\n   🏭 Sektor {sector_info['sector']}: #{sector_info['rank']}/{sector_info['total_sectors']} terkuat ({sector_info['avg_return_pct']:+.1f}% avg)"
+
         lines.append(
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f}{daytrade_note}{streak_str} "
             f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
             f"   {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)} kriteria | "
             f"RR {rr_str} | {r.get('action_label_id', '-')}\n"
-            f"   Entry {t.get('buy_range', '-')}{ceiling_str}"
+            f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}"
         )
 
     lines.append("\nDetail lengkap: /check TICKER")
@@ -1045,6 +1053,10 @@ BSJP_ARA_DISTANCE_MIN_PCT = 0   # SEMENTARA permisif — user eksplisit minta li
 BSJP_ARA_DISTANCE_MAX_PCT = 15  # sebelum kunci rentang final (ganti setelah lihat sebaran nyata)
 BSJP_PREFILTER_COUNT = 40  # berapa kandidat dari cache EOD yang di-live-check
 BSJP_DAILY_HISTORY_LOOKBACK = 25  # buat hitung SMA5 & volume MA20 (butuh >=20 bar + buffer)
+
+# MBSS v2 (user request — BSJP-ARA "pola GIAA"):
+BSJP_ARA_MIN_MOMENTUM_PCT = 5.0   # harga hari ini vs open hari ini, minimal naik segini buat jadi kandidat
+BSJP_ARA_MIN_VOLQ = 5.0           # volume hari ini vs avg 20hr, referensi GIAA 13x, ambang valid >5x
 
 
 def compute_bsjp_obv(hist_daily) -> "pd.Series":
@@ -1118,34 +1130,13 @@ async def compute_bsjp_structure_checklist(ticker: str, r: dict, hist_prior, cur
     return {"checklist": checklist, "met": met, "total": len(checklist)}
 
 
-async def bsjp_screening_command(update, context):
+async def _run_bsjp_6criteria(update):
     """
-    /bsjp — screening BSJP (Beli Sore Jual Pagi), varian momentum/continuation.
-    WAJIB dijalankan menjelang closing (idealnya 15:50-16:00 WIB) — market
-    HARUS masih buka supaya bisa fetch data live (baik intraday bar maupun
-    histori harian terkini).
-
-    REVISI (diperketat, berdasarkan riset formula komunitas + Stockbit):
-    6 kriteria WAJIB semua lolos (AND, bukan mayoritas):
-      1. Harga >= 1.05x previous close (naik >=5% dari kemarin)
-      2. Volume hari ini >= 2x volume MA20 DAN >= 1x volume kemarin
-      3. Harga >= SMA5
-      4. Candle hari ini positif (harga >= open hari ini)
-      5. Value traded >= Rp5 miliar (SEKARANG WAJIB, bukan peringatan lagi)
-      6. RSI 60-85 (dipertahankan lebih ketat dari riset RSI>=50)
-    Plus di atas EMA9/SMA20 dari pra-filter cache (dipertahankan dari desain awal).
-    Jarak ke ARA & checklist akumulasi bandarmology (kalau ada cache broker)
-    ditampilkan sebagai INFORMASI, tidak menggugurkan.
+    Logika 6 kriteria wajib BSJP asli — diekstrak jadi fungsi TERPISAH dari
+    bsjp_screening_command() (MBSS v2, user request) supaya early-return di
+    sini (cache kosong, tidak ada kandidat lolos, dst) TIDAK ikut
+    menghentikan bagian BSJP-ARA yang jalan setelahnya di command utama.
     """
-    session = core.get_current_idx_session()
-    if session is None:
-        await core.safe_reply(
-            update.message,
-            "⚠️ /bsjp cuma berguna saat jam bursa (idealnya menjelang closing, 15:50-16:00 WIB) — "
-            "di luar itu tidak ada data live untuk dicek."
-        )
-        return
-
     scored = nightly_engine.load_daily_scan_cache()
     if not scored:
         await core.safe_reply(update.message, "⚠️ Cache /eodscan belum ada/basi — jalankan /eodscan dulu (dari kemarin sore, bukan hari ini).")
@@ -1253,6 +1244,7 @@ async def bsjp_screening_command(update, context):
             "sma5": round(sma5, 0), "value_traded_today": value_traded_today,
             "rsi": rsi, "ara_distance": ara_distance, "close_pos": close_pos,
             "akumulasi_note": akumulasi_note, "structure": structure,
+            "targets": r.get("targets", {}), "action_label_id": r.get("action_label_id"),
         })
 
     if not results:
@@ -1280,6 +1272,137 @@ async def bsjp_screening_command(update, context):
             lines.append(f"   {icon} {c['nama']}: {c['detail']}")
 
     await core.safe_reply(update.message, "\n\n".join(lines))
+    try:
+        await asyncio.to_thread(core.lock_daily_daytrade_picks, results, "bsjp")
+    except Exception as e:
+        print(f"⚠️ Gagal mengunci picks /bsjp untuk /winrate: {e}")
+
+
+async def bsjp_screening_command(update, context):
+    """
+    /bsjp — screening BSJP (Beli Sore Jual Pagi), varian momentum/continuation.
+    WAJIB dijalankan menjelang closing (idealnya 15:50-16:00 WIB) — market
+    HARUS masih buka supaya bisa fetch data live (baik intraday bar maupun
+    histori harian terkini).
+
+    REVISI (diperketat, berdasarkan riset formula komunitas + Stockbit):
+    6 kriteria WAJIB semua lolos (AND, bukan mayoritas):
+      1. Harga >= 1.05x previous close (naik >=5% dari kemarin)
+      2. Volume hari ini >= 2x volume MA20 DAN >= 1x volume kemarin
+      3. Harga >= SMA5
+      4. Candle hari ini positif (harga >= open hari ini)
+      5. Value traded >= Rp5 miliar (SEKARANG WAJIB, bukan peringatan lagi)
+      6. RSI 60-85 (dipertahankan lebih ketat dari riset RSI>=50)
+    Plus di atas EMA9/SMA20 dari pra-filter cache (dipertahankan dari desain awal).
+    Jarak ke ARA & checklist akumulasi bandarmology (kalau ada cache broker)
+    ditampilkan sebagai INFORMASI, tidak menggugurkan.
+    """
+    session = core.get_current_idx_session()
+    if session is None:
+        await core.safe_reply(
+            update.message,
+            "⚠️ /bsjp cuma berguna saat jam bursa (idealnya menjelang closing, 15:50-16:00 WIB, atau pra-penutupan) — "
+            "di luar itu tidak ada data live untuk dicek."
+        )
+        return
+
+    # MBSS v2 (user request — 2 pesan terpisah, independen): logika 6 kriteria
+    # asli diekstrak ke fungsi TERPISAH supaya early-return di dalamnya (mis.
+    # cache eodscan kosong, tidak ada kandidat lolos) TIDAK ikut menghentikan
+    # bagian BSJP-ARA di bawahnya — dua metode harus tetap berjalan
+    # independen, sesuai kesepakatan "berdampingan, bukan saling gantung".
+    await _run_bsjp_6criteria(update)
+
+    # ==========================================
+    # 🌆 PESAN KE-2: BSJP-ARA — "pola GIAA" (MBSS v2, user request)
+    # Baca cache yang SUDAH di-pre-filter + fetch berita semalam (bagian
+    # /eodscan) — di sini TINGGAL cek live yang murah: momentum sejak open
+    # hari ini, dan VolQ (harus SANGAT meledak, >5x, referensi GIAA 13x).
+    # BERDAMPINGAN dengan 6 kriteria di atas, TIDAK saling menggantikan —
+    # source terpisah di /winrate ("bsjp_ara") supaya bisa dibandingkan
+    # akurasinya dari data nyata, bukan ditebak sekarang.
+    # ==========================================
+    ara_candidates = nightly_engine.load_bsjp_ara_candidates()
+    if not ara_candidates:
+        await core.safe_reply(
+            update.message,
+            "🌆 BSJP-ARA: tidak ada kandidat dari pre-filter semalam (harga<500, gerak kemarin datar, "
+            "volume kemarin rendah) — atau /eodscan belum jalan dengan versi terbaru."
+        )
+        return
+
+    ara_results = []
+    scored_cache = nightly_engine.load_daily_scan_cache()  # dipakai buat reuse targets, di luar loop biar tidak reload tiap iterasi
+    for c in ara_candidates:
+        ticker = c["ticker"]
+        try:
+            bars = await asyncio.to_thread(core.get_intraday_session_bars, ticker, "5m", "1d")
+        except Exception as e:
+            print(f"⚠️ BSJP-ARA: gagal fetch live {ticker}: {e}")
+            continue
+        if bars is None or bars.empty:
+            continue
+
+        today_open = float(bars["Open"].iloc[0])
+        current_price = float(bars["Close"].iloc[-1])
+        momentum_pct = (current_price / today_open - 1) * 100 if today_open else 0
+
+        if momentum_pct < BSJP_ARA_MIN_MOMENTUM_PCT:
+            continue  # belum "naik kuat" sejak open, sesuai spesifikasi user — cek murah dulu sebelum fetch histori
+
+        # VolQ: volume hari ini (live, sejauh sesi berjalan) vs rata-rata 20
+        # hari — user minta ambang >5x (referensi GIAA 13x). Butuh histori
+        # harian pendek buat vol_ma20 genuine (bukan sekadar re-use vol_ratio
+        # KEMARIN yang skalanya beda) — fetch cuma untuk kandidat yang SUDAH
+        # lolos momentum>=5% di atas, supaya biayanya terbatas.
+        try:
+            hist_short = await asyncio.to_thread(core.get_ohlcv_smart, ticker, 25)
+        except Exception as e:
+            print(f"⚠️ BSJP-ARA: gagal fetch histori volume {ticker}: {e}")
+            continue
+        if hist_short is None or hist_short.empty or len(hist_short) < 20:
+            continue
+        vol_ma20 = hist_short["Volume"].tail(20).mean()
+        volume_today_so_far = float(bars["Volume"].sum())
+        volq_ratio = volume_today_so_far / max(vol_ma20, 1e-9)
+        if volq_ratio < BSJP_ARA_MIN_VOLQ:
+            continue
+
+        ara_distance = core.compute_ara_distance_pct(current_price, c.get("prev_close"))
+        news_titles = [n["title"] for n in (c.get("news") or [])[:2]]
+
+        eod_r = scored_cache.get(ticker, {})
+        ara_results.append({
+            "ticker": ticker, "current_price": current_price, "momentum_pct": momentum_pct,
+            "today_open": today_open, "ara_distance": ara_distance, "volq_ratio": round(volq_ratio, 1),
+            "sector": c.get("sector"), "news_titles": news_titles,
+            "targets": eod_r.get("targets", {}), "action_label_id": eod_r.get("action_label_id"),
+        })
+
+    if not ara_results:
+        await core.safe_reply(
+            update.message,
+            f"🌆 BSJP-ARA: {len(ara_candidates)} kandidat dari pre-filter semalam, "
+            f"tapi belum ada yang naik ≥{BSJP_ARA_MIN_MOMENTUM_PCT:.0f}% sejak open DAN volume ≥{BSJP_ARA_MIN_VOLQ:.0f}x normal. Coba cek lagi nanti."
+        )
+        return
+
+    ara_results.sort(key=lambda r: r["momentum_pct"], reverse=True)
+    ara_lines = [f"🌆 BSJP-ARA — {len(ara_results)} kandidat naik ≥{BSJP_ARA_MIN_MOMENTUM_PCT:.0f}% sejak open & volume ≥{BSJP_ARA_MIN_VOLQ:.0f}x normal (dari {len(ara_candidates)} pre-filter semalam)\n"]
+    ara_lines.append("⚠️ Metode TERPISAH dari 6 kriteria di atas — pola \"diam kemarin, meledak hari ini\" (referensi GIAA). Belum ada rekam jejak, pantau /winrate source=bsjp_ara.\n")
+    for i, r in enumerate(ara_results, 1):
+        news_str = f"\n   📰 {r['news_titles'][0]}" if r["news_titles"] else ""
+        sector_str = market_engine.format_sector_tag(r.get("sector"))
+        ara_lines.append(
+            f"{i}. {r['ticker']} — {r['current_price']:.0f} (open {r['today_open']:.0f}, {r['momentum_pct']:+.1f}% sejak open)\n"
+            f"   VolQ {r['volq_ratio']}x | Jarak ARA {r['ara_distance']}%{news_str}{sector_str}"
+        )
+
+    await core.safe_reply(update.message, "\n\n".join(ara_lines))
+    try:
+        await asyncio.to_thread(core.lock_daily_daytrade_picks, ara_results, "bsjp_ara")
+    except Exception as e:
+        print(f"⚠️ Gagal mengunci picks /bsjp_ara untuk /winrate: {e}")
 
 
 async def strong_buy_command(update, context):
@@ -1327,7 +1450,7 @@ async def strong_buy_command(update, context):
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f} "
             f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
             f"   RR {rr_str}{liq_note}\n"
-            f"   Entry {t.get('buy_range', '-')}{ceiling_str}"
+            f"   Entry {t.get('buy_range', '-')}{ceiling_str}{market_engine.format_sector_tag(r.get('sector'))}"
         )
 
     lines.append("\nDetail lengkap: /check TICKER")
@@ -1425,14 +1548,18 @@ async def consensus_command(update, context):
         "is_financial_distress_flag": r.get("is_financial_distress_flag"),
         "entry": r.get("targets", {}).get("buy_range"),
         "consecutive_appearance_streak": streaks[r["ticker"]],
+        "sector_strength": market_engine.get_sector_rank_info(r.get("sector")),
     } for r in qualifying[:15]]
 
     streak_lines = [f"🔁 {t}x — {tk}" for tk, t in streaks.items() if t > 1]
     streak_block = ("\n\nStreak kemunculan berturut-turut (lintas semua tool, bukan cuma /consensus):\n" + "\n".join(streak_lines)) if streak_lines else ""
 
+    sector_lines = [f"{r['ticker']}{market_engine.format_sector_tag(r.get('sector'), prefix=' — ')}" for r in qualifying[:15] if market_engine.get_sector_rank_info(r.get("sector"))]
+    sector_block = ("\n\nKekuatan sektor:\n" + "\n".join(sector_lines)) if sector_lines else ""
+
     try:
         summary_text = await asyncio.to_thread(core.ask_gemini_to_analyze, gemini_input, core.CONSENSUS_BRIEF_INSTRUCTION)
-        await core.safe_reply(update.message, summary_text + streak_block)
+        await core.safe_reply(update.message, summary_text + streak_block + sector_block)
     except Exception as e:
         print(f"⚠️ Gemini consensus brief gagal: {e}")
         # Gagal-lunak — tetap kasih daftar mentah kalau Gemini error, jangan diam saja

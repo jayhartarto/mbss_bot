@@ -256,3 +256,38 @@ def load_market_context() -> dict | None:
     if meta.get("trading_day_marker") != current_marker:
         return None
     return cache_manager.get("market", default=None)
+
+
+def get_sector_rank_info(sector: str) -> dict | None:
+    """
+    MBSS v2 (user request — sentimen sektoral sebagai penguat sinyal): kalau
+    sebuah saham dari sektor yang MALAM INI rata-ratanya kuat, itu konteks
+    tambahan yang berguna ("saham ini bukan cuma bagus sendirian, sektornya
+    juga lagi ramai"). Baca dari cache market context yang SUDAH dihitung
+    tiap malam (compute_market_breadth), tidak fetch apa pun baru.
+    Return None kalau data sektor tidak ada / sektor "N/A".
+    """
+    if not sector or sector == "N/A":
+        return None
+    breadth = load_market_context()
+    if not breadth:
+        return None
+    sectors = breadth.get("sector_avg_returns_pct", {})
+    if sector not in sectors:
+        return None
+    ranked = list(sectors.items())  # sudah terurut kuat->lemah dari compute_market_breadth
+    rank = next((i for i, (s, _) in enumerate(ranked, 1) if s == sector), None)
+    return {"sector": sector, "avg_return_pct": sectors[sector], "rank": rank, "total_sectors": len(ranked)}
+
+
+def format_sector_tag(sector: str, prefix: str = "\n   ") -> str:
+    """
+    MBSS v2 (user request — sentimen sektoral di SEMUA tools, bukan cuma
+    /hc & /consensus): formatter satu pintu supaya tampilannya konsisten
+    di mana pun dipakai. Return string kosong kalau data sektor tidak ada
+    (None-safe, aman dipakai tanpa cek terpisah di tiap command).
+    """
+    info = get_sector_rank_info(sector)
+    if not info:
+        return ""
+    return f"{prefix}🏭 Sektor {info['sector']}: #{info['rank']}/{info['total_sectors']} terkuat ({info['avg_return_pct']:+.1f}% avg)"

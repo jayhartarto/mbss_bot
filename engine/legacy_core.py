@@ -81,8 +81,23 @@ _YF_SESSION = _TimeoutSession()
 
 
 def get_yf_ticker(symbol: str):
-    """Use this instead of yf.Ticker(...) directly everywhere in this script."""
-    return yf.Ticker(symbol, session=_YF_SESSION)
+    """
+    Use this instead of yf.Ticker(...) directly everywhere in this script.
+
+    BUGFIX (ditemukan lewat migrasi ke VM baru — pip install menarik versi
+    yfinance JAUH lebih baru dari yang biasa dipakai, dan versi baru itu
+    WAJIB pakai session curl_cffi internal, MENOLAK total custom
+    requests.Session seperti _TimeoutSession yang kita bikin sebelumnya —
+    hasilnya 0/314 ticker berhasil, semua gagal dengan pesan error yang
+    sebenarnya sudah kasih tahu solusinya sendiri: "stop setting session,
+    let YF handle." Jadi SEKARANG session TIDAK di-pass lagi — yfinance
+    yang urus sendiri secara internal. Konsekuensinya: proteksi timeout
+    level-socket dari _TimeoutSession (lihat komentar class-nya di atas,
+    dibuat buat cegah thread macet) tidak lagi aktif — tapi parameter
+    timeout=... yang di-pass langsung ke .history() di tiap pemanggil
+    (yfinance_get_kline dkk) tetap jalan sebagai lapisan proteksi kedua.
+    """
+    return yf.Ticker(symbol)
 
 
 def yfinance_get_kline(ticker: str, period: str = "2y") -> pd.DataFrame:
@@ -2887,7 +2902,16 @@ def get_current_idx_session():
     — cek idx.co.id/id/produk/mekanisme-dan-jam-perdagangan kalau terasa meleset.
     Senin-Kamis: Sesi 1 09:00-12:00, Sesi 2 13:30-15:49.
     Jumat: Sesi 1 09:00-11:30, Sesi 2 14:00-15:49 (jeda lebih panjang, salat Jumat).
-    Return "sesi_1", "sesi_2", atau None (di luar jam bursa/weekend).
+
+    BUGFIX (ditemukan lewat pengalaman user — /bsjp ditolak justru di jam yang
+    menurut mereka paling efektif): periode Pra-Penutupan (15:50-16:00 WIB,
+    SAMA untuk semua hari termasuk Jumat) sebelumnya TIDAK dikenali sama
+    sekali (jatuh ke None) — dikonfirmasi via riset multi-sumber (termasuk
+    idx.co.id sendiri) sebagai "jendela paling ramai kedua setelah opening",
+    pas pembentukan harga penutupan resmi lewat call auction. Sekarang
+    dikenali sebagai sesi terpisah "pra_penutupan".
+
+    Return "sesi_1", "sesi_2", "pra_penutupan", atau None (di luar jam bursa/weekend).
     """
     now = datetime.datetime.now(WIB)
     if now.weekday() >= 5:  # Sabtu/Minggu
@@ -2900,6 +2924,8 @@ def get_current_idx_session():
         return "sesi_1"
     if sesi2_start <= t < datetime.time(15, 49):
         return "sesi_2"
+    if datetime.time(15, 49) <= t < datetime.time(16, 0):
+        return "pra_penutupan"
     return None
 
 

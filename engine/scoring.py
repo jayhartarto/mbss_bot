@@ -1246,6 +1246,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "ticker": ticker,
         "name": company_name,
         "sector": sector,
+        "company_name": company_name,  # BUGFIX: dihitung tapi tidak pernah disimpan — dibutuhkan buat fetch_company_news di pre-filter BSJP-ARA
         "price": int(current_price),
         "as_of_date": as_of_date,
         "data_freshness_warning": data_freshness_warning,
@@ -1300,6 +1301,16 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "breakout_level": swing_analysis["breakout_level"],
         "adaptive_scoring_used": has_adaptive_baseline,
         "day_range_pct_10d": round(price_range_pct, 1),  # transparency: how much this stock actually moved
+        # MBSS v2 (user request — pre-filter BSJP-ARA "pola GIAA"): persentase
+        # gerak harga KEMARIN sendiri (D-1 vs D-2, BUKAN hari ini) — dihitung
+        # GRATIS dari hist_daily yang sudah di-fetch di atas, tanpa fetch
+        # tambahan. Dipakai buat saring saham yang KEMARIN datar (kandidat
+        # "sleeper" yang mungkin baru meledak hari ini) dari saham yang
+        # kemarin SUDAH bergerak jauh (momentum sudah established).
+        "day_change_pct": (
+            round((float(close_prices.iloc[-1]) - float(close_prices.iloc[-2])) / float(close_prices.iloc[-2]) * 100, 2)
+            if len(close_prices) >= 2 else None
+        ),
         "targets": {
             "buy_range": f"{int(target_buy_min)} - {int(target_buy_max)}",
             "tp_1": int(tp_1),
