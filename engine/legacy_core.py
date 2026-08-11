@@ -2483,7 +2483,7 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
 # new factors, etc). This makes it visible when a score difference between two runs is
 # due to a real formula change vs. genuine day-to-day market movement — comparing scores
 # across different versions isn't apples-to-apples.
-SCORING_FORMULA_VERSION = "3.15.3"  # v3.15.3: Kriteria body candle (Kriteria 3) sekarang JUGA mensyaratkan candle HARIAN PENUH positif (harga sekarang >= open hari ini), diadopsi dari riset formula BSJP komunitas ("Price >= Open Price") — sebelumnya cuma cek kekuatan bar 4H terakhir, yang bisa menipu kalau ternyata hari itu OVERALL masih merah (bar 4H terakhir rebound kuat, tapi dari posisi jauh di bawah open pagi). Sekarang WAJIB keduanya: 4H kuat DAN hari ini positif.
+SCORING_FORMULA_VERSION = "3.15.5"  # v3.15.5: field enrichment baru (gratis, dari info dict yang sama) — industry, revenue_growth_pct, roe_pct, profit_margin_pct, forward_pe, peg_ratio. BELUM masuk formula skor Value, murni informasi tambahan. peg_ratio & forward_pe dapat sanity-bound yang sama seperti PE/PB (rasio turunan, rawan pola kerusakan yfinance yang sama).
 
 
 # NOTE (MBSS v2 refactor, Sprint 2 Tier 1.1): compute_factor_scoring moved to

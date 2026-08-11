@@ -847,13 +847,65 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     PB_SANITY_MAX = 100
     PE_SANITY_MAX = 500  # PE bisa sah tinggi utk perusahaan hampir-tanpa-laba, ambang lebih longgar dari PB
     if pb > PB_SANITY_MAX:
-        print(f"⚠️ {ticker}: PB {pb} dari yfinance melewati batas wajar ({PB_SANITY_MAX}x) — "
-              f"kemungkinan data quality issue, diperlakukan sebagai tidak diketahui, bukan sinyal distress")
-        pb = 0.0
+        # MBSS v2 (user request — temuan lewat log produksi nyata: TOBA, WINS,
+        # IPOL, ADRO, PGAS, SMMT, GDYR, BELL, GGRP SEMUA kena di 1x /eodscan
+        # — termasuk ADRO & PGAS yang saham BLUE-CHIP BESAR, bukan saham
+        # tipis/obscure seperti IATA kemarin. Skala masalahnya jauh lebih
+        # luas dari dugaan awal — bukan cuma kasus langka, kemungkinan
+        # `priceToBook` yfinance memang bermasalah SISTEMIK untuk saham IDX).
+        # SEBELUM langsung buang jadi "tidak diketahui", coba hitung ULANG
+        # sendiri dari price ÷ bookValue (field TERPISAH dari priceToBook di
+        # info dict, tidak bergantung pada rasio pra-hitung Yahoo yang
+        # ternyata sering salah) — kalau hasilnya masuk akal, PAKAI itu,
+        # jangan buang sinyal yang sebenarnya bisa diselamatkan.
+        book_value_per_share = core._safe_float(info.get("bookValue"), default=0.0)
+        pb_recomputed = (current_price / book_value_per_share) if book_value_per_share > 0 else 0.0
+        if 0 < pb_recomputed <= PB_SANITY_MAX:
+            print(f"⚠️ {ticker}: PB {pb} dari field priceToBook rusak (>{PB_SANITY_MAX}x) — "
+                  f"dihitung ULANG dari price/bookValue = {pb_recomputed:.2f}, dipakai sebagai ganti.")
+            pb = pb_recomputed
+        else:
+            print(f"⚠️ {ticker}: PB {pb} dari yfinance melewati batas wajar ({PB_SANITY_MAX}x) — "
+                  f"kemungkinan data quality issue, diperlakukan sebagai tidak diketahui, bukan sinyal distress")
+            pb = 0.0
     if pe > PE_SANITY_MAX:
         print(f"⚠️ {ticker}: PE {pe} dari yfinance melewati batas wajar ({PE_SANITY_MAX}x) — "
               f"kemungkinan data quality issue, diperlakukan sebagai tidak diketahui")
         pe = 0.0
+
+    # MBSS v2 (user request — perkaya insights, "explore variable data yfinance
+    # lagi"): field TAMBAHAN yang GRATIS — semuanya dari info dict yang SAMA
+    # yang sudah kita fetch buat PE/PB/dividend/sector, TIDAK ADA fetch
+    # jaringan baru. Sengaja BELUM diikutsertakan ke formula skor Value —
+    # itu keputusan terpisah (lihat diskusi "fundamental sebagai bonus vs
+    # komponen inti" sebelumnya) — untuk sekarang murni informasi tambahan,
+    # ditampilkan/tersimpan, siap dipakai nanti kalau memang mau diintegrasikan.
+    revenue_growth_pct = core._safe_float(info.get("revenueGrowth"), default=None)
+    if revenue_growth_pct is not None:
+        revenue_growth_pct = round(revenue_growth_pct * 100, 1)  # yfinance kasih desimal (0.12 = 12%)
+
+    roe_pct = core._safe_float(info.get("returnOnEquity"), default=None)
+    if roe_pct is not None:
+        roe_pct = round(roe_pct * 100, 1)
+
+    profit_margin_pct = core._safe_float(info.get("profitMargins"), default=None)
+    if profit_margin_pct is not None:
+        profit_margin_pct = round(profit_margin_pct * 100, 1)
+
+    industry = info.get("industry")  # lebih granular dari sector, mis. "Coking Coal" vs sector "Energy"
+
+    forward_pe = core._safe_float(info.get("forwardPE"), default=None)
+    if forward_pe is not None and forward_pe > PE_SANITY_MAX:
+        # Sama seperti trailingPE — bisa kena data quality issue yang sama,
+        # jangan asumsikan forwardPE otomatis bersih cuma karena field baru.
+        forward_pe = None
+
+    peg_ratio = core._safe_float(info.get("pegRatio"), default=None)
+    if peg_ratio is not None and (peg_ratio <= 0 or peg_ratio > 10):
+        # PEG rasio sehat biasanya jauh di bawah 10 — di luar itu kemungkinan
+        # besar data quality issue yang sama seperti PB/PE (rasio turunan,
+        # rawan pola kerusakan yang sama).
+        peg_ratio = None
 
     dividend_yield_raw = core._safe_float(info.get("dividendYield"), default=0.0)
     # yfinance sometimes returns this as a decimal (0.0886) and sometimes as a whole
@@ -1247,6 +1299,14 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "name": company_name,
         "sector": sector,
         "company_name": company_name,  # BUGFIX: dihitung tapi tidak pernah disimpan — dibutuhkan buat fetch_company_news di pre-filter BSJP-ARA
+        # Field tambahan gratis (user request — perkaya insights) — belum masuk
+        # formula skor, murni informasi/siap pakai buat pengembangan berikutnya.
+        "industry": industry,
+        "revenue_growth_pct": revenue_growth_pct,
+        "roe_pct": roe_pct,
+        "profit_margin_pct": profit_margin_pct,
+        "forward_pe": round(forward_pe, 1) if forward_pe is not None else None,
+        "peg_ratio": round(peg_ratio, 2) if peg_ratio is not None else None,
         "price": int(current_price),
         "as_of_date": as_of_date,
         "data_freshness_warning": data_freshness_warning,
