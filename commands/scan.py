@@ -1056,7 +1056,7 @@ BSJP_DAILY_HISTORY_LOOKBACK = 25  # buat hitung SMA5 & volume MA20 (butuh >=20 b
 
 # MBSS v2 (user request — BSJP-ARA "pola GIAA"):
 BSJP_ARA_MIN_MOMENTUM_PCT = 5.0   # harga hari ini vs open hari ini, minimal naik segini buat jadi kandidat
-BSJP_ARA_MIN_VOLQ = 5.0           # volume hari ini vs avg 20hr, referensi GIAA 13x, ambang valid >5x
+BSJP_ARA_MIN_VOLQ = 3.0           # direvisi dari 5.0 (user request) — lebih banyak kandidat, referensi GIAA tetap 13x jauh di atas ini
 
 
 def compute_bsjp_obv(hist_daily) -> "pd.Series":
@@ -1376,26 +1376,31 @@ async def bsjp_screening_command(update, context):
             "ticker": ticker, "current_price": current_price, "momentum_pct": momentum_pct,
             "today_open": today_open, "ara_distance": ara_distance, "volq_ratio": round(volq_ratio, 1),
             "sector": c.get("sector"), "news_titles": news_titles,
+            "catalyst_category": c.get("catalyst_category"), "catalyst_score": c.get("catalyst_score"),
+            "catalyst_reasoning": c.get("catalyst_reasoning"),
             "targets": eod_r.get("targets", {}), "action_label_id": eod_r.get("action_label_id"),
         })
 
     if not ara_results:
         await core.safe_reply(
             update.message,
-            f"🌆 BSJP-ARA: {len(ara_candidates)} kandidat dari pre-filter semalam, "
+            f"🌆 BSJP-ARA: {len(ara_candidates)} kandidat dari pre-filter semalam (sudah lolos filter katalis positif), "
             f"tapi belum ada yang naik ≥{BSJP_ARA_MIN_MOMENTUM_PCT:.0f}% sejak open DAN volume ≥{BSJP_ARA_MIN_VOLQ:.0f}x normal. Coba cek lagi nanti."
         )
         return
 
-    ara_results.sort(key=lambda r: r["momentum_pct"], reverse=True)
-    ara_lines = [f"🌆 BSJP-ARA — {len(ara_results)} kandidat naik ≥{BSJP_ARA_MIN_MOMENTUM_PCT:.0f}% sejak open & volume ≥{BSJP_ARA_MIN_VOLQ:.0f}x normal (dari {len(ara_candidates)} pre-filter semalam)\n"]
+    CATALYST_LABEL = {"strong_bullish": "🔥 Strong Bullish", "bullish": "🟢 Bullish"}
+    ara_results.sort(key=lambda r: (r.get("catalyst_score") or 0, r["momentum_pct"]), reverse=True)
+    ara_lines = [f"🌆 BSJP-ARA — {len(ara_results)} kandidat (katalis positif + naik ≥{BSJP_ARA_MIN_MOMENTUM_PCT:.0f}% sejak open + volume ≥{BSJP_ARA_MIN_VOLQ:.0f}x normal)\n"]
     ara_lines.append("⚠️ Metode TERPISAH dari 6 kriteria di atas — pola \"diam kemarin, meledak hari ini\" (referensi GIAA). Belum ada rekam jejak, pantau /winrate source=bsjp_ara.\n")
     for i, r in enumerate(ara_results, 1):
         news_str = f"\n   📰 {r['news_titles'][0]}" if r["news_titles"] else ""
         sector_str = market_engine.format_sector_tag(r.get("sector"))
+        cat_label = CATALYST_LABEL.get(r.get("catalyst_category"), r.get("catalyst_category") or "-")
+        catalyst_str = f"\n   {cat_label} ({r.get('catalyst_score', 0)}/100): {r.get('catalyst_reasoning', '-')}"
         ara_lines.append(
             f"{i}. {r['ticker']} — {r['current_price']:.0f} (open {r['today_open']:.0f}, {r['momentum_pct']:+.1f}% sejak open)\n"
-            f"   VolQ {r['volq_ratio']}x | Jarak ARA {r['ara_distance']}%{news_str}{sector_str}"
+            f"   VolQ {r['volq_ratio']}x | Jarak ARA {r['ara_distance']}%{catalyst_str}{news_str}{sector_str}"
         )
 
     await core.safe_reply(update.message, "\n\n".join(ara_lines))

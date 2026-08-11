@@ -4044,6 +4044,93 @@ KESIMPULAN:
 dipantau lebih lanjut, dan kenapa.
 """
 
+NEWS_CATALYST_INSTRUCTION = """
+You are scoring Indonesian stock news headlines for CATALYST STRENGTH — the
+question is specifically: "Apakah ada katalis positif yang bisa mendorong
+harga naik dalam beberapa hari ke depan?" (Is there a positive catalyst that
+could push the price up in the coming days?)
+
+This is NOT generic sentiment analysis. A neutral-sounding analyst opinion
+("saham X menarik menurut analis") is weak even if technically "positive
+sentiment" — a concrete new contract, acquisition, or permit is a MUCH
+stronger catalyst even if the headline tone sounds matter-of-fact.
+
+CATEGORIES (use these to calibrate, from strongest to weakest):
+🔥 Strong bullish: kontrak baru bernilai besar, akuisisi/merger, izin/proyek
+baru, ekspansi kapasitas, kenaikan produksi, kenaikan harga komoditas yang
+langsung menguntungkan, laba melonjak, dividen besar, buyback, investor
+strategis masuk, proyek pemerintah, perubahan regulasi yang menguntungkan.
+🟢 Bullish: target analis naik, prospek bisnis membaik, volume penjualan
+meningkat, ekspansi, sentimen sektor positif.
+⚪ Neutral: berita rutin/administratif, tidak ada implikasi harga yang jelas.
+🔴 Bearish: kabar buruk apa pun (litigasi, penurunan laba, downgrade, dst).
+
+Each stock's "source" field (extracted from the headline's " - SourceName"
+suffix) is a rough credibility signal — established outlets (Kontan, Bisnis,
+CNBC Indonesia, Reuters, Investor.id, Kontan.co.id, Bisnis.com) are more
+reliable than unknown/small sites, but don't over-weight this if the headline
+content itself is clearly a concrete corporate action.
+
+For EACH stock given, return ONLY valid JSON (no markdown, no commentary), an
+array with exactly one object per input stock, in this exact shape:
+[
+  {
+    "ticker": "XXXX",
+    "catalyst_category": "strong_bullish" | "bullish" | "neutral" | "bearish",
+    "catalyst_score": 0-100,
+    "reasoning": "1 kalimat singkat kenapa"
+  },
+  ...
+]
+
+If a stock has NO news items provided, still include it with
+catalyst_category="neutral", catalyst_score=0, reasoning="tidak ada berita".
+"""
+
+
+def _extract_news_source(title: str) -> str:
+    """Google News RSS titles biasanya format 'Judul - NamaSumber' — ekstrak bagian sumbernya."""
+    if " - " in title:
+        return title.rsplit(" - ", 1)[-1].strip()
+    return "Tidak diketahui"
+
+
+def classify_news_catalysts(candidates_with_news: list) -> dict:
+    """
+    MBSS v2 (user request — Catalyst Score, bukan sekadar sentiment): satu
+    panggilan Gemini BATCH untuk semua kandidat sekaligus (bukan satu-satu,
+    lebih efisien) — minta kategori + skor komposit per saham, pakai
+    kerangka kategori dari user (Strong Bullish/Bullish/dst dengan contoh
+    konkret), bukan cuma "positif/negatif" generik.
+
+    Return dict {ticker: {"catalyst_category": ..., "catalyst_score": ...,
+    "reasoning": ...}} — kalau Gemini gagal/response tidak valid, return {}
+    (gagal-lunak, pemanggil harus anggap semua "tidak ada info" kalau kosong,
+    BUKAN meloloskan semua kandidat begitu saja).
+    """
+    if not candidates_with_news:
+        return {}
+
+    input_for_gemini = [
+        {
+            "ticker": c["ticker"],
+            "headlines": [
+                {"title": n["title"], "source": _extract_news_source(n["title"]), "published": n.get("published", "")}
+                for n in (c.get("news") or [])
+            ],
+        }
+        for c in candidates_with_news
+    ]
+
+    try:
+        raw_text = _gemini_text(json.dumps(input_for_gemini, ensure_ascii=False), system_instruction=NEWS_CATALYST_INSTRUCTION).strip()
+        raw_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.MULTILINE).strip()
+        parsed = json.loads(raw_text)
+        return {item["ticker"]: item for item in parsed if "ticker" in item}
+    except Exception as e:
+        print(f"⚠️ Gagal klasifikasi katalis berita (Gemini): {e}")
+        return {}
+
 OPENING_BREAKOUT_INSTRUCTION = BASE_SYSTEM_INSTRUCTION + """
 Context: This is the 09:45 WIB Opening Dynamics report for the user's real portfolio.
 The input is NOT only a breakout scanner. It contains:

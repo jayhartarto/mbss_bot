@@ -370,7 +370,7 @@ async def run_nightly_full_scan(context):
 # fetch berita sama sekali saat live (alasan: takut lambat kalau fetch
 # berita real-time — sudah didiskusikan & disepakati).
 # ==========================================
-BSJP_ARA_MAX_PRICE = 500
+BSJP_ARA_MAX_PRICE = 1000  # direvisi dari 500 (user request) — lebih banyak kandidat
 BSJP_ARA_MAX_DAY_CHANGE_PCT = 5.0  # |day_change_pct| kemarin harus di bawah ini ("datar")
 BSJP_ARA_MAX_VOL_RATIO = 1.5       # vol_ratio kemarin harus di bawah ini (belum ramai)
 BSJP_ARA_NEWS_MAX_CANDIDATES = 30  # batas jumlah fetch berita per malam (RSS gratis tapi tetap network call)
@@ -428,8 +428,30 @@ def build_bsjp_ara_candidates(results: list) -> list:
         })
         core.time.sleep(0.3)  # jaga-jaga rate limit Google News RSS, murah tapi tetap sopan
 
-    print(f"🌆 BSJP-ARA: {len(candidates)} kandidat final dengan cek berita (dari {len(prefiltered)} lolos pre-filter)")
-    return candidates
+    print(f"🌆 BSJP-ARA: {len(candidates)} kandidat dengan berita terkumpul (dari {len(prefiltered)} lolos pre-filter harga/volume)")
+
+    # MBSS v2 (user request — Catalyst Score, bukan sekadar "ada berita"):
+    # klasifikasi 1x batch untuk semua kandidat, lalu HANYA saham dengan
+    # katalis strong_bullish/bullish yang diteruskan — neutral/bearish/tanpa
+    # berita sama sekali DIBUANG. Ini sesuai instruksi eksplisit: "News
+    # catalist harus ambil positif saja".
+    catalyst_map = core.classify_news_catalysts(candidates)
+    if not catalyst_map:
+        print("⚠️ BSJP-ARA: klasifikasi katalis gagal total — TIDAK ADA kandidat diloloskan (gagal-lunak, bukan meloloskan semua tanpa verifikasi).")
+        return []
+
+    final_candidates = []
+    for c in candidates:
+        cat = catalyst_map.get(c["ticker"])
+        if not cat or cat.get("catalyst_category") not in ("strong_bullish", "bullish"):
+            continue
+        c["catalyst_category"] = cat.get("catalyst_category")
+        c["catalyst_score"] = cat.get("catalyst_score")
+        c["catalyst_reasoning"] = cat.get("reasoning")
+        final_candidates.append(c)
+
+    print(f"🌆 BSJP-ARA FINAL: {len(final_candidates)} kandidat dengan katalis positif (strong_bullish/bullish) dari {len(candidates)} yang dicek")
+    return final_candidates
 
 
 def save_bsjp_ara_candidates(candidates: list):
