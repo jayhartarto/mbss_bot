@@ -546,11 +546,18 @@ def save_broksum_250(data: dict):
 
 
 def load_broksum_250() -> dict:
+    """
+    MBSS v2 (user request — "jalankan saja sesuai cache yang tersedia"):
+    TIDAK LAGI cek basi/tanggal — return apa pun yang tersimpan, berapa pun
+    umurnya. Beda dari daily_scan_cache (yang genuinely butuh data harga
+    HARI YANG BENAR karena representasi closing tertentu) — broksum itu
+    pola akumulasi broker yang tetap informatif walau beberapa hari lalu,
+    dan /eodscan yang dijalankan sore/malam (setelah 16:30 tapi sebelum
+    tengah malam) sempat tertahan "basi" cuma karena selisih menit dari
+    penanda kalender — user eksplisit tidak mau pengecekan seketat itu.
+    """
     meta = cache_manager.get_meta("broksum_250")
     if not meta:
-        return {}
-    current_marker = core.get_current_calendar_date_marker()
-    if meta.get("trading_day_marker") != current_marker:
         return {}
     payload = cache_manager.get("broksum_250", default={})
     return payload.get("data", {}) if isinstance(payload, dict) else {}

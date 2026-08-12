@@ -1690,10 +1690,7 @@ async def broksum_command(update, context):
 
     broksum_data = nightly_engine.load_broksum_250()
     if not broksum_data:
-        await core.safe_reply(
-            update.message,
-            "⚠️ Cache BROKSUM 250 belum ada/basi — jalankan /eodscan dulu (dari kemarin sore, bukan hari ini)."
-        )
+        await core.safe_reply(update.message, "⚠️ Cache BROKSUM 250 belum pernah terisi — jalankan /eodscan dulu.")
         return
 
     activity = broker_engine.find_broker_activity_across_tickers(broker_code, broksum_data)
