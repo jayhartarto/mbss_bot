@@ -166,6 +166,11 @@ async def screen_daytrade(update, context):
     """
     use_issi = len(context.args) > 0 and context.args[0].lower() == "issi"
     use_live = len(context.args) > 0 and context.args[0].lower() == "live"
+    # MBSS v2 (user request — tag smart money di semua tools): ini BACA CACHE
+    # saja (broksum_250, sudah di-fetch tiap malam), TIDAK fetch Index Alpha
+    # baru — jadi tetap konsisten dengan aturan lama "screendaytrade tidak
+    # pakai kuota Index Alpha" (yang dijaga itu KUOTA baru, bukan baca cache).
+    broksum_data = nightly_engine.load_broksum_250()
 
     if use_issi:
         await core.safe_reply(
@@ -262,7 +267,7 @@ async def screen_daytrade(update, context):
                 f"{i}. {r['ticker']} — {ab.get('label', '-')} ({ab.get('score', 0)}/100)\n"
                 f"   Harga {r.get('price')} | VWAP {ab.get('vwap', '-')} (jarak {ab.get('vwap_distance_pct', '-')}%) | Vol pace {ab.get('volume_pace_ratio', '-')}x\n"
                 f"   Trigger {ab.get('trigger_price', '-')} | Invalid <{ab.get('invalidation_level', '-')}\n"
-                f"   {ab.get('notes', '') or '-'}{market_engine.format_sector_tag(r.get('sector'))}"
+                f"   {ab.get('notes', '') or '-'}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
             )
 
         # MBSS v2 (user request — kasus TALF/IATA/SGRO): bagian TERPISAH untuk
@@ -303,7 +308,7 @@ async def screen_daytrade(update, context):
             f"   Total {v5['total']}/100 | Bias {r.get('_positive_bias', '-')}/100 | Lane {r.get('_positive_lane', '-')} | B {br['score']} | C {cont['score']} | Act {v5['activity']['score']} | VolQ {volq['score']} | Room {room['score']} | Safety {risk['score']}{src_live}\n"
             f"   Harga {r.get('price')} | Valid >{v5['valid_level']} | Ideal {v5['ideal']} | Invalid <{v5['invalid']}\n"
             f"   Room: {room['label']} ({room['dist_high_pct']}% ke high, upside TP1 {room['upside_tp1_pct']}%) | VolQ: {volq['label']} | Continuation: {cont['label']}\n"
-            f"   Note: {v5['note']}{market_engine.format_sector_tag(r.get('sector'))}"
+            f"   Note: {v5['note']}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
         )
 
     await core.safe_reply(update.message, "\n\n".join(lines))
@@ -743,6 +748,7 @@ def _gptpick_format_item(scoring: dict) -> str:
         f"  Buy {buy} | TP1 {tp1} | SL {sl} | RR@max {rr_text}"
         f"{rr_warning}\n"
         f"  {', '.join(g.get('reasons', [])) if g.get('reasons') else '—'}"
+        f"{broker_engine.format_smart_money_tag(scoring.get('ticker', ''), nightly_engine.load_broksum_250(), prefix=chr(10) + '  ')}"
         f"{market_engine.format_sector_tag(scoring.get('sector'), prefix=chr(10) + '  ')}"
     )
 
@@ -969,6 +975,7 @@ async def high_conviction_command(update, context):
         candidates.sort(key=lambda r: r["_daytrade_score_hc"], reverse=True)
         sort_label = "momentum (compute_daytrade_score, bukan Skor Final)"
     top10 = candidates[:10]
+    broksum_data = nightly_engine.load_broksum_250()  # dimuat sekali di luar loop, murni baca cache (tidak fetch)
 
     # MBSS v2 (user request — ditemukan lewat penelusuran manual /winrate: /hc
     # TIDAK PERNAH terlacak sama sekali sebelumnya). Kunci lewat mekanisme
@@ -1019,13 +1026,14 @@ async def high_conviction_command(update, context):
         sector_info = market_engine.get_sector_rank_info(r.get("sector"))
         if sector_info:
             sector_note = f"\n   🏭 Sektor {sector_info['sector']}: #{sector_info['rank']}/{sector_info['total_sectors']} terkuat ({sector_info['avg_return_pct']:+.1f}% avg)"
+        smart_money_note = broker_engine.format_smart_money_tag(r["ticker"], broksum_data)
 
         lines.append(
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f}{daytrade_note}{streak_str} "
             f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
             f"   {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)} kriteria | "
             f"RR {rr_str} | {r.get('action_label_id', '-')}\n"
-            f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}"
+            f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}"
         )
 
     lines.append("\nDetail lengkap: /check TICKER")
@@ -1434,6 +1442,7 @@ async def strong_buy_command(update, context):
         return
 
     candidates.sort(key=lambda r: r.get("scores", {}).get("final", 0), reverse=True)
+    broksum_data = nightly_engine.load_broksum_250()
 
     lines = [f"💪 SEMUA STRONG_BUY — {len(candidates)} saham (cache /eodscan, tidak difilter likuiditas/lane apa pun)\n"]
     for i, r in enumerate(candidates, 1):
@@ -1455,7 +1464,7 @@ async def strong_buy_command(update, context):
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f} "
             f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
             f"   RR {rr_str}{liq_note}\n"
-            f"   Entry {t.get('buy_range', '-')}{ceiling_str}{market_engine.format_sector_tag(r.get('sector'))}"
+            f"   Entry {t.get('buy_range', '-')}{ceiling_str}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
         )
 
     lines.append("\nDetail lengkap: /check TICKER")
@@ -1562,9 +1571,13 @@ async def consensus_command(update, context):
     sector_lines = [f"{r['ticker']}{market_engine.format_sector_tag(r.get('sector'), prefix=' — ')}" for r in qualifying[:15] if market_engine.get_sector_rank_info(r.get("sector"))]
     sector_block = ("\n\nKekuatan sektor:\n" + "\n".join(sector_lines)) if sector_lines else ""
 
+    broksum_data_consensus = nightly_engine.load_broksum_250()
+    smart_money_lines = [f"{r['ticker']}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data_consensus, prefix=' — ')}" for r in qualifying[:15] if broker_engine.get_smart_money_accumulation(r['ticker'], broksum_data_consensus)]
+    smart_money_block = ("\n\nAkumulasi smart money:\n" + "\n".join(smart_money_lines)) if smart_money_lines else ""
+
     try:
         summary_text = await asyncio.to_thread(core.ask_gemini_to_analyze, gemini_input, core.CONSENSUS_BRIEF_INSTRUCTION)
-        await core.safe_reply(update.message, summary_text + streak_block + sector_block)
+        await core.safe_reply(update.message, summary_text + streak_block + sector_block + smart_money_block)
     except Exception as e:
         print(f"⚠️ Gemini consensus brief gagal: {e}")
         # Gagal-lunak — tetap kasih daftar mentah kalau Gemini error, jangan diam saja
@@ -1602,27 +1615,17 @@ async def broksum_command(update, context):
         )
         return
 
-    activity = []
-    for ticker, rows in broksum_data.items():
-        broker_row = next((r for r in rows if r.get("broker_code") == broker_code or r.get("broker") == broker_code), None)
-        if broker_row:
-            activity.append({
-                "ticker": ticker,
-                "net_value_idr": broker_row.get("net_value_idr") or broker_row.get("net_value"),
-                "avg_buy_price": broker_row.get("avg_buy_price"), "avg_sell_price": broker_row.get("avg_sell_price"),
-            })
-    activity.sort(key=lambda a: a.get("net_value_idr") or 0, reverse=True)
+    activity = broker_engine.find_broker_activity_across_tickers(broker_code, broksum_data)
 
     if not activity:
-        await core.safe_reply(update.message, f"📋 {broker_code} tidak terdeteksi aktif di {len(broksum_data)} ticker berskor tertinggi malam ini.")
+        await core.safe_reply(update.message, f"📋 {broker_code} tidak terdeteksi NET BUY di {len(broksum_data)} ticker berskor tertinggi malam ini.")
         return
 
-    lines = [f"🔍 AKTIVITAS {broker_code} — {nightly_engine.BROKSUM_250_LOOKBACK_DAYS} hari terakhir (dari {len(broksum_data)} ticker berskor tertinggi, update tiap /eodscan)\n"]
+    lines = [f"💰 AKUMULASI {broker_code} — {nightly_engine.BROKSUM_250_LOOKBACK_DAYS} hari terakhir (NET BUY saja, dari {len(broksum_data)} ticker berskor tertinggi, update tiap /eodscan)\n"]
     for a in activity:
-        arah = "🟢 NET BELI" if (a["net_value_idr"] or 0) > 0 else "🔴 NET JUAL"
         lines.append(
-            f"{a['ticker']} — {arah} Rp{abs(a['net_value_idr'] or 0):,.0f}\n"
-            f"   Avg beli {a.get('avg_buy_price', '-')} | Avg jual {a.get('avg_sell_price', '-')}"
+            f"{a['ticker']} — {a['buy_volume_lot']:,} lot @ avg Rp{a['buy_avg_price']:.0f}\n"
+            f"   Net value Rp{a['net_value_idr']:,.0f} | Frekuensi beli {a['buy_freq']}x"
         )
     await core.safe_reply(update.message, "\n\n".join(lines))
 

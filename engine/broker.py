@@ -903,28 +903,79 @@ def fetch_broker_summary_batch_raw(tickers: list, from_date: str, to_date: str, 
         core.time.sleep(7)  # pacing sama seperti single-ticker, jaga-jaga rate limit per-menit tetap berlaku
 
 
-def find_broker_activity_across_tickers(broker_code: str, tickers: list, from_date: str, to_date: str) -> list:
+def find_broker_activity_across_tickers(broker_code: str, tickers_data: dict) -> list:
     """
-    MBSS v2 (user request — "broker AK dalam 10 hari, akumulasi/distribusi
-    saham apa?"): reverse-lookup pakai batch endpoint — cek SATU broker
-    across BEBERAPA ticker sekaligus, urutkan dari net-buy terbesar ke
-    net-sell terbesar. Cakupannya SEBATAS ticker yang di-passing (bukan
-    seluruh market otomatis) — pemanggil yang menentukan daftar ticker mana
-    yang mau dicek (mis. watchlist/portofolio user, atau subset ISSI-liquid).
-    """
-    result = fetch_broker_summary_batch_raw(tickers, from_date, to_date, investor="all")
-    if not result:
-        return []
+    MBSS v2 (user request, REVISI setelah field API asli dikonfirmasi —
+    field tebakan awal SALAH TOTAL: bukan "broker_code"/"net_value_idr",
+    field asli dari Index Alpha adalah "code", "buy_value", "sell_value",
+    "buy_volume", "buy_avg", dst — net value TIDAK ada langsung, harus
+    dihitung sendiri buy_value - sell_value):
 
+    Reverse-lookup SATU broker across BEBERAPA ticker (dari cache
+    broksum_250, bukan fetch baru) — return CUMA yang NET BUY (tujuan
+    eksplisit: follow smart money AKUMULASI, bukan tampilkan jual-beli
+    campur), diurutkan dari net buy value terbesar, dengan avg_buy_price
+    dan buy_volume (lot) eksplisit — sesuai kebutuhan "confidence entry
+    dekat avg price broker smart money".
+    """
     activity = []
-    for ticker, rows in result.items():
-        broker_row = next((r for r in rows if r.get("broker_code") == broker_code or r.get("broker") == broker_code), None)
-        if broker_row:
-            activity.append({
-                "ticker": ticker,
-                "net_value_idr": broker_row.get("net_value_idr") or broker_row.get("net_value"),
-                "buy_volume": broker_row.get("buy_volume"), "sell_volume": broker_row.get("sell_volume"),
-                "avg_buy_price": broker_row.get("avg_buy_price"), "avg_sell_price": broker_row.get("avg_sell_price"),
-            })
-    activity.sort(key=lambda a: a.get("net_value_idr") or 0, reverse=True)
+    for ticker, rows in tickers_data.items():
+        row = next((r for r in rows if r.get("code") == broker_code), None)
+        if not row:
+            continue
+        net_value = (row.get("buy_value") or 0) - (row.get("sell_value") or 0)
+        if net_value <= 0:
+            continue  # HANYA net buy — sesuai tujuan follow smart money akumulasi
+        activity.append({
+            "ticker": ticker,
+            "net_value_idr": net_value,
+            "buy_volume_lot": round((row.get("buy_volume") or 0) / 100),  # 1 lot = 100 lembar
+            "buy_avg_price": row.get("buy_avg"),
+            "buy_freq": row.get("buy_freq"),
+        })
+    activity.sort(key=lambda a: a["net_value_idr"], reverse=True)
     return activity
+
+
+# MBSS v2 (user request — whitelist broker smart-money): daftar awal dari
+# reputasi umum yang user sebutkan, BOLEH diedit kapan saja begitu ada
+# referensi lebih solid dari praktisi berpengalaman — ini BUKAN daftar
+# final/terverifikasi, cuma titik awal.
+SMART_MONEY_BROKER_WHITELIST = ["AK", "BK", "YU", "ZP", "LG"]
+
+
+def get_smart_money_accumulation(ticker: str, tickers_data: dict) -> list:
+    """
+    Untuk 1 ticker: broker mana dari SMART_MONEY_BROKER_WHITELIST yang NET
+    BUY di ticker ini, beserta avg price & volume — dipakai buat tag
+    tambahan di /check, /hc, /consensus, dll ("Akumulasi AK: XX lot @ avg
+    Rp XXX"). Return list kosong kalau ticker tidak ada di cache broksum_250
+    (di luar 250 ticker berskor tertinggi) atau tidak ada whitelist broker
+    yang net buy di situ.
+    """
+    rows = tickers_data.get(ticker, [])
+    result = []
+    for row in rows:
+        code = row.get("code")
+        if code not in SMART_MONEY_BROKER_WHITELIST:
+            continue
+        net_value = (row.get("buy_value") or 0) - (row.get("sell_value") or 0)
+        if net_value <= 0:
+            continue
+        result.append({
+            "code": code,
+            "net_value_idr": net_value,
+            "buy_volume_lot": round((row.get("buy_volume") or 0) / 100),
+            "buy_avg_price": row.get("buy_avg"),
+        })
+    result.sort(key=lambda r: r["net_value_idr"], reverse=True)
+    return result
+
+
+def format_smart_money_tag(ticker: str, tickers_data: dict, prefix: str = "\n   ") -> str:
+    """Formatter satu pintu, konsisten dipakai di semua tools yang menampilkan tag ini."""
+    accum = get_smart_money_accumulation(ticker, tickers_data)
+    if not accum:
+        return ""
+    parts = [f"{a['code']} {a['buy_volume_lot']:,} lot @ avg {a['buy_avg_price']:.0f}" for a in accum]
+    return f"{prefix}💰 Akumulasi smart money: {', '.join(parts)}"

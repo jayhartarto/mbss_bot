@@ -31,6 +31,7 @@ import engine.legacy_core as core
 import engine.broker as broker_engine
 import engine.scoring as scoring_engine
 import engine.market as market_engine
+import engine.nightly as nightly_engine
 
 
 async def check_stock(update, context):
@@ -430,6 +431,7 @@ async def check_stock(update, context):
         f"{_icon_adx(adx)} ADX {adx} ({core.format_adx_label(adx)})\n"
         f"{_icon_rs(rs)} RS vs IHSG {rs}%  |  Range {result['day_range_pct_10d']}%"
         f"{market_engine.format_sector_tag(result.get('sector'), prefix=chr(10))}"
+        f"{broker_engine.format_smart_money_tag(ticker, nightly_engine.load_broksum_250())}"
     )
 
     # ── Tanggal & jam ──────────────────────────────────────────────
