@@ -1750,6 +1750,30 @@ def get_db_stats() -> dict:
         return {}
 
 
+def get_current_calendar_date_marker() -> str:
+    """
+    MBSS v2 (user request — /eodscan akan rutin dijalankan pagi hari SEBELUM
+    market buka, bukan cuma sore/malam): penanda tanggal KALENDER sederhana,
+    TIDAK sensitif jam tutup market — beda dari
+    get_current_trading_day_close_marker() yang sengaja geser ke "hari
+    sebelumnya" sebelum jam 16:30 (itu cocok buat validitas data OHLCV, TAPI
+    salah buat cache seperti broksum_250/bsjp_ara yang cuma perlu tahu
+    "apakah ini dari HARI INI", bukan "apakah sesi hari ini sudah tutup").
+
+    Tanpa ini: /eodscan jam 8 pagi -> tersimpan dgn marker "kemarin" (belum
+    16:30) -> /broksum jam 13:00 hari SAMA -> "hari ini" sudah dianggap
+    tanggal sekarang (sudah lewat 16:30 kalau dicek sore) -> mismatch ->
+    cache dianggap basi padahal baru beberapa jam. Dengan penanda tanggal
+    kalender murni, ini tidak terjadi — tetap dianggap segar sepanjang hari
+    yang sama, baru basi betulan keesokan harinya.
+    """
+    now = datetime.datetime.now(WIB)
+    reference_date = now.date()
+    while reference_date.weekday() >= 5:
+        reference_date -= datetime.timedelta(days=1)
+    return reference_date.strftime("%Y-%m-%d")
+
+
 def get_current_trading_day_close_marker() -> str:
     """
     Menandai hari bursa mana yang datanya (EOD) SEHARUSNYA sudah tersedia SAAT

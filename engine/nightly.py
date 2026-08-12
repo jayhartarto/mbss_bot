@@ -467,7 +467,7 @@ def build_bsjp_ara_candidates(results: list) -> list:
 
 
 def save_bsjp_ara_candidates(candidates: list):
-    meta = {"trading_day_marker": core.get_current_trading_day_close_marker()}
+    meta = {"trading_day_marker": core.get_current_calendar_date_marker()}
     ok = cache_manager.set("bsjp_ara", {"candidates": candidates}, meta=meta)
     if ok:
         print(f"💾 BSJP-ARA candidates tersimpan (cache/bsjp_ara.pkl): {len(candidates)} kandidat")
@@ -479,7 +479,7 @@ def load_bsjp_ara_candidates() -> list:
     meta = cache_manager.get_meta("bsjp_ara")
     if not meta:
         return []
-    current_marker = core.get_current_trading_day_close_marker()
+    current_marker = core.get_current_calendar_date_marker()
     if meta.get("trading_day_marker") != current_marker:
         return []
     payload = cache_manager.get("bsjp_ara", default={})
@@ -531,7 +531,7 @@ def build_broksum_250(results: list) -> dict:
 
 
 def save_broksum_250(data: dict):
-    meta = {"trading_day_marker": core.get_current_trading_day_close_marker()}
+    meta = {"trading_day_marker": core.get_current_calendar_date_marker()}
     ok = cache_manager.set("broksum_250", {"data": data}, meta=meta)
     if ok:
         print(f"💾 BROKSUM 250 tersimpan (cache/broksum_250.pkl): {len(data)} ticker")
@@ -543,7 +543,7 @@ def load_broksum_250() -> dict:
     meta = cache_manager.get_meta("broksum_250")
     if not meta:
         return {}
-    current_marker = core.get_current_trading_day_close_marker()
+    current_marker = core.get_current_calendar_date_marker()
     if meta.get("trading_day_marker") != current_marker:
         return {}
     payload = cache_manager.get("broksum_250", default={})
