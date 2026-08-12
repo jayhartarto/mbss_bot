@@ -865,3 +865,66 @@ def get_broker_entry_ceiling(brokersum: dict, min_share_pct: float = BROKER_ENTR
         "share_pct": round(biggest_avg["net_idr"] / total_buy * 100, 1),
         "broker_label": biggest_avg.get("broker", {}).get("label", "❔"),
     }
+
+
+def fetch_broker_summary_batch_raw(tickers: list, from_date: str, to_date: str, investor: str = "all") -> dict | None:
+    """
+    MBSS v2 (user request — solusi resmi buat kebutuhan broker-wide, ditemukan
+    lewat dokumentasi API Index Alpha sendiri): POST /stocks/broker-summary/batch
+    — sampai 50 ticker sekaligus dalam 1 panggilan, didesain khusus buat
+    screener/watchlist. Return dict {ticker: [baris broker, ...]}, atau None
+    kalau gagal.
+
+    ⚠️ BELUM DIPASTIKAN: apakah 1 panggilan batch ini dihitung "1x" dari
+    budget bulanan ~150, atau dihitung sejumlah ticker di dalamnya (mis. 50
+    ticker = 50x). SENGAJA belum dipakai buat cakupan luas (615 ticker)
+    sebelum ini diverifikasi — coba dulu dengan batch KECIL (5-10 ticker),
+    cek dashboard/usage Index Alpha Anda setelahnya, baru diperluas.
+    """
+    if len(tickers) > 50:
+        print(f"⚠️ Batch broker-summary maksimal 50 ticker per panggilan, dapat {len(tickers)} — dipotong ke 50 pertama.")
+        tickers = tickers[:50]
+    try:
+        resp = requests.post(
+            f"{core.INDEXALPHA_BASE_URL}/stocks/broker-summary/batch",
+            json={"tickers": tickers, "from": from_date, "to": to_date, "investor": investor},
+            headers=core.INDEXALPHA_HEADERS,
+            timeout=30,
+        )
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ Index Alpha batch error ({len(tickers)} ticker): {data.get('error')}")
+            return None
+        return data.get("data", {})
+    except Exception as e:
+        print(f"⚠️ Index Alpha batch fetch gagal ({len(tickers)} ticker): {e}")
+        return None
+    finally:
+        core.time.sleep(7)  # pacing sama seperti single-ticker, jaga-jaga rate limit per-menit tetap berlaku
+
+
+def find_broker_activity_across_tickers(broker_code: str, tickers: list, from_date: str, to_date: str) -> list:
+    """
+    MBSS v2 (user request — "broker AK dalam 10 hari, akumulasi/distribusi
+    saham apa?"): reverse-lookup pakai batch endpoint — cek SATU broker
+    across BEBERAPA ticker sekaligus, urutkan dari net-buy terbesar ke
+    net-sell terbesar. Cakupannya SEBATAS ticker yang di-passing (bukan
+    seluruh market otomatis) — pemanggil yang menentukan daftar ticker mana
+    yang mau dicek (mis. watchlist/portofolio user, atau subset ISSI-liquid).
+    """
+    result = fetch_broker_summary_batch_raw(tickers, from_date, to_date, investor="all")
+    if not result:
+        return []
+
+    activity = []
+    for ticker, rows in result.items():
+        broker_row = next((r for r in rows if r.get("broker_code") == broker_code or r.get("broker") == broker_code), None)
+        if broker_row:
+            activity.append({
+                "ticker": ticker,
+                "net_value_idr": broker_row.get("net_value_idr") or broker_row.get("net_value"),
+                "buy_volume": broker_row.get("buy_volume"), "sell_volume": broker_row.get("sell_volume"),
+                "avg_buy_price": broker_row.get("avg_buy_price"), "avg_sell_price": broker_row.get("avg_sell_price"),
+            })
+    activity.sort(key=lambda a: a.get("net_value_idr") or 0, reverse=True)
+    return activity
