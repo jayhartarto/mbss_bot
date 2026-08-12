@@ -1361,16 +1361,6 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "breakout_level": swing_analysis["breakout_level"],
         "adaptive_scoring_used": has_adaptive_baseline,
         "day_range_pct_10d": round(price_range_pct, 1),  # transparency: how much this stock actually moved
-        # MBSS v2 (user request — pre-filter BSJP-ARA "pola GIAA"): persentase
-        # gerak harga KEMARIN sendiri (D-1 vs D-2, BUKAN hari ini) — dihitung
-        # GRATIS dari hist_daily yang sudah di-fetch di atas, tanpa fetch
-        # tambahan. Dipakai buat saring saham yang KEMARIN datar (kandidat
-        # "sleeper" yang mungkin baru meledak hari ini) dari saham yang
-        # kemarin SUDAH bergerak jauh (momentum sudah established).
-        "day_change_pct": (
-            round((float(close_prices.iloc[-1]) - float(close_prices.iloc[-2])) / float(close_prices.iloc[-2]) * 100, 2)
-            if len(close_prices) >= 2 else None
-        ),
         "targets": {
             "buy_range": f"{int(target_buy_min)} - {int(target_buy_max)}",
             "tp_1": int(tp_1),
@@ -1385,6 +1375,35 @@ def compute_factor_scoring(ticker, include_quote_check=True):
             "final": round(final_score, 1),
         },
     }
+
+    # MBSS v2 BUGFIX (ditemukan lewat kasus nyata EKAD — /eodscan sempat
+    # dijalankan ulang SETELAH harga sudah meledak hari itu, dan Yahoo
+    # Finance ternyata SUDAH menyertakan bar HARI INI ke dalam histori
+    # begitu tersedia — bukan cuma di akhir hari): sebelumnya
+    # day_change_pct/vol_ratio_prior_day dihitung dari "bar terakhir vs
+    # sebelum-terakhir" TANPA cek apakah bar terakhir itu genuinely
+    # KEMARIN atau ternyata sudah HARI INI. Kalau HARI INI sudah masuk,
+    # "kemarin vs kemarin-lusa" jadi salah total — ikut mengukur harga
+    # SUDAH MELEDAK sebagai "histori kemarin", persis yang menolak EKAD
+    # dari BSJP-ARA padahal itu pola yang seharusnya ditangkap.
+    # FIX: cek tanggal bar TERAKHIR eksplisit vs tanggal hari ini — kalau
+    # sama (bar hari ini sudah masuk), geser mundur 1 supaya genuinely
+    # dapat kemarin vs kemarin-lusa.
+    _today_wib = core.datetime.datetime.now(core.WIB).date()
+    _last_bar_is_today = len(close_prices) >= 1 and close_prices.index[-1].date() == _today_wib
+    _dc_offset = 1 if _last_bar_is_today else 0
+    result["day_change_pct"] = (
+        round((float(close_prices.iloc[-1 - _dc_offset]) - float(close_prices.iloc[-2 - _dc_offset]))
+              / float(close_prices.iloc[-2 - _dc_offset]) * 100, 2)
+        if len(close_prices) >= 2 + _dc_offset else None
+    )
+    # Field TERPISAH dari vol_ratio (yang dipakai skor momentum inti, sengaja
+    # tetap "paling baru" termasuk hari ini kalau ada) — khusus buat pre-filter
+    # BSJP-ARA yang genuinely butuh "kemarin", bukan "paling baru".
+    result["vol_ratio_prior_day"] = (
+        round(float(volumes.iloc[-1 - _dc_offset]) / (float(volumes.rolling(window=20).mean().iloc[-1 - _dc_offset]) + 1e-9), 2)
+        if len(volumes) >= 21 + _dc_offset else None
+    )
 
     risk_character = classify_risk_character(result)
     result["risk_character"] = risk_character["character"]

@@ -402,14 +402,20 @@ def build_bsjp_ara_candidates(results: list) -> list:
             continue
         price = r.get("price")
         day_change = r.get("day_change_pct")
-        vol_ratio = r.get("vol_ratio")
-        if price is None or day_change is None or vol_ratio is None:
+        # BUGFIX (kasus nyata EKAD — lihat komentar day_change_pct/
+        # vol_ratio_prior_day di compute_factor_scoring): pakai
+        # vol_ratio_prior_day (genuinely "kemarin"), BUKAN vol_ratio (field
+        # lama, sengaja "paling baru" termasuk hari ini kalau sudah masuk —
+        # cocok buat skor momentum inti, TAPI salah buat pre-filter ini yang
+        # butuh tahu apakah KEMARIN masih diam).
+        vol_ratio_prior = r.get("vol_ratio_prior_day")
+        if price is None or day_change is None or vol_ratio_prior is None:
             continue
         if price >= BSJP_ARA_MAX_PRICE:
             continue
         if abs(day_change) >= BSJP_ARA_MAX_DAY_CHANGE_PCT:
             continue
-        if vol_ratio >= BSJP_ARA_MAX_VOL_RATIO:
+        if vol_ratio_prior >= BSJP_ARA_MAX_VOL_RATIO:
             continue
         prefiltered.append(r)
 
@@ -434,7 +440,7 @@ def build_bsjp_ara_candidates(results: list) -> list:
             "company_name": company_name,
             "prev_close": r.get("price"),
             "day_change_pct": r.get("day_change_pct"),
-            "vol_ratio": r.get("vol_ratio"),
+            "vol_ratio": r.get("vol_ratio_prior_day"),
             "sector": r.get("sector"),
             "news": news,
         })
@@ -496,7 +502,7 @@ def load_bsjp_ara_candidates() -> list:
 # ==========================================
 BROKSUM_250_BATCH_SIZE = 50
 BROKSUM_250_TOTAL_TICKERS = 250
-BROKSUM_250_LOOKBACK_DAYS = 7
+BROKSUM_250_LOOKBACK_DAYS = 10  # direvisi dari 7 (user request)
 
 
 def build_broksum_250(results: list) -> dict:

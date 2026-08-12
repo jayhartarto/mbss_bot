@@ -1606,6 +1606,7 @@ async def broksum_command(update, context):
         return
 
     broker_code = context.args[0].upper()
+    top_n = int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 5
 
     broksum_data = nightly_engine.load_broksum_250()
     if not broksum_data:
@@ -1621,13 +1622,11 @@ async def broksum_command(update, context):
         await core.safe_reply(update.message, f"📋 {broker_code} tidak terdeteksi NET BUY di {len(broksum_data)} ticker berskor tertinggi malam ini.")
         return
 
-    lines = [f"💰 AKUMULASI {broker_code} — {nightly_engine.BROKSUM_250_LOOKBACK_DAYS} hari terakhir (NET BUY saja, dari {len(broksum_data)} ticker berskor tertinggi, update tiap /eodscan)\n"]
-    for a in activity:
-        lines.append(
-            f"{a['ticker']} — {a['buy_volume_lot']:,} lot @ avg Rp{a['buy_avg_price']:.0f}\n"
-            f"   Net value Rp{a['net_value_idr']:,.0f} | Frekuensi beli {a['buy_freq']}x"
-        )
-    await core.safe_reply(update.message, "\n\n".join(lines))
+    top_activity = activity[:top_n]
+    lines = [f"💰 TOP {len(top_activity)} AKUMULASI {broker_code} — {nightly_engine.BROKSUM_250_LOOKBACK_DAYS} hari terakhir (dari {len(activity)} saham net-buy, {len(broksum_data)} ticker berskor tertinggi)\n"]
+    for i, a in enumerate(top_activity, 1):
+        lines.append(f"{i}. {a['ticker']}, net buy {a['buy_volume_lot']:,} lot, {a['buy_avg_price']:.0f} avg price")
+    await core.safe_reply(update.message, "\n".join(lines))
 
 
 # Alias lama, tetap didukung sementara supaya transisi tidak mendadak (MBSS v2)
