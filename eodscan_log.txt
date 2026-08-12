@@ -1,0 +1,11 @@
+2026-08-12 08:01:40 [INFO] mbss.bootstrap: Shared cache dir: /data/data/com.termux/files/home/mbss/cache
+2026-08-12 08:01:40 [INFO] mbss.bootstrap: EOD scan starting (CLI mode) — refresh DB + compute scores + save shared cache
+2026-08-12 08:01:40 [WARNING] yfinance: curl_cffi not available; falling back to requests without browser TLS impersonation. Yahoo Finance may rate-limit or block this client. Install curl_cffi (>=0.15) for the supported configuration.
+2026-08-12 08:01:44 [ERROR] yfinance: $IIKP.JK: possibly delisted; no price data found  (period=10d)
+2026-08-12 08:01:45 [ERROR] yfinance: 
+1 Failed download:
+2026-08-12 08:01:45 [ERROR] yfinance: ['IIKP.JK']: possibly delisted; no price data found  (period=10d)
+2026-08-12 08:01:48 [ERROR] yfinance: $SCPI.JK: possibly delisted; no price data found  (period=10d)
+2026-08-12 08:01:49 [ERROR] yfinance: 
+1 Failed download:
+2026-08-12 08:01:49 [ERROR] yfinance: ['SCPI.JK']: possibly delisted; no price data found  (period=10d)

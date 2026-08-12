@@ -1572,3 +1572,60 @@ async def consensus_command(update, context):
         for r in qualifying[:15]:
             lines.append(f"{r['ticker']} ({len(r['_consensus_tools'])} tool: {', '.join(r['_consensus_tools'])})")
         await core.safe_reply(update.message, "\n".join(lines))
+
+
+async def broksum_command(update, context):
+    """
+    /broksum KODE [hari] — reverse-lookup broker (MBSS v2, user request,
+    direname dari /brokeraktivitas): satu kode broker, saham apa saja yang
+    di-akumulasi/distribusi. Baca dari cache broksum_250 yang di-fetch
+    SEKALI tiap malam (bagian /eodscan, 250 ticker berskor tertinggi,
+    5 panggilan batch = persis pas kuota harian Index Alpha) — TIDAK
+    fetch live sama sekali di sini, supaya bisa dipakai berkali-kali
+    sehari tanpa rebutan kuota dengan proses nightly.
+
+    Parameter [hari] SENGAJA tidak lagi mengubah rentang fetch (itu sudah
+    tetap BROKSUM_250_LOOKBACK_DAYS=7 hari dari cache semalam) — kalau ada,
+    cuma dipakai buat catatan tampilan, bukan parameter fetch baru.
+    """
+    if not context.args:
+        await core.safe_reply(update.message, "Format: /broksum KODE\nContoh: /broksum AK")
+        return
+
+    broker_code = context.args[0].upper()
+
+    broksum_data = nightly_engine.load_broksum_250()
+    if not broksum_data:
+        await core.safe_reply(
+            update.message,
+            "⚠️ Cache BROKSUM 250 belum ada/basi — jalankan /eodscan dulu (dari kemarin sore, bukan hari ini)."
+        )
+        return
+
+    activity = []
+    for ticker, rows in broksum_data.items():
+        broker_row = next((r for r in rows if r.get("broker_code") == broker_code or r.get("broker") == broker_code), None)
+        if broker_row:
+            activity.append({
+                "ticker": ticker,
+                "net_value_idr": broker_row.get("net_value_idr") or broker_row.get("net_value"),
+                "avg_buy_price": broker_row.get("avg_buy_price"), "avg_sell_price": broker_row.get("avg_sell_price"),
+            })
+    activity.sort(key=lambda a: a.get("net_value_idr") or 0, reverse=True)
+
+    if not activity:
+        await core.safe_reply(update.message, f"📋 {broker_code} tidak terdeteksi aktif di {len(broksum_data)} ticker berskor tertinggi malam ini.")
+        return
+
+    lines = [f"🔍 AKTIVITAS {broker_code} — {nightly_engine.BROKSUM_250_LOOKBACK_DAYS} hari terakhir (dari {len(broksum_data)} ticker berskor tertinggi, update tiap /eodscan)\n"]
+    for a in activity:
+        arah = "🟢 NET BELI" if (a["net_value_idr"] or 0) > 0 else "🔴 NET JUAL"
+        lines.append(
+            f"{a['ticker']} — {arah} Rp{abs(a['net_value_idr'] or 0):,.0f}\n"
+            f"   Avg beli {a.get('avg_buy_price', '-')} | Avg jual {a.get('avg_sell_price', '-')}"
+        )
+    await core.safe_reply(update.message, "\n\n".join(lines))
+
+
+# Alias lama, tetap didukung sementara supaya transisi tidak mendadak (MBSS v2)
+broker_activity_command = broksum_command

@@ -6379,6 +6379,7 @@ def build_app():
     app.add_handler(CommandHandler(["hc", "highconviction"], commands_scan.high_conviction_command))
     app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.strong_buy_command))
     app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
+    app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
     app.add_handler(CommandHandler("bsjp", commands_scan.bsjp_screening_command))
     app.add_handler(CommandHandler(["eodscan", "nightlyscan"], commands_scan.eodscan_command))
     app.add_handler(CallbackQueryHandler(commands_scan.gptpick_callback, pattern="^gptpick:(3|5)$"))

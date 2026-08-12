@@ -453,6 +453,16 @@ async def check_stock(update, context):
     # is deliberately NOT added — it duplicates what `intraday_status`
     # already shows (High/Low), so it was genuinely dead/superseded code,
     # not a bug; adding it would just print High/Low twice.
+    # BUGFIX (ditemukan lewat pertanyaan user — persis pola company_name
+    # sebelumnya): recent_news SUDAH di-fetch (fetch_company_news, 1 network
+    # call tiap /check) tapi TIDAK PERNAH ditampilkan di manapun — user
+    # bayar biaya fetch-nya tanpa pernah lihat hasilnya. Sekarang benar-benar
+    # ditampilkan, maksimal 3 judul terbaru.
+    news_block = ""
+    if result.get("recent_news"):
+        news_lines = "\n".join(f"• {title}" for title in result["recent_news"][:3])
+        news_block = f"📰 Berita Terkini\n{news_lines}"
+
     msg1 = "\n".join(filter(None, [
         f"{result.get('name', ticker)} ({ticker})",
         f"📅 {date_str}  |  {jam_str}",
@@ -469,6 +479,7 @@ async def check_stock(update, context):
         "",
         raw_data_block,
         brokersum_line,
+        news_block,
     ]))
     await core.safe_reply(update.message, msg1)
 

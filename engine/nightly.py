@@ -57,6 +57,7 @@ from engine.cache import cache_manager
 from engine import legacy_core as core
 import engine.market as market_engine
 import engine.scoring as scoring_engine
+import engine.broker as broker_engine
 
 
 # ---------------------------------------------------------------------
@@ -293,6 +294,17 @@ async def run_nightly_full_scan(context):
         except Exception as e:
             print(f"⚠️ Gagal membangun BSJP-ARA candidates: {e}")
 
+        # MBSS v2 (user request — /broksum): fetch broker-summary batch buat
+        # 250 ticker berskor tertinggi SEKALI di sini, pakai HABIS kuota
+        # harian Index Alpha (5 panggilan batch x 50 = 250 ticker, persis
+        # pas). /broksum siang/sore TINGGAL baca cache ini, TIDAK fetch
+        # live sama sekali.
+        try:
+            broksum_250_data = await asyncio.to_thread(build_broksum_250, results)
+            save_broksum_250(broksum_250_data)
+        except Exception as e:
+            print(f"⚠️ Gagal membangun BROKSUM 250: {e}")
+
         # Market breadth + sector returns + regime — dihitung dari data yang
         # SAMA yang baru saja dikumpulkan di atas (results), tanpa fetch baru.
         try:
@@ -472,3 +484,67 @@ def load_bsjp_ara_candidates() -> list:
         return []
     payload = cache_manager.get("bsjp_ara", default={})
     return payload.get("candidates", []) if isinstance(payload, dict) else []
+
+
+# ==========================================
+# 💹 BROKSUM 250 (MBSS v2, user request) — broker summary batch untuk 250
+# saham berskor tertinggi dari cache /eodscan, di-fetch SEKALI tiap malam
+# (5 panggilan batch x 50 ticker = 250 ticker, PERSIS pas kuota harian
+# Index Alpha 5x/hari). /broksum siang/sore TINGGAL baca cache ini,
+# TIDAK fetch live sama sekali — supaya tidak rebutan kuota antara nightly
+# job dan pemakaian interaktif sepanjang hari.
+# ==========================================
+BROKSUM_250_BATCH_SIZE = 50
+BROKSUM_250_TOTAL_TICKERS = 250
+BROKSUM_250_LOOKBACK_DAYS = 7
+
+
+def build_broksum_250(results: list) -> dict:
+    """
+    Ambil 250 ticker berskor Final tertinggi dari hasil /eodscan malam ini,
+    fetch broker-summary batch (5 panggilan x 50 ticker) via endpoint resmi
+    Index Alpha. Return dict {ticker: [baris broker, ...]}.
+    """
+    scored_with_final = [r for r in results if r and r.get("scores", {}).get("final") is not None]
+    top250 = sorted(scored_with_final, key=lambda r: r["scores"]["final"], reverse=True)[:BROKSUM_250_TOTAL_TICKERS]
+    tickers = [r["ticker"] for r in top250]
+
+    if not tickers:
+        print("⚠️ BROKSUM 250: tidak ada ticker berskor untuk di-fetch.")
+        return {}
+
+    to_date = core.datetime.datetime.now(core.WIB).date()
+    from_date = to_date - core.datetime.timedelta(days=BROKSUM_250_LOOKBACK_DAYS)
+    from_str, to_str = from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d")
+
+    all_data = {}
+    chunks = [tickers[i:i + BROKSUM_250_BATCH_SIZE] for i in range(0, len(tickers), BROKSUM_250_BATCH_SIZE)]
+    print(f"💹 BROKSUM 250: fetch {len(tickers)} ticker berskor tertinggi lewat {len(chunks)} panggilan batch...")
+    for i, chunk in enumerate(chunks, 1):
+        result = broker_engine.fetch_broker_summary_batch_raw(chunk, from_str, to_str, investor="all")
+        if result:
+            all_data.update(result)
+        print(f"💹 BROKSUM 250: batch {i}/{len(chunks)} — {len(result) if result else 0} ticker berhasil")
+
+    print(f"💹 BROKSUM 250: total {len(all_data)}/{len(tickers)} ticker berhasil di-fetch.")
+    return all_data
+
+
+def save_broksum_250(data: dict):
+    meta = {"trading_day_marker": core.get_current_trading_day_close_marker()}
+    ok = cache_manager.set("broksum_250", {"data": data}, meta=meta)
+    if ok:
+        print(f"💾 BROKSUM 250 tersimpan (cache/broksum_250.pkl): {len(data)} ticker")
+    else:
+        print("⚠️ Gagal menyimpan BROKSUM 250 cache.")
+
+
+def load_broksum_250() -> dict:
+    meta = cache_manager.get_meta("broksum_250")
+    if not meta:
+        return {}
+    current_marker = core.get_current_trading_day_close_marker()
+    if meta.get("trading_day_marker") != current_marker:
+        return {}
+    payload = cache_manager.get("broksum_250", default={})
+    return payload.get("data", {}) if isinstance(payload, dict) else {}
