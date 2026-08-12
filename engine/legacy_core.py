@@ -412,7 +412,7 @@ import commands.misc as commands_misc
 import commands.portfolio as commands_portfolio
 import commands.check as commands_check
 import engine.scoring as scoring_engine
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import BadRequest
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
@@ -1977,6 +1977,24 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
             "value_traded": r.get("value_traded"),
         }
 
+        # MBSS v2 (user request — evaluasi winrate PER BROKER smart money):
+        # snapshot broker whitelist mana yang NET BUY ticker ini SAAT pick
+        # dikunci — supaya nanti (setelah resolve) bisa dihitung "saham yang
+        # lagi di-akumulasi broker X, seberapa sering menang". TIDAK
+        # retroaktif (broksum_250 baru ada mulai sesi ini) — cuma berlaku
+        # pick BARU. Import lokal (bukan di atas file) sengaja — legacy_core
+        # ini di-import OLEH broker.py & nightly.py, import balik di level
+        # modul bakal circular; aman dipanggil di sini karena keduanya sudah
+        # ter-load penuh saat fungsi ini benar-benar jalan.
+        smart_money_at_lock = []
+        try:
+            import engine.broker as _broker_engine
+            import engine.nightly as _nightly_engine
+            broksum_data = _nightly_engine.load_broksum_250()
+            smart_money_at_lock = _broker_engine.get_smart_money_accumulation(ticker, broksum_data)
+        except Exception as e:
+            print(f"⚠️ Gagal ambil snapshot smart money buat {ticker}: {e}")
+
         history.append({
             "ticker": ticker,
             "pick_date": pick_date,
@@ -1991,6 +2009,7 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
             # gabungan semua sinyal jadi satu angka.
             "signal_label": r.get("_positive_lane") or r.get("action_label_id") or "N/A",
             "consecutive_streak": streak,
+            "smart_money_at_lock": smart_money_at_lock,
             "feature_snapshot": feature_snapshot,
             "tp1": r["targets"]["tp_1"],
             "cut_loss": r["targets"]["cut_loss"],
@@ -4504,7 +4523,7 @@ def split_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list:
     return chunks
 
 
-async def safe_reply(message_or_bot, text: str, chat_id=None, max_retries=3):
+async def safe_reply(message_or_bot, text: str, chat_id=None, max_retries=3, reply_markup=None):
     """
     Works for both update.message.reply_text (interactive) and bot.send_message
     (scheduled broadcast). Sends PLAIN TEXT ONLY.
@@ -4514,18 +4533,23 @@ async def safe_reply(message_or_bot, text: str, chat_id=None, max_retries=3):
     report instructions already say "plain text", disabling Markdown at the send layer
     removes noisy "can't parse entities" failures and saves one failed network attempt
     per affected message.
-    """
-    async def _send(body: str):
-        if chat_id is None:
-            await message_or_bot.reply_text(body)
-        else:
-            await message_or_bot.send_message(chat_id=chat_id, text=body)
 
-    async def _send_one(body: str):
+    MBSS v2 (user request — inline "Cek TICKER" buttons di semua tools):
+    reply_markup opsional, dilampirkan HANYA ke chunk TERAKHIR kalau pesan
+    kepanjangan dan ke-split jadi beberapa bagian — supaya tombolnya muncul
+    sekali di ujung, bukan berulang di tiap chunk.
+    """
+    async def _send(body: str, markup=None):
+        if chat_id is None:
+            await message_or_bot.reply_text(body, reply_markup=markup)
+        else:
+            await message_or_bot.send_message(chat_id=chat_id, text=body, reply_markup=markup)
+
+    async def _send_one(body: str, markup=None):
         last_error = None
         for attempt in range(1, max_retries + 1):
             try:
-                await _send(body)
+                await _send(body, markup)
                 return
             except BadRequest as e:
                 if "too long" in str(e).lower():
@@ -4550,7 +4574,8 @@ async def safe_reply(message_or_bot, text: str, chat_id=None, max_retries=3):
     chunks = split_message(text, max_len=TELEGRAM_MAX_LEN - PREFIX_MARGIN)
     for i, chunk in enumerate(chunks, start=1):
         prefix = f"({i}/{len(chunks)})\n" if len(chunks) > 1 else ""
-        await _send_one(prefix + chunk)
+        is_last = i == len(chunks)
+        await _send_one(prefix + chunk, markup=reply_markup if is_last else None)
 
 
 # ==========================================
@@ -6410,6 +6435,10 @@ def build_app():
     app.add_handler(CommandHandler("brokersum", commands_check.brokersum_upload_command))
     app.add_handler(CommandHandler("executiongate", commands_scan.executiongate_command))
     app.add_handler(CommandHandler("winrate", commands_misc.show_winrate))
+    app.add_handler(CommandHandler("brokerwinrate", commands_misc.show_broker_winrate))
+    app.add_handler(CommandHandler("menu", commands_misc.show_shortcut_menu))
+    app.add_handler(CommandHandler("menuoff", commands_misc.hide_shortcut_menu))
+    app.add_handler(CallbackQueryHandler(handle_check_button_callback, pattern=r"^check:"))
 
     # NOTE (MBSS v2 refactor, Phase 5b): db_stats_command / populate_db_command
     # used to be defined here as NESTED closures (pre-existing inconsistency,
@@ -6427,6 +6456,97 @@ def build_app():
     # /testbrief, /screendaytrade, /testopening instead.
 
     return app
+
+
+# MBSS v2 (user request — inline "Cek TICKER" buttons di semua tools):
+def build_check_buttons(tickers: list, max_buttons: int = 10) -> InlineKeyboardMarkup | None:
+    """
+    Grid tombol 2 per baris, TIDAK melebihi max_buttons (default 10 —
+    pesan dengan puluhan saham, mis. /strongbuy, tidak perlu tombol untuk
+    semuanya, cukup yang paling atas/relevan). callback_data format
+    "check:TICKER" (dibatasi 64 byte oleh Telegram, ticker IDX maksimal
+    ~6 huruf jadi aman jauh dari batas itu).
+
+    Return None kalau list ticker kosong (pemanggil bisa langsung pass ke
+    reply_markup= tanpa perlu cek kosong secara terpisah — None berarti
+    "tidak ada tombol", diterima Telegram dengan baik).
+    """
+    unique_tickers = list(dict.fromkeys(tickers))[:max_buttons]
+    if not unique_tickers:
+        return None
+    buttons = [InlineKeyboardButton(f"🔍 {t}", callback_data=f"check:{t}") for t in unique_tickers]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows)
+
+
+async def handle_check_button_callback(update, context):
+    """
+    Handler tombol "🔍 TICKER" — tap tombol memicu /check TICKER, hasilnya
+    dikirim sebagai pesan BARU (bukan edit pesan lama, supaya histori chat
+    tetap jelas siapa pick apa). Perlu answer() dulu (wajib API Telegram,
+    hilangkan status "loading" di tombol) sebelum proses lebih lanjut.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    if not query.data.startswith("check:"):
+        return
+    ticker = query.data.split(":", 1)[1]
+
+    import commands.check as commands_check  # lazy import, hindari circular (commands/check.py import legacy_core)
+
+    # check_stock() baca ticker dari context.args — bangun context tiruan
+    # minimal yang cukup buat itu, reuse context asli (punya bot/application)
+    # cuma args-nya diganti.
+    fake_context = type("FakeContext", (), {"args": [ticker], "bot": context.bot})()
+    fake_update = type("FakeUpdate", (), {"message": query.message, "effective_chat": query.message.chat})()
+    try:
+        await commands_check.check_stock(fake_update, fake_context)
+    except Exception as e:
+        print(f"⚠️ Gagal proses tombol cek {ticker}: {e}")
+        await query.message.reply_text(f"⚠️ Gagal cek {ticker}: {e}")
+
+
+# MBSS v2 (user request — inline winrate per label di semua tools, supaya
+# tidak perlu recall/cross-reference manual ke /winrate): cache in-memory
+# ringan, supaya history TIDAK dibaca ulang dari disk untuk SETIAP saham
+# dalam 1 pesan (mis. /hc nampilkan 10 saham -> tanpa cache ini, 10x baca
+# file yang sama).
+_winrate_label_cache = {"loaded_at": None, "stats": {}}
+
+
+def _rebuild_winrate_label_cache():
+    history = load_daytrade_picks_history()
+    resolved = [p for p in history if p.get("status") in ("win", "lose", "win_timebased", "lose_timebased")]
+    stats = {}
+    for p in resolved:
+        label = p.get("signal_label") or "N/A"
+        stats.setdefault(label, []).append(p)
+    _winrate_label_cache["stats"] = stats
+    _winrate_label_cache["loaded_at"] = datetime.datetime.now(WIB)
+
+
+def get_winrate_for_label(label: str) -> str:
+    """
+    Return string singkat siap-tampil, mis. "38% (13x)" — kalau data belum
+    cukup (sampel <3, jangan gegabah dipercaya) atau label belum pernah
+    tercatat, return string kosong ("") supaya pemanggil bisa skip tanpa
+    perlu cek None secara terpisah.
+
+    Cache di-refresh maksimal 1x/5menit (bukan tiap panggilan) — cukup
+    responsif buat sesi chat yang sama, tidak bebani I/O kalau dipanggil
+    puluhan kali dalam 1 pesan (mis. /hc top 10).
+    """
+    now = datetime.datetime.now(WIB)
+    if _winrate_label_cache["loaded_at"] is None or (now - _winrate_label_cache["loaded_at"]).total_seconds() > 300:
+        _rebuild_winrate_label_cache()
+
+    picks = _winrate_label_cache["stats"].get(label)
+    if not picks or len(picks) < 3:
+        return ""
+    wins = sum(1 for p in picks if p["status"] in ("win", "win_timebased"))
+    winrate_pct = wins / len(picks) * 100
+    return f"{winrate_pct:.0f}% ({len(picks)}x)"
 
 
 # ==========================================

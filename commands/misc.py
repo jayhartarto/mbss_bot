@@ -309,6 +309,25 @@ async def show_winrate(update, context):
             avg_days = sum(days_list) / len(days_list)
             lines.append(f"{status_label_days[status]}: rata-rata {avg_days:.1f} hari (n={len(days_list)})")
 
+    # MBSS v2 (user request): "kalau keluar paksa di hari ke-3 (trade-off ke
+    # pick lain), apakah lebih baik atau lebih buruk dari tunggu sampai
+    # selesai (TP/SL/hari-5)?" — cuma bisa dihitung untuk pick yang PUNYA
+    # day3_pnl_pct (mulai terkumpul dari sekarang) DAN sudah selesai
+    # (final pnl_pct tersedia buat dibandingkan).
+    day3_comparisons = [
+        (p["day3_pnl_pct"], p["pnl_pct"])
+        for p in history_sorted
+        if p.get("day3_pnl_pct") is not None and p.get("pnl_pct") is not None
+    ]
+    if day3_comparisons:
+        avg_day3 = sum(d3 for d3, _ in day3_comparisons) / len(day3_comparisons)
+        avg_final = sum(f for _, f in day3_comparisons) / len(day3_comparisons)
+        better_at_day3 = sum(1 for d3, f in day3_comparisons if d3 > f)
+        lines.append(f"\nExit di Hari-3 vs Tunggu Selesai (n={len(day3_comparisons)})")
+        lines.append(f"Avg PnL kalau keluar di hari-3: {avg_day3:+.1f}%")
+        lines.append(f"Avg PnL kalau tunggu selesai: {avg_final:+.1f}%")
+        lines.append(f"Hari-3 lebih baik di {better_at_day3}/{len(day3_comparisons)} kasus ({better_at_day3/len(day3_comparisons)*100:.0f}%)")
+
     lines.append("\nSummary per Tanggal")
     by_date = {}
     for p in history_sorted:
@@ -406,3 +425,100 @@ async def populate_db_command(update, context):
             print(f"⚠️ Gagal kirim notifikasi DB update: {notify_error}")
     except Exception as e:
         await update.message.reply_text(f"⚠️ Gagal populate DB: {e}")
+
+
+async def show_broker_winrate(update, context):
+    """
+    /brokerwinrate — winrate PER BROKER smart-money (MBSS v2, user request):
+    dari pick yang SUDAH SELESAI (resolved), kelompokkan berdasarkan broker
+    whitelist mana yang net-buy ticker itu SAAT pick dikunci
+    (smart_money_at_lock, disnapshot di lock_daily_daytrade_picks) —
+    tampilkan winrate & avg return per broker.
+
+    TIDAK RETROAKTIF — cuma pick yang dikunci SETELAH fitur ini aktif yang
+    punya snapshot smart_money_at_lock. Pick lama akan otomatis dilewati
+    (field itu tidak ada), bukan dianggap error.
+    """
+    history = core.load_daytrade_picks_history()
+    resolved = [p for p in history if p.get("status") in ("win", "lose", "win_timebased", "lose_timebased")]
+
+    # Kelompokkan per kode broker (1 pick bisa masuk >1 broker kalau beberapa net-buy bareng)
+    by_broker = {}
+    for p in resolved:
+        smart_money = p.get("smart_money_at_lock")
+        if not smart_money:
+            continue  # pick lama sebelum fitur ini aktif, atau memang tidak ada broker whitelist net-buy
+        for entry in smart_money:
+            code = entry.get("code")
+            if not code:
+                continue
+            by_broker.setdefault(code, []).append(p)
+
+    if not by_broker:
+        await core.safe_reply(
+            update.message,
+            "📋 Belum ada data — smart_money_at_lock baru mulai terekam dari pick TERBARU, "
+            "belum ada yang selesai (resolved) sejak fitur ini aktif. Butuh waktu beberapa minggu."
+        )
+        return
+
+    lines = ["💰 WINRATE PER BROKER SMART MONEY\n"]
+    lines.append("⚠️ Cuma dari pick yang dikunci SETELAH fitur snapshot ini aktif — sampel masih kecil di awal.\n")
+
+    broker_stats = []
+    for code, picks in by_broker.items():
+        wins = [p for p in picks if p["status"] in ("win", "win_timebased")]
+        avg_gain = sum(p["pnl_pct"] for p in picks if p.get("pnl_pct") is not None) / len(picks)
+        winrate_pct = len(wins) / len(picks) * 100
+        broker_stats.append((code, winrate_pct, len(wins), len(picks), avg_gain))
+
+    broker_stats.sort(key=lambda x: x[1], reverse=True)  # urut winrate tertinggi
+    for code, winrate_pct, wins, total, avg_gain in broker_stats:
+        lines.append(f"{code}: {winrate_pct:.0f}% Win ({wins}/{total}); avg {avg_gain:+.1f}%/pick")
+
+    # Baseline pembanding: winrate keseluruhan (semua pick resolved, terlepas broker)
+    if resolved:
+        all_wins = [p for p in resolved if p["status"] in ("win", "win_timebased")]
+        all_avg = sum(p["pnl_pct"] for p in resolved if p.get("pnl_pct") is not None) / len(resolved)
+        lines.append(f"\nBaseline (SEMUA pick, tanpa filter broker): {len(all_wins)/len(resolved)*100:.0f}% Win ({len(all_wins)}/{len(resolved)}); avg {all_avg:+.1f}%/pick")
+
+    await core.safe_reply(update.message, "\n".join(lines))
+
+
+async def show_shortcut_menu(update, context):
+    """
+    /menu — papan tombol shortcut (MBSS v2, user request): tombol persisten
+    di bawah kolom chat untuk command yang paling sering dipakai saat
+    market live, supaya tidak perlu ketik manual berulang-ulang. Tap
+    tombol = Telegram kirim teks tombol itu APA ADANYA sebagai pesan —
+    handler command yang SUDAH ADA tetap jalan normal, tidak ada logic
+    eksekusi baru di sini, murni UI shortcut.
+
+    PENTING soal isi tombol: TIDAK ada emoji/prefix apa pun di teksnya —
+    kalau ditambah emoji di depan, Telegram tidak akan mengenalinya sebagai
+    command (harus mulai persis dengan "/"). /check sengaja tetap di menu
+    walau kurang optimal (dia butuh argumen ticker, tap tombol cuma kirim
+    "/check" kosong) — tetap berguna sebagai pengingat visual command apa
+    saja yang tersedia.
+
+    Bisa ditutup lewat /menuoff, atau ikon toggle keyboard kecil bawaan
+    Telegram di pojok kolom ketik (itu yang bikin "expandable" — bawaan
+    platform, bukan sesuatu yang perlu kita bangun sendiri).
+    """
+    keyboard = [
+        ["/screendaytrade live", "/consensus"],
+        ["/bsjp", "/executiongate"],
+        ["/check"],
+    ]
+    markup = core.ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+    await update.message.reply_text(
+        "📋 Menu shortcut aktif — tap tombol di bawah buat kirim command langsung "
+        "(khusus /check tetap perlu ketik ticker setelahnya, dia butuh argumen).\n\n"
+        "Tutup lewat /menuoff, atau ikon keyboard kecil di kolom ketik.",
+        reply_markup=markup,
+    )
+
+
+async def hide_shortcut_menu(update, context):
+    """/menuoff — tutup papan tombol shortcut."""
+    await update.message.reply_text("📋 Menu shortcut ditutup.", reply_markup=core.ReplyKeyboardRemove())

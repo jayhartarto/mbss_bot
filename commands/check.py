@@ -298,13 +298,14 @@ async def check_stock(update, context):
     )
 
     # ── Target intraday ────────────────────────────────────────────
-    # MBSS v2 (user request): kalau brokersum SUDAH ada (cache hit di atas,
-    # bukan dari screenshot yang baru diupload — itu kejadian belakangan,
-    # lihat handle_brokersum_photo untuk kasus itu), tambahkan avg price
-    # broker besar sebagai referensi "jangan kejar di atas ini" di baris
-    # Entry — stopper psikologis, BUKAN level teknikal resmi (makanya
-    # ditandai * dan dijelaskan singkat, bukan disatukan begitu saja).
-    ceiling = broker_engine.get_broker_entry_ceiling(result["brokersum"]) if result.get("brokersum") else None
+    # MBSS v2 (user request): SEKARANG prioritaskan broksum_250 (otomatis,
+    # cakupan 250 saham, update tiap malam) dulu — jatuh ke
+    # result["brokersum"] (screenshot manual/fetch Zapi barusan) kalau
+    # ticker di luar cakupan broksum_250 atau tidak ada broker whitelist
+    # yang net buy di situ.
+    ceiling = broker_engine.get_best_available_ceiling(ticker, nightly_engine.load_broksum_250())
+    if not ceiling and result.get("brokersum"):
+        ceiling = broker_engine.get_broker_entry_ceiling(result["brokersum"])
     ceiling_str = f" / {_fmt(ceiling['avg_price'])}*" if ceiling else ""
 
     if it:

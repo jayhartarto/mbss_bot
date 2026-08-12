@@ -926,10 +926,18 @@ def find_broker_activity_across_tickers(broker_code: str, tickers_data: dict) ->
         net_value = (row.get("buy_value") or 0) - (row.get("sell_value") or 0)
         if net_value <= 0:
             continue  # HANYA net buy — sesuai tujuan follow smart money akumulasi
+        # BUGFIX (ditemukan lewat kroscek manual user terhadap aplikasi
+        # trading asli — DSSA/AK: bot tampilkan 5,1 juta lot, aplikasi asli
+        # cuma 1,46 juta lot (net); IATA/AK: bot 8,55 juta lot vs aplikasi
+        # 854 ribu lot — hampir PERSIS 10x lipat): sebelumnya lot volume
+        # pakai buy_volume MENTAH (kotor, total beli SAJA), padahal
+        # net_value_idr di atas SUDAH benar dikurangi jual — lot volume-nya
+        # lupa. Sekarang KEDUANYA konsisten net (buy - sell).
+        net_volume_lot = ((row.get("buy_volume") or 0) - (row.get("sell_volume") or 0)) / 100
         activity.append({
             "ticker": ticker,
             "net_value_idr": net_value,
-            "buy_volume_lot": round((row.get("buy_volume") or 0) / 100),  # 1 lot = 100 lembar
+            "buy_volume_lot": round(net_volume_lot),  # 1 lot = 100 lembar
             "buy_avg_price": row.get("buy_avg"),
             "buy_freq": row.get("buy_freq"),
         })
@@ -937,11 +945,15 @@ def find_broker_activity_across_tickers(broker_code: str, tickers_data: dict) ->
     return activity
 
 
-# MBSS v2 (user request — whitelist broker smart-money): daftar awal dari
-# reputasi umum yang user sebutkan, BOLEH diedit kapan saja begitu ada
-# referensi lebih solid dari praktisi berpengalaman — ini BUKAN daftar
-# final/terverifikasi, cuma titik awal.
-SMART_MONEY_BROKER_WHITELIST = ["AK", "BK", "YU", "ZP", "LG"]
+# MBSS v2 (user request — whitelist broker smart-money, REVISI dari daftar
+# awal): diperluas dari temuan user sendiri, BOLEH diedit lagi kapan saja
+# begitu ada referensi lebih solid — ini BUKAN daftar final/terverifikasi
+# dari sumber otoritatif tunggal (riset web tidak menemukan satu sumber
+# yang secara eksplisit me-ranking kode-kode ini sebagai "smart money" —
+# konsisten dengan kebijaksanaan komunitas informal soal broker
+# institusi/asing besar, tapi validasi paling kuat tetap dari data winrate
+# kita sendiri seiring waktu).
+SMART_MONEY_BROKER_WHITELIST = ["ZP", "AK", "BK", "YU", "AI", "SQ", "BB", "KZ", "RX", "RF", "DX", "HP", "KI"]
 
 
 def get_smart_money_accumulation(ticker: str, tickers_data: dict) -> list:
@@ -962,10 +974,11 @@ def get_smart_money_accumulation(ticker: str, tickers_data: dict) -> list:
         net_value = (row.get("buy_value") or 0) - (row.get("sell_value") or 0)
         if net_value <= 0:
             continue
+        net_volume_lot = ((row.get("buy_volume") or 0) - (row.get("sell_volume") or 0)) / 100
         result.append({
             "code": code,
             "net_value_idr": net_value,
-            "buy_volume_lot": round((row.get("buy_volume") or 0) / 100),
+            "buy_volume_lot": round(net_volume_lot),
             "buy_avg_price": row.get("buy_avg"),
         })
     result.sort(key=lambda r: r["net_value_idr"], reverse=True)
@@ -979,3 +992,45 @@ def format_smart_money_tag(ticker: str, tickers_data: dict, prefix: str = "\n   
         return ""
     parts = [f"{a['code']} {a['buy_volume_lot']:,} lot @ avg {a['buy_avg_price']:.0f}" for a in accum]
     return f"{prefix}💰 Akumulasi smart money: {', '.join(parts)}"
+
+
+def get_broker_entry_ceiling_from_broksum250(ticker: str, tickers_data: dict) -> dict | None:
+    """
+    MBSS v2 (user request — jadikan broksum_250 SUMBER UTAMA ceiling
+    asterisk, gantikan ketergantungan ke screenshot manual untuk 250 saham
+    teratas): ambil avg_buy_price TERTINGGI di antara broker WHITELIST yang
+    NET BUY di ticker ini — logika ceiling SAMA seperti versi screenshot
+    lama (get_broker_entry_ceiling: "bahkan buyer besar paling agresif pun
+    cuma berani sampai sini"), cuma sumber datanya beda (batch API
+    otomatis, bukan upload manual).
+
+    Return None kalau ticker tidak ada di broksum_250 (di luar top 250)
+    atau tidak ada broker whitelist yang net buy di situ.
+    """
+    accum = get_smart_money_accumulation(ticker, tickers_data)
+    if not accum:
+        return None
+    highest = max(accum, key=lambda a: a["buy_avg_price"])
+    return {"avg_price": highest["buy_avg_price"], "code": highest["code"], "source": "broksum_250"}
+
+
+def get_best_available_ceiling(ticker: str, tickers_data: dict) -> dict | None:
+    """
+    MBSS v2 (user request): fungsi terpadu — PRIORITASKAN broksum_250
+    (otomatis, cakupan luas 250 saham, update tiap malam) DULU, baru kalau
+    ticker itu di luar cakupan (bukan top-250) atau kebetulan tidak ada
+    broker whitelist yang net buy di situ, JATUH ke brokersum screenshot
+    manual (cakupan sempit tapi bisa ticker apa saja yang user cek).
+    Dipakai sebagai pengganti langsung pola lama
+    "get_cached_brokersum + get_broker_entry_ceiling" di semua tools.
+    """
+    ceiling = get_broker_entry_ceiling_from_broksum250(ticker, tickers_data)
+    if ceiling:
+        return ceiling
+    cached_bs = get_cached_brokersum(ticker)
+    if cached_bs:
+        legacy_ceiling = get_broker_entry_ceiling(cached_bs)
+        if legacy_ceiling:
+            legacy_ceiling["source"] = "screenshot"
+            return legacy_ceiling
+    return None

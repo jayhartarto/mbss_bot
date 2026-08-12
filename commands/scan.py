@@ -263,8 +263,11 @@ async def screen_daytrade(update, context):
         lines.append("Catatan: Diurutkan MURNI dari sinyal live (bukan lane EOD) — proxy terdekat ke \"orderbook condong ke buyer\" dari data yang tersedia (bot ini TIDAK punya akses order-book bid/ask asli). Ini RADAR, bukan entry final.\n")
         for i, r in enumerate(top_candidates, 1):
             ab = r["active_breakout"]
+            label = ab.get("label", "-")
+            wr = core.get_winrate_for_label(label)
+            label_str = f"{label} (WR {wr})" if wr else label
             lines.append(
-                f"{i}. {r['ticker']} — {ab.get('label', '-')} ({ab.get('score', 0)}/100)\n"
+                f"{i}. {r['ticker']} — {label_str} ({ab.get('score', 0)}/100)\n"
                 f"   Harga {r.get('price')} | VWAP {ab.get('vwap', '-')} (jarak {ab.get('vwap_distance_pct', '-')}%) | Vol pace {ab.get('volume_pace_ratio', '-')}x\n"
                 f"   Trigger {ab.get('trigger_price', '-')} | Invalid <{ab.get('invalidation_level', '-')}\n"
                 f"   {ab.get('notes', '') or '-'}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
@@ -284,7 +287,8 @@ async def screen_daytrade(update, context):
                     f"vs VWAP {ab.get('vwap_distance_pct', '-')}% | {ab.get('label', '-')} ({ab.get('score', 0)}/100)"
                 )
 
-        await core.safe_reply(update.message, "\n\n".join(lines))
+        buttons_live = core.build_check_buttons([r["ticker"] for r in top_candidates] + [r["ticker"] for r in spikes])
+        await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons_live)
         return
 
     lines = ["⚡ SCREENING DAY TRADE - RADAR BREAKOUT V5 ACTIVITY\n"]
@@ -303,15 +307,25 @@ async def screen_daytrade(update, context):
         risk = v5["risk"]
         br = v5["breakout"]
         volq = v5["volq"]
+
+        # MBSS v2 (user request — inline winrate per label): "Lane" ini
+        # PERSIS field yang tersimpan sebagai signal_label buat winrate
+        # (r["_positive_lane"], lihat lock_daily_daytrade_picks) — lookup
+        # langsung pakai nilai yang sama, tidak ada celah mismatch.
+        lane = r.get("_positive_lane", "-")
+        wr = core.get_winrate_for_label(lane)
+        lane_str = f"{lane} (WR {wr})" if wr else lane
+
         lines.append(
             f"{i}. {r['ticker']} — {v5['label']}\n"
-            f"   Total {v5['total']}/100 | Bias {r.get('_positive_bias', '-')}/100 | Lane {r.get('_positive_lane', '-')} | B {br['score']} | C {cont['score']} | Act {v5['activity']['score']} | VolQ {volq['score']} | Room {room['score']} | Safety {risk['score']}{src_live}\n"
+            f"   Total {v5['total']}/100 | Bias {r.get('_positive_bias', '-')}/100 | Lane {lane_str} | B {br['score']} | C {cont['score']} | Act {v5['activity']['score']} | VolQ {volq['score']} | Room {room['score']} | Safety {risk['score']}{src_live}\n"
             f"   Harga {r.get('price')} | Valid >{v5['valid_level']} | Ideal {v5['ideal']} | Invalid <{v5['invalid']}\n"
             f"   Room: {room['label']} ({room['dist_high_pct']}% ke high, upside TP1 {room['upside_tp1_pct']}%) | VolQ: {volq['label']} | Continuation: {cont['label']}\n"
             f"   Note: {v5['note']}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
         )
 
-    await core.safe_reply(update.message, "\n\n".join(lines))
+    buttons = core.build_check_buttons([r["ticker"] for r in top_candidates])
+    await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
     # Tombol upload Broker Summary ALL 3 hari untuk 12 saham hasil radar.
     try:
@@ -742,12 +756,17 @@ def _gptpick_format_item(scoring: dict) -> str:
     rr_warning = ""
     if isinstance(rr, (int, float)) and rr < 1.0:
         rr_warning = f"\n  ⚠️ RR@max {rr_text} — risiko lebih besar dari potensi untung kalau entry di harga sekarang"
+    lane = scoring.get("_positive_lane")
+    wr = core.get_winrate_for_label(lane) if lane else ""
+    wr_note = f"\n  📊 Lane {lane} (WR {wr})" if wr else ""
+
     return (
         f"{scoring.get('ticker', '-')}: {g.get('bucket', '-') } {g.get('final', 0):.1f}/100 | {g.get('confidence', '-')}\n"
         f"  LQ {g.get('liquidity', 0):.1f} | DT {g.get('daytrade', 0):.1f} | RS {g.get('rs', 0):.1f} | RR {g.get('rr', 0):.1f} | FLOW {g.get('flow', 0):.1f}\n"
         f"  Buy {buy} | TP1 {tp1} | SL {sl} | RR@max {rr_text}"
         f"{rr_warning}\n"
         f"  {', '.join(g.get('reasons', [])) if g.get('reasons') else '—'}"
+        f"{wr_note}"
         f"{broker_engine.format_smart_money_tag(scoring.get('ticker', ''), nightly_engine.load_broksum_250(), prefix=chr(10) + '  ')}"
         f"{market_engine.format_sector_tag(scoring.get('sector'), prefix=chr(10) + '  ')}"
     )
@@ -876,12 +895,19 @@ async def _run_gptpick(update, context, top_n: int = GPTPICK_DEFAULT_TOP_N):
     for i, r in enumerate(picks, 1):
         lines.append(f"{i}. {_gptpick_format_item(r)}")
 
-    keyboard = InlineKeyboardMarkup([
+    keyboard_rows = [
         [
             InlineKeyboardButton("Top 3", callback_data="gptpick:3"),
             InlineKeyboardButton("Top 5", callback_data="gptpick:5"),
         ]
-    ])
+    ]
+    # MBSS v2 (user request — tombol cek di semua tools): gabungkan DENGAN
+    # keyboard Top 3/Top 5 yang sudah ada, bukan menimpanya — Telegram cuma
+    # terima 1 reply_markup per pesan.
+    check_markup = core.build_check_buttons([r["ticker"] for r in picks])
+    if check_markup:
+        keyboard_rows.extend(check_markup.inline_keyboard)
+    keyboard = InlineKeyboardMarkup(keyboard_rows)
 
     try:
         await message.reply_text("\n\n".join(lines), reply_markup=keyboard)
@@ -1004,15 +1030,13 @@ async def high_conviction_command(update, context):
         rr = t.get("risk_reward_at_max")
         rr_str = f"1:{rr:.2f}" if isinstance(rr, (int, float)) else "-"
 
-        # Ceiling asterisk (persis pola /check) — cuma kalau brokersum SUDAH
-        # ter-cache same-day untuk ticker ini (dari screenshot/Index Alpha
-        # sebelumnya), TIDAK fetch baru di sini.
+        # Ceiling asterisk — SEKARANG prioritaskan broksum_250 (otomatis,
+        # cakupan 250 saham), jatuh ke screenshot manual kalau di luar
+        # cakupan itu (MBSS v2, user request).
         ceiling_str = ""
-        cached_bs = broker_engine.get_cached_brokersum(r["ticker"])
-        if cached_bs:
-            ceiling = broker_engine.get_broker_entry_ceiling(cached_bs)
-            if ceiling:
-                ceiling_str = f" / {ceiling['avg_price']:.0f}*"
+        ceiling = broker_engine.get_best_available_ceiling(r["ticker"], broksum_data)
+        if ceiling:
+            ceiling_str = f" / {ceiling['avg_price']:.0f}*"
 
         streak_any = core.compute_consecutive_appearance_streak_any_source(r["ticker"], pick_date_today, history_for_streak)
         streak_hc = core.compute_consecutive_appearance_streak(r["ticker"], "hc", pick_date_today, history_for_streak)
@@ -1028,16 +1052,24 @@ async def high_conviction_command(update, context):
             sector_note = f"\n   🏭 Sektor {sector_info['sector']}: #{sector_info['rank']}/{sector_info['total_sectors']} terkuat ({sector_info['avg_return_pct']:+.1f}% avg)"
         smart_money_note = broker_engine.format_smart_money_tag(r["ticker"], broksum_data)
 
+        # MBSS v2 (user request — inline winrate per label, supaya tidak perlu
+        # recall/cross-reference manual): tampilkan angka winrate historis
+        # PERSIS untuk label yang sedang ditunjukkan di sini (action_label_id).
+        label = r.get("action_label_id", "-")
+        wr = core.get_winrate_for_label(label)
+        label_str = f"{label} (winrate {wr})" if wr else label
+
         lines.append(
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f}{daytrade_note}{streak_str} "
             f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
             f"   {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)} kriteria | "
-            f"RR {rr_str} | {r.get('action_label_id', '-')}\n"
+            f"RR {rr_str} | {label_str}\n"
             f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}"
         )
 
     lines.append("\nDetail lengkap: /check TICKER")
-    await core.safe_reply(update.message, "\n\n".join(lines))
+    buttons = core.build_check_buttons([r["ticker"] for r in top10])
+    await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
 
 
@@ -1269,8 +1301,11 @@ async def _run_bsjp_6criteria(update):
     lines.append("⚠️ Checklist struktur (CMF/OBV/MACD/volume-shape/multi-timeframe) KONFIRMASI saja, TIDAK menggugurkan — belum cukup data buat dikunci jadi wajib.\n")
     for i, r in enumerate(results, 1):
         struct_str = f" | Struktur {r['structure']['met']}/{r['structure']['total']}" if r["structure"]["total"] else ""
+        label = r.get("action_label_id")
+        wr = core.get_winrate_for_label(label) if label else ""
+        wr_note = f" | WR {wr}" if wr else ""
         lines.append(
-            f"{i}. {r['ticker']} — {r['current_price']:.0f} ({r['gain_pct']:+.1f}%){struct_str}\n"
+            f"{i}. {r['ticker']} — {r['current_price']:.0f} ({r['gain_pct']:+.1f}%){struct_str}{wr_note}\n"
             f"   Vol {r['vol_vs_ma20']}x MA20 | {r['vol_vs_prev']}x kemarin | SMA5 {r['sma5']:.0f}\n"
             f"   Value {r['value_traded_today']/1e9:.1f}M | RSI {r['rsi']} | Jarak ARA {r['ara_distance']}% | "
             f"Closing {r['close_pos']*100:.0f}% dari range{r['akumulasi_note']}"
@@ -1279,7 +1314,8 @@ async def _run_bsjp_6criteria(update):
             icon = "✅" if c["ok"] else "➖"
             lines.append(f"   {icon} {c['nama']}: {c['detail']}")
 
-    await core.safe_reply(update.message, "\n\n".join(lines))
+    buttons = core.build_check_buttons([r["ticker"] for r in results])
+    await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
     try:
         await asyncio.to_thread(core.lock_daily_daytrade_picks, results, "bsjp")
     except Exception as e:
@@ -1411,7 +1447,8 @@ async def bsjp_screening_command(update, context):
             f"   VolQ {r['volq_ratio']}x | Jarak ARA {r['ara_distance']}%{catalyst_str}{news_str}{sector_str}"
         )
 
-    await core.safe_reply(update.message, "\n\n".join(ara_lines))
+    buttons = core.build_check_buttons([r["ticker"] for r in ara_results])
+    await core.safe_reply(update.message, "\n\n".join(ara_lines), reply_markup=buttons)
     try:
         await asyncio.to_thread(core.lock_daily_daytrade_picks, ara_results, "bsjp_ara")
     except Exception as e:
@@ -1444,7 +1481,12 @@ async def strong_buy_command(update, context):
     candidates.sort(key=lambda r: r.get("scores", {}).get("final", 0), reverse=True)
     broksum_data = nightly_engine.load_broksum_250()
 
-    lines = [f"💪 SEMUA STRONG_BUY — {len(candidates)} saham (cache /eodscan, tidak difilter likuiditas/lane apa pun)\n"]
+    # MBSS v2 (user request — inline winrate): semua kandidat di sini SAMA
+    # persis label-nya (STRONG_BUY), jadi cukup 1x di atas, bukan diulang
+    # tiap baris.
+    wr = core.get_winrate_for_label("STRONG_BUY")
+    wr_line = f" (winrate historis: {wr})" if wr else ""
+    lines = [f"💪 SEMUA STRONG_BUY{wr_line} — {len(candidates)} saham (cache /eodscan, tidak difilter likuiditas/lane apa pun)\n"]
     for i, r in enumerate(candidates, 1):
         s = r.get("scores", {})
         t = r.get("targets", {})
@@ -1454,11 +1496,9 @@ async def strong_buy_command(update, context):
         liq_note = f" | Value {value_traded/1e9:.1f}M" if isinstance(value_traded, (int, float)) else ""
 
         ceiling_str = ""
-        cached_bs = broker_engine.get_cached_brokersum(r["ticker"])
-        if cached_bs:
-            ceiling = broker_engine.get_broker_entry_ceiling(cached_bs)
-            if ceiling:
-                ceiling_str = f" / {ceiling['avg_price']:.0f}*"
+        ceiling = broker_engine.get_best_available_ceiling(r["ticker"], broksum_data)
+        if ceiling:
+            ceiling_str = f" / {ceiling['avg_price']:.0f}*"
 
         lines.append(
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f} "
@@ -1468,16 +1508,19 @@ async def strong_buy_command(update, context):
         )
 
     lines.append("\nDetail lengkap: /check TICKER")
-    await core.safe_reply(update.message, "\n\n".join(lines))
+    buttons = core.build_check_buttons([r["ticker"] for r in candidates])
+    await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
 
 async def consensus_command(update, context):
     """
-    /consensus — saham yang muncul sebagai kandidat POSITIF di >=2 dari 4
+    /consensus — saham yang muncul sebagai kandidat POSITIF di >=2 dari 5
     lensa screening independen kita (MBSS v2, user request, tindak lanjut
-    diskusi positioning /hc vs /screendaytrade): HIGH CONVICTION (pola
-    chart), STRONG_BUY (verdict inti value/momentum/sentimen), SCREENDAYTRADE
-    (lane timing entry), GPTPICK (shortlist momentum/likuiditas/RR).
+    diskusi positioning /hc vs /screendaytrade + integrasi smart money):
+    HIGH CONVICTION (pola chart), STRONG_BUY (verdict inti value/momentum/
+    sentimen), SCREENDAYTRADE (lane timing entry), GPTPICK (shortlist
+    momentum/likuiditas/RR), SMART MONEY (broker whitelist net-buy dari
+    broksum_250).
 
     SEMUA murni dari cache /eodscan (TIDAK fetch live apa pun) — lane
     screendaytrade & skor gptpick dihitung ulang di sini dari data cache
@@ -1498,6 +1541,7 @@ async def consensus_command(update, context):
 
     GOOD_SDT_LANES = {"PRIORITY FRESH", "PRIORITY CONT"}  # SECONDARY WATCH/LOW EDGE sengaja TIDAK dihitung (lihat revisi minggu lalu)
     GPTPICK_MIN_SCORE = 65  # kira-kira ambang bawah yang biasanya masuk top 3-5 nyata
+    broksum_data = nightly_engine.load_broksum_250()  # MBSS v2 (user request): smart-money jadi dimensi ke-5
 
     qualifying = []
     for r in scored.values():
@@ -1524,11 +1568,42 @@ async def consensus_command(update, context):
         except Exception:
             pass
 
+        # MBSS v2 (user request — smart money sebagai dimensi konsensus):
+        # kalau ADA broker whitelist yang net buy ticker ini (dari
+        # broksum_250), hitung sebagai 1 "tool" tambahan — bandarmology
+        # sekarang ikut jadi salah satu lensa konsensus, bukan cuma tag
+        # terpisah.
+        smart_money = broker_engine.get_smart_money_accumulation(r["ticker"], broksum_data)
+        if smart_money:
+            codes = ", ".join(a["code"] for a in smart_money)
+            tools.append(f"SMART MONEY ({codes})")
+
         if len(tools) >= 2:
             qualifying.append({**r, "_consensus_tools": tools})
 
+    # MBSS v2 (user request — section terpisah, bandarmology paling kuat):
+    # ticker yang di-net-buy LEBIH DARI 1 broker whitelist SEKALIGUS —
+    # scan SELURUH broksum_250 (bukan cuma yang qualifying dari 4 tool
+    # lain), karena ini sinyal berdiri sendiri, TIDAK BOLEH ikut
+    # ke-block kalau qualifying (5-tool) kosong — makanya dihitung di sini,
+    # SEBELUM early-return di bawah (pola sama seperti fix BSJP-ARA
+    # sebelumnya: 2 hal independen, jangan saling menghentikan).
+    multi_broker_lines = []
+    for ticker, rows in broksum_data.items():
+        accum = broker_engine.get_smart_money_accumulation(ticker, broksum_data)
+        if len(accum) >= 2:
+            parts = ", ".join(f"{a['code']} @ avg {a['buy_avg_price']:.0f}" for a in accum)
+            multi_broker_lines.append((sum(a["net_value_idr"] for a in accum), f"{ticker}: {parts}"))
+    multi_broker_lines.sort(key=lambda x: x[0], reverse=True)
+    multi_broker_block = (
+        "\n\n🏦 Multi-broker net-buy (bandarmology terkuat — >1 broker whitelist kompak):\n"
+        + "\n".join(line for _, line in multi_broker_lines[:10])
+    ) if multi_broker_lines else ""
+
     if not qualifying:
-        await core.safe_reply(update.message, "📋 Tidak ada saham yang muncul di >=2 tool sekaligus hari ini.")
+        msg = "📋 Tidak ada saham yang muncul di >=2 tool sekaligus hari ini."
+        early_buttons = core.build_check_buttons([line.split(":")[0] for _, line in multi_broker_lines[:10]])
+        await core.safe_reply(update.message, msg + multi_broker_block, reply_markup=early_buttons)
         return
 
     qualifying.sort(key=lambda r: (len(r["_consensus_tools"]), r.get("scores", {}).get("final", 0)), reverse=True)
@@ -1571,20 +1646,25 @@ async def consensus_command(update, context):
     sector_lines = [f"{r['ticker']}{market_engine.format_sector_tag(r.get('sector'), prefix=' — ')}" for r in qualifying[:15] if market_engine.get_sector_rank_info(r.get("sector"))]
     sector_block = ("\n\nKekuatan sektor:\n" + "\n".join(sector_lines)) if sector_lines else ""
 
-    broksum_data_consensus = nightly_engine.load_broksum_250()
-    smart_money_lines = [f"{r['ticker']}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data_consensus, prefix=' — ')}" for r in qualifying[:15] if broker_engine.get_smart_money_accumulation(r['ticker'], broksum_data_consensus)]
+    smart_money_lines = [f"{r['ticker']}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data, prefix=' — ')}" for r in qualifying[:15] if broker_engine.get_smart_money_accumulation(r['ticker'], broksum_data)]
     smart_money_block = ("\n\nAkumulasi smart money:\n" + "\n".join(smart_money_lines)) if smart_money_lines else ""
+
+    # MBSS v2 (user request — tombol cek di semua tools): gabungkan ticker
+    # dari qualifying (5-tool consensus) + multi-broker (independen), dedup
+    # otomatis oleh build_check_buttons.
+    consensus_tickers = [r["ticker"] for r in qualifying[:15]] + [line.split(":")[0] for _, line in multi_broker_lines[:10]]
+    buttons = core.build_check_buttons(consensus_tickers)
 
     try:
         summary_text = await asyncio.to_thread(core.ask_gemini_to_analyze, gemini_input, core.CONSENSUS_BRIEF_INSTRUCTION)
-        await core.safe_reply(update.message, summary_text + streak_block + sector_block + smart_money_block)
+        await core.safe_reply(update.message, summary_text + streak_block + sector_block + smart_money_block + multi_broker_block, reply_markup=buttons)
     except Exception as e:
         print(f"⚠️ Gemini consensus brief gagal: {e}")
         # Gagal-lunak — tetap kasih daftar mentah kalau Gemini error, jangan diam saja
         lines = [f"🔗 CONSENSUS (Gemini gagal, tampilan mentah) — {len(qualifying)} saham lolos >=2 tool\n"]
         for r in qualifying[:15]:
             lines.append(f"{r['ticker']} ({len(r['_consensus_tools'])} tool: {', '.join(r['_consensus_tools'])})")
-        await core.safe_reply(update.message, "\n".join(lines))
+        await core.safe_reply(update.message, "\n".join(lines) + multi_broker_block, reply_markup=buttons)
 
 
 async def broksum_command(update, context):
@@ -1626,7 +1706,8 @@ async def broksum_command(update, context):
     lines = [f"💰 TOP {len(top_activity)} AKUMULASI {broker_code} — {nightly_engine.BROKSUM_250_LOOKBACK_DAYS} hari terakhir (dari {len(activity)} saham net-buy, {len(broksum_data)} ticker berskor tertinggi)\n"]
     for i, a in enumerate(top_activity, 1):
         lines.append(f"{i}. {a['ticker']}, net buy {a['buy_volume_lot']:,} lot, {a['buy_avg_price']:.0f} avg price")
-    await core.safe_reply(update.message, "\n".join(lines))
+    buttons = core.build_check_buttons([a["ticker"] for a in top_activity])
+    await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
 
 
 # Alias lama, tetap didukung sementara supaya transisi tidak mendadak (MBSS v2)
