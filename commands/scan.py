@@ -1700,7 +1700,11 @@ async def broksum_command(update, context):
         return
 
     top_activity = activity[:top_n]
-    lines = [f"💰 TOP {len(top_activity)} AKUMULASI {broker_code} — {nightly_engine.BROKSUM_250_LOOKBACK_DAYS} hari terakhir (dari {len(activity)} saham net-buy, {len(broksum_data)} ticker berskor tertinggi)\n"]
+    age_info = nightly_engine.get_broksum_250_age_info()
+    age_note = ""
+    if age_info and age_info["days_lagging"] > 0:
+        age_note = f" ⚠️ Data dari {age_info['last_fetch_date']} ({age_info['days_lagging']} hari lalu, bukan hari ini)"
+    lines = [f"💰 TOP {len(top_activity)} AKUMULASI {broker_code} — {nightly_engine.BROKSUM_250_LOOKBACK_DAYS} hari terakhir (dari {len(activity)} saham net-buy, {len(broksum_data)} ticker berskor tertinggi){age_note}\n"]
     for i, a in enumerate(top_activity, 1):
         lines.append(f"{i}. {a['ticker']}, net buy {a['buy_volume_lot']:,} lot, {a['buy_avg_price']:.0f} avg price")
     buttons = core.build_check_buttons([a["ticker"] for a in top_activity])

@@ -505,15 +505,15 @@ def load_bsjp_ara_candidates() -> list:
 # job dan pemakaian interaktif sepanjang hari.
 # ==========================================
 BROKSUM_250_BATCH_SIZE = 50
-BROKSUM_250_TOTAL_TICKERS = 250
+BROKSUM_250_TOTAL_TICKERS = 100  # direvisi dari 250 (user request — kuota bulanan Index Alpha hampir habis): 100 ticker = pas 2 panggilan batch (50+50), bukan 5. Efek sampingnya BAGUS ke depan: 2 kredit/hari vs 5/hari — 150/bulan jadi tahan ~75 hari, bukan ~30, jauh lebih toleran kalau /eodscan sempat dijalankan berulang dalam sehari.
 BROKSUM_250_LOOKBACK_DAYS = 10  # direvisi dari 7 (user request)
 
 
 def build_broksum_250(results: list) -> dict:
     """
-    Ambil 250 ticker berskor Final tertinggi dari hasil /eodscan malam ini,
-    fetch broker-summary batch (5 panggilan x 50 ticker) via endpoint resmi
-    Index Alpha. Return dict {ticker: [baris broker, ...]}.
+    Ambil BROKSUM_250_TOTAL_TICKERS ticker berskor Final tertinggi dari hasil
+    /eodscan malam ini, fetch broker-summary batch via endpoint resmi Index
+    Alpha. Return dict {ticker: [baris broker, ...]}.
     """
     scored_with_final = [r for r in results if r and r.get("scores", {}).get("final") is not None]
     top250 = sorted(scored_with_final, key=lambda r: r["scores"]["final"], reverse=True)[:BROKSUM_250_TOTAL_TICKERS]
@@ -541,12 +541,54 @@ def build_broksum_250(results: list) -> dict:
 
 
 def save_broksum_250(data: dict):
-    meta = {"trading_day_marker": core.get_current_calendar_date_marker()}
+    """
+    MBSS v2 BUGFIX (user request — "tarikan kemarin jadi hilang"): SEBELUMNYA
+    fungsi ini menimpa cache lama TANPA SYARAT, termasuk kalau hasil fetch
+    hari ini KOSONG (mis. kuota Index Alpha habis, semua 5 panggilan batch
+    gagal) — jadi data kemarin yang masih bagus & masih berguna (meski
+    sedikit lagging) ikut TERHAPUS oleh kegagalan hari ini. SEKARANG: kalau
+    hasil baru kosong atau jauh lebih kecil dari yang sudah ada (<50%,
+    indikasi gagal parsial), JANGAN timpa — pertahankan data lama, catat
+    tanggal fetch SUKSES terakhir supaya /broksum bisa transparan soal
+    seberapa lama data itu ("data dari 3 hari lalu", bukan diam-diam basi).
+    """
+    existing = load_broksum_250()
+    if not data:
+        print(f"⚠️ BROKSUM 250: hasil fetch hari ini KOSONG — cache lama ({len(existing)} ticker) DIPERTAHANKAN, tidak ditimpa.")
+        return
+    if existing and len(data) < len(existing) * 0.5:
+        print(f"⚠️ BROKSUM 250: hasil fetch baru cuma {len(data)} ticker (vs {len(existing)} sebelumnya) — kemungkinan gagal parsial, cache lama DIPERTAHANKAN.")
+        return
+
+    meta = {
+        "trading_day_marker": core.get_current_calendar_date_marker(),
+        "last_successful_fetch_date": core.get_current_calendar_date_marker(),
+    }
     ok = cache_manager.set("broksum_250", {"data": data}, meta=meta)
     if ok:
         print(f"💾 BROKSUM 250 tersimpan (cache/broksum_250.pkl): {len(data)} ticker")
     else:
         print("⚠️ Gagal menyimpan BROKSUM 250 cache.")
+
+
+def get_broksum_250_age_info() -> dict | None:
+    """
+    MBSS v2 (user request — transparansi umur data): baca meta cache buat
+    tahu tanggal fetch SUKSES terakhir, berapa hari lagging dari hari ini.
+    Dipakai /broksum supaya user tahu jelas kalau datanya bukan dari
+    hari ini (mis. kuota Index Alpha habis beberapa hari), bukan diam-diam.
+    """
+    meta = cache_manager.get_meta("broksum_250")
+    if not meta or not meta.get("last_successful_fetch_date"):
+        return None
+    last_date_str = meta["last_successful_fetch_date"]
+    try:
+        last_date = core.datetime.datetime.strptime(last_date_str, "%Y-%m-%d").date()
+        today = core.datetime.datetime.now(core.WIB).date()
+        days_lagging = (today - last_date).days
+        return {"last_fetch_date": last_date_str, "days_lagging": days_lagging}
+    except Exception:
+        return None
 
 
 def load_broksum_250() -> dict:
