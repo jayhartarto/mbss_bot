@@ -302,6 +302,10 @@ async def run_nightly_full_scan(context):
         try:
             broksum_250_data = await asyncio.to_thread(build_broksum_250, results)
             save_broksum_250(broksum_250_data)
+            # MBSS v2 (user request — Bias Bandar): TAMBAHKAN snapshot hari
+            # ini ke histori harian (bukan cuma cache sesaat) — supaya trend
+            # akumulasi/distribusi bisa dilihat beberapa hari ke belakang.
+            await asyncio.to_thread(append_broksum_daily_history, broksum_250_data)
         except Exception as e:
             print(f"⚠️ Gagal membangun BROKSUM 250: {e}")
 
@@ -561,3 +565,57 @@ def load_broksum_250() -> dict:
         return {}
     payload = cache_manager.get("broksum_250", default={})
     return payload.get("data", {}) if isinstance(payload, dict) else {}
+
+
+# ==========================================
+# 🏦 BIAS BANDAR — histori harian broksum + klasifikasi trend (MBSS v2,
+# user request, setelah studi kasus TMPO/MDIA/JGLE/DOOH/ICON manual). Ini
+# MULAI DARI NOL — broksum_250 sebelumnya cuma snapshot "sekarang", ditimpa
+# tiap malam. Sekarang SETIAP malam, snapshot itu DITAMBAHKAN ke histori
+# (bukan cuma disimpan sesaat) — supaya beberapa hari ke depan bisa dilihat
+# TREND-nya (naik/mendatar/berbalik), bukan cuma angka statis.
+# ==========================================
+BROKSUM_DAILY_HISTORY_MAX_DAYS = 15  # cukup buat lihat trend 10 hari + buffer, tidak menumpuk tanpa batas
+
+
+def append_broksum_daily_history(broksum_250_data: dict):
+    """
+    Simpan snapshot HARI INI (per ticker, per broker whitelist, net_value &
+    avg_buy_price) sebagai 1 ENTRI BARU dalam deret waktu — bukan menimpa.
+    Cuma broker WHITELIST yang disimpan (bukan semua broker) — hemat
+    ukuran file, dan cuma itu yang relevan buat klasifikasi Bias Bandar.
+    """
+    import engine.broker as broker_engine
+
+    history = cache_manager.get("broksum_daily_history", default={})
+    if not isinstance(history, dict):
+        history = {}
+    today_marker = core.get_current_calendar_date_marker()
+
+    for ticker, rows in broksum_250_data.items():
+        whitelist_rows = [r for r in rows if r.get("code") in broker_engine.SMART_MONEY_BROKER_WHITELIST]
+        if not whitelist_rows:
+            continue
+        entries = history.setdefault(ticker, [])
+        # Dedup tanggal yang sama (kalau /eodscan sempat dijalankan >1x sehari)
+        entries = [e for e in entries if e.get("date") != today_marker]
+        entries.append({
+            "date": today_marker,
+            "brokers": [
+                {"code": r.get("code"), "buy_value": r.get("buy_value"), "sell_value": r.get("sell_value"),
+                 "buy_avg": r.get("buy_avg"), "sell_avg": r.get("sell_avg")}
+                for r in whitelist_rows
+            ],
+        })
+        history[ticker] = sorted(entries, key=lambda e: e["date"])[-BROKSUM_DAILY_HISTORY_MAX_DAYS:]
+
+    ok = cache_manager.set("broksum_daily_history", history)
+    if ok:
+        print(f"💾 Bias Bandar: histori harian tersimpan untuk {len(history)} ticker")
+    else:
+        print("⚠️ Gagal menyimpan histori harian broksum.")
+
+
+def load_broksum_daily_history() -> dict:
+    history = cache_manager.get("broksum_daily_history", default={})
+    return history if isinstance(history, dict) else {}

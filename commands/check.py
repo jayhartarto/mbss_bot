@@ -435,6 +435,33 @@ async def check_stock(update, context):
         f"{broker_engine.format_smart_money_tag(ticker, nightly_engine.load_broksum_250())}"
     )
 
+    # MBSS v2 (user request — Bias Bandar di /check, studi kasus manual
+    # TMPO/MDIA/JGLE/DOOH/ICON): tampilkan klasifikasi 5 kategori APA ADANYA
+    # — di sini (beda dari tools screening lain yang langsung exclude),
+    # DISTRIBUSI/TANPA DUKUNGAN justru paling berguna ditampilkan sebagai
+    # peringatan eksplisit, karena user sudah punya niat spesifik ke saham
+    # ini. Selalu sertakan catatan keterbatasan (histori s/d kemarin).
+    bias_label = result.get("bias_bandar")
+    bias_block = ""
+    if bias_label and bias_label != "BELUM CUKUP DATA":
+        BIAS_ICON = {
+            "AKUMULASI SEGAR": "🟢", "PULLBACK DIDUKUNG": "🟢",
+            "DISTRIBUSI": "🔴", "TANPA DUKUNGAN": "⚪", "AKUMULASI BASI": "🟡",
+        }
+        icon = BIAS_ICON.get(bias_label, "")
+        bias_block = f"\n\n{icon} Bias Bandar: {bias_label} (histori s/d kemarin, belum termasuk aktivitas hari ini)"
+        # Peringatan euforia — cuma relevan kalau TANPA DUKUNGAN DAN harga
+        # sekarang sudah turun cukup jauh dari puncak intraday hari ini
+        # (indikasi ditolak dari titik tertinggi, persis kasus ICON).
+        hi = result.get("intraday_high")
+        current = result.get("price")
+        if bias_label == "TANPA DUKUNGAN" and hi and current and hi > current * 1.03:
+            drop_pct = (hi - current) / hi * 100
+            bias_block += (
+                f"\n⚠️ Sempat capai {hi:.0f} hari ini, sekarang {current:.0f} (turun {drop_pct:.1f}% dari puncak) "
+                f"TANPA dukungan broker whitelist — indikasi euforia, waspada entry di area atas."
+            )
+
     # ── Tanggal & jam ──────────────────────────────────────────────
     now_wib = datetime.datetime.now(core.WIB)
     date_str = now_wib.strftime("%d %b %Y")
@@ -480,7 +507,7 @@ async def check_stock(update, context):
         posisi_lines,
         intraday_status,
         "",
-        raw_data_block,
+        raw_data_block + bias_block,
         brokersum_line,
         news_block,
     ]))

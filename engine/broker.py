@@ -1034,3 +1034,70 @@ def get_best_available_ceiling(ticker: str, tickers_data: dict) -> dict | None:
             legacy_ceiling["source"] = "screenshot"
             return legacy_ceiling
     return None
+
+
+def classify_bias_bandar(ticker: str, daily_history: dict, price_change_pct: float = None) -> dict:
+    """
+    MBSS v2 (user request — studi kasus manual TMPO/MDIA/JGLE/DOOH/ICON):
+    klasifikasi 5 kategori dari TREND histori harian broker whitelist
+    (bukan snapshot statis) — AKUMULASI SEGAR, PULLBACK DIDUKUNG, DISTRIBUSI,
+    AKUMULASI BASI, TANPA DUKUNGAN. Fallback "BELUM CUKUP DATA" kalau histori
+    masih terlalu pendek (<2 hari) — genuinely mulai dari nol, tidak retroaktif.
+
+    price_change_pct opsional: persentase gerak harga HARI INI (bukan histori)
+    — dipakai buat bedakan AKUMULASI SEGAR vs PULLBACK DIDUKUNG (sama-sama
+    net-buy aktif, beda cuma apakah harga lagi naik atau baru turun).
+
+    ⚠️ KETERBATASAN JUJUR: histori ini dari fetch BATCH SEMALAM (bagian
+    /eodscan) — TIDAK termasuk aktivitas broker HARI INI kalau baru mulai
+    masuk saat rally sedang berjalan. Baru akan terdeteksi BESOK malam
+    setelah /eodscan berikutnya.
+    """
+    entries = daily_history.get(ticker, [])
+    if len(entries) < 2:
+        return {"label": "BELUM CUKUP DATA", "detail": f"baru {len(entries)} hari histori terkumpul (minimal 2)"}
+
+    daily_nets = []
+    for entry in entries:
+        net = sum((b.get("buy_value") or 0) - (b.get("sell_value") or 0) for b in entry["brokers"])
+        daily_nets.append(net)
+
+    latest_net = daily_nets[-1]
+    prev_net = daily_nets[-2]
+    total_net_all_days = sum(daily_nets)
+    positive_days = sum(1 for n in daily_nets if n > 0)
+
+    # Weighted avg beli ATAS SELURUH histori (buat referensi "avg bandar")
+    total_buy_value, total_buy_volume = 0.0, 0.0
+    for entry in entries:
+        for b in entry["brokers"]:
+            if b.get("buy_avg") and b.get("buy_value"):
+                total_buy_value += b["buy_value"]
+                total_buy_volume += b["buy_value"] / b["buy_avg"]
+    overall_avg_buy = (total_buy_value / total_buy_volume) if total_buy_volume > 0 else None
+
+    # Weighted avg jual HARI TERAKHIR saja (buat cek "realisasi untung" di DISTRIBUSI)
+    latest_entry = entries[-1]
+    sell_val = sum(b.get("sell_value") or 0 for b in latest_entry["brokers"])
+    sell_vol = sum((b.get("sell_value") or 0) / (b.get("sell_avg") or 1) for b in latest_entry["brokers"] if b.get("sell_avg"))
+    latest_sell_avg = (sell_val / sell_vol) if sell_vol > 0 else None
+
+    # 1. DISTRIBUSI — net jual di hari terbaru
+    if latest_net < 0:
+        detail = "net jual di hari terakhir"
+        if overall_avg_buy and latest_sell_avg and latest_sell_avg > overall_avg_buy:
+            detail += f" — jual @ avg {latest_sell_avg:.0f}, LEBIH TINGGI dari avg beli historis {overall_avg_buy:.0f} (realisasi untung)"
+        return {"label": "DISTRIBUSI", "detail": detail, "overall_avg_buy": overall_avg_buy}
+
+    # 2. TANPA DUKUNGAN — nyaris tidak ada net-buy berarti sepanjang histori
+    if total_net_all_days <= 0 or positive_days == 0:
+        return {"label": "TANPA DUKUNGAN", "detail": "tidak ada net-buy broker whitelist berarti dalam histori", "overall_avg_buy": overall_avg_buy}
+
+    # 3 & 4. Net masih positif — bedakan SEGAR/PULLBACK (aktif) vs BASI (melemah)
+    masih_aktif = latest_net >= prev_net * 0.5  # tidak mengecil drastis dari hari sebelumnya
+    if masih_aktif:
+        if price_change_pct is not None and price_change_pct < 0:
+            return {"label": "PULLBACK DIDUKUNG", "detail": f"harga turun hari ini ({price_change_pct:+.1f}%) TAPI broker whitelist tetap net-buy", "overall_avg_buy": overall_avg_buy}
+        return {"label": "AKUMULASI SEGAR", "detail": f"net-buy masih aktif, Rp{latest_net:,.0f} hari terakhir", "overall_avg_buy": overall_avg_buy}
+
+    return {"label": "AKUMULASI BASI", "detail": "net-buy historis positif tapi aktivitas terbaru sudah melemah jauh", "overall_avg_buy": overall_avg_buy}

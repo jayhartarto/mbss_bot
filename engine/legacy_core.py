@@ -2526,7 +2526,7 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
 # new factors, etc). This makes it visible when a score difference between two runs is
 # due to a real formula change vs. genuine day-to-day market movement — comparing scores
 # across different versions isn't apples-to-apples.
-SCORING_FORMULA_VERSION = "3.15.6"  # v3.15.6: BUGFIX kasus nyata EKAD — day_change_pct & vol_ratio_prior_day (baru) sekarang cek eksplisit apakah bar TERAKHIR di histori itu genuinely KEMARIN atau ternyata sudah HARI INI (bisa terjadi kalau /eodscan dijalankan ulang setelah harga sudah bergerak hari itu) — sebelumnya salah kira "hari ini" sebagai "kemarin", menolak pola sleeper-explosive (harga+volume meledak hari ini) dari BSJP-ARA padahal itu justru pola yang seharusnya ditangkap. Pre-filter BSJP-ARA sekarang pakai vol_ratio_prior_day, bukan vol_ratio lama (yang sengaja tetap "paling baru" untuk skor momentum inti).
+SCORING_FORMULA_VERSION = "3.16.0"  # v3.16.0: Bias Bandar (studi kasus manual TMPO/MDIA/JGLE/DOOH/ICON) — klasifikasi 5 kategori dari histori harian broker whitelist (AKUMULASI SEGAR/PULLBACK DIDUKUNG/DISTRIBUSI/AKUMULASI BASI/TANPA DUKUNGAN), sekarang jadi PENALTI SKOR nyata (bukan cuma tag): DISTRIBUSI -1.5 (atau -3.0 kalau digabung posisi di atas MA50/extended), TANPA DUKUNGAN -1.0 (atau -2.0 kalau extended). Histori harian baru mulai terkumpul dari sekarang, TIDAK retroaktif — butuh minimal 2 hari data sebelum klasifikasi genuine (sebelum itu "BELUM CUKUP DATA", tidak kena penalti apa pun).
 
 
 # NOTE (MBSS v2 refactor, Sprint 2 Tier 1.1): compute_factor_scoring moved to

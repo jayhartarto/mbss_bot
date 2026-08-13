@@ -60,6 +60,7 @@ import pandas as pd
 
 from engine import legacy_core as core
 import engine.market as market_engine
+import engine.broker as broker_engine
 
 # MBSS v2 (user request — ditemukan lewat kasus nyata DOSS/FWCT/BAIK/PMUI
 # "tidak pernah berhasil di-check" padahal user cek manual datanya ADA di
@@ -1198,6 +1199,28 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     # (mengejar uang beberapa hari, bukan mencari saham termurah).
     final_score = (value_score * 0.25) + (momentum_score * 0.45) + (sentiment_score * 0.30)
 
+    # MBSS v2 (user request — Bias Bandar sebagai KALKULASI, bukan cuma
+    # peringatan, per studi kasus manual TMPO/MDIA/JGLE/DOOH/ICON): penalti
+    # bertingkat, digabung dengan posisi MA50 (dua sinyal searah = penalti
+    # lebih berat, bukan cuma dijumlah). Lazy import nightly.py (bukan di
+    # atas file) — scoring.py di-import OLEH nightly.py, import balik di
+    # level modul bakal circular.
+    bias_bandar_label = None
+    try:
+        import engine.nightly as _nightly_engine
+        daily_history = _nightly_engine.load_broksum_daily_history()
+        bias = broker_engine.classify_bias_bandar(ticker, daily_history)
+        bias_bandar_label = bias["label"]
+        extended = is_below_sma50 is False  # "di atas MA50" = kondisi extended untuk kombinasi penalti
+
+        if bias_bandar_label == "DISTRIBUSI":
+            final_score -= 3.0 if extended else 1.5
+        elif bias_bandar_label == "TANPA DUKUNGAN":
+            final_score -= 2.0 if extended else 1.0
+        final_score = max(0.0, final_score)  # jangan sampai negatif
+    except Exception as e:
+        print(f"⚠️ {ticker}: gagal hitung penalti Bias Bandar: {e}")
+
     company_name = info.get("longName") or info.get("shortName") or ticker
     sector = info.get("sector") or "N/A"
 
@@ -1302,6 +1325,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         # Field tambahan gratis (user request — perkaya insights) — belum masuk
         # formula skor, murni informasi/siap pakai buat pengembangan berikutnya.
         "industry": industry,
+        "bias_bandar": bias_bandar_label,
         "revenue_growth_pct": revenue_growth_pct,
         "roe_pct": roe_pct,
         "profit_margin_pct": profit_margin_pct,
