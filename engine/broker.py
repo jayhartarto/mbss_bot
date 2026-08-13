@@ -1247,7 +1247,7 @@ def fetch_rapidapi_broker_activity(broker_code: str, from_date: str, to_date: st
                 "transactionType": "TRANSACTION_TYPE_NET",
             },
             headers=core.RAPIDAPI_IDX_HEADERS,
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code == 429:
             print(f"⚠️ RapidAPI IDX rate-limited (429) for broker-activity/{broker_code} — backing off.")
@@ -1279,7 +1279,7 @@ def fetch_rapidapi_sentiment(ticker: str, days: int = 7) -> dict | None:
             f"{core.RAPIDAPI_IDX_BASE_URL}/api/analysis/sentiment/{ticker}",
             params={"days": days},
             headers=core.RAPIDAPI_IDX_HEADERS,
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code == 429:
             print(f"⚠️ RapidAPI IDX rate-limited (429) for sentiment/{ticker} — backing off.")
@@ -1314,7 +1314,7 @@ def fetch_rapidapi_bandar_accumulation(ticker: str, days: int = 30) -> dict | No
             f"{core.RAPIDAPI_IDX_BASE_URL}/api/analysis/bandar/accumulation/{ticker}",
             params={"days": days},
             headers=core.RAPIDAPI_IDX_HEADERS,
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code == 429:
             print(f"⚠️ RapidAPI IDX rate-limited (429) for bandar/accumulation/{ticker} — backing off.")
@@ -1514,7 +1514,7 @@ def fetch_rapidapi_broker_summary(ticker: str, from_date: str, to_date: str, lim
                 "from": from_date, "to": to_date,
             },
             headers=core.RAPIDAPI_IDX_HEADERS,
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code == 429:
             print(f"⚠️ RapidAPI IDX rate-limited (429) for broker-summary/{ticker} — backing off.")
@@ -1689,7 +1689,7 @@ def fetch_rapidapi_breakout_alerts() -> dict | None:
         resp = requests.get(
             f"{core.RAPIDAPI_IDX_BASE_URL}/api/analysis/retail/breakout/alerts",
             headers=core.RAPIDAPI_IDX_HEADERS,
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code == 429:
             print("⚠️ RapidAPI IDX rate-limited (429) for breakout/alerts — backing off.")
@@ -1726,7 +1726,7 @@ def fetch_rapidapi_multibagger_scan(min_score: int = 70, max_results: int = 20) 
             f"{core.RAPIDAPI_IDX_BASE_URL}/api/analysis/retail/multibagger/scan",
             params={"min_score": min_score, "max_results": max_results},
             headers=core.RAPIDAPI_IDX_HEADERS,
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code == 429:
             print("⚠️ RapidAPI IDX rate-limited (429) for multibagger/scan — backing off.")
@@ -1805,7 +1805,7 @@ def fetch_rapidapi_sector_rotation() -> dict | None:
         resp = requests.get(
             f"{core.RAPIDAPI_IDX_BASE_URL}/api/analysis/retail/sector-rotation",
             headers=core.RAPIDAPI_IDX_HEADERS,
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code == 429:
             print("⚠️ RapidAPI IDX rate-limited (429) for sector-rotation — backing off.")
@@ -1840,7 +1840,7 @@ def fetch_rapidapi_market_mover(mover_type: str = "top-gainer") -> dict | None:
             f"{core.RAPIDAPI_IDX_BASE_URL}/api/movers/{mover_type}",
             params={"filterStocks": "FILTER_STOCKS_TYPE_MAIN_BOARD,FILTER_STOCKS_TYPE_DEVELOPMENT_BOARD"},
             headers=core.RAPIDAPI_IDX_HEADERS,
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code == 429:
             print(f"⚠️ RapidAPI IDX rate-limited (429) for movers/{mover_type} — backing off.")
@@ -1880,7 +1880,7 @@ def fetch_rapidapi_top_brokers(period: str = "TB_PERIOD_LAST_1_DAY") -> dict | N
                 "order": "ORDER_BY_ASC", "sort": "TB_SORT_BY_TOTAL_VALUE",
             },
             headers=core.RAPIDAPI_IDX_HEADERS,
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code == 429:
             print("⚠️ RapidAPI IDX rate-limited (429) for top-broker — backing off.")
@@ -1917,7 +1917,7 @@ def fetch_rapidapi_top_stocks(value_type: str = "VALUE_TYPE_TOTAL") -> dict | No
                 "investorType": "INVESTOR_TYPE_ALL", "marketType": "MARKET_TYPE_ALL", "page": 1,
             },
             headers=core.RAPIDAPI_IDX_HEADERS,
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code == 429:
             print("⚠️ RapidAPI IDX rate-limited (429) for top-stock — backing off.")

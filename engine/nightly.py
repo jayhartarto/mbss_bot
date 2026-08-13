@@ -359,12 +359,22 @@ async def run_nightly_full_scan(context):
         # one call per broker (13 total) covering that broker's activity
         # across EVERY ticker, not just the 250 highest-scored — reshaped
         # into Index Alpha's row format and merged in below, so every
-        # existing broksum_250 consumer picks it up with zero changes. Every
-        # 2nd trading night (10-day lookback window already overlaps
-        # night-to-night, daily refresh is unnecessary — see budget in the
-        # RapidAPI integration plan).
+        # existing broksum_250 consumer picks it up with zero changes.
+        #
+        # BUGFIX (ditemukan dari log produksi malam pertama setelah deploy):
+        # trading_night_index mulai dari 1 (ganjil) di percobaan pertama —
+        # gerbang "every 2nd night" (% 2 == 0) yang tadinya HANYA berbasis
+        # cadence murni membuat malam PERTAMA (index=1) ke-skip, JUSTRU
+        # malam Index Alpha total gagal (0/100 ticker) dan whitelist sweep
+        # paling dibutuhkan sebagai satu-satunya sumber broker riil.
+        # Sekarang: tetap every-2-nights untuk hemat kuota di kondisi
+        # normal, TAPI selalu jalan (abaikan cadence) kalau Index Alpha
+        # genuinely kosong malam ini — jangan sampai KEDUA sumber kompak
+        # kosong hanya karena kebetulan cadence, padahal salah satunya
+        # (RapidAPI) sebenarnya tersedia dan belum dicoba.
+        index_alpha_failed = not broksum_250_data
         rapidapi_whitelist_data = {}
-        if trading_night_index % 2 == 0:
+        if trading_night_index % 2 == 0 or index_alpha_failed:
             try:
                 rapidapi_whitelist_data = await asyncio.to_thread(build_rapidapi_broker_whitelist_sweep)
             except Exception as e:
