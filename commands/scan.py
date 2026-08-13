@@ -987,11 +987,16 @@ async def high_conviction_command(update, context):
     """
     sort_by_rr = len(context.args) > 0 and context.args[0].lower() == "rr"
 
-    scored = nightly_engine.load_daily_scan_cache()
+    # MBSS v2 (user request): tampilkan data LAMA (dari scan malam
+    # sebelumnya, atau formula versi lama) dengan keterangan jelas,
+    # daripada menolak total — lebih berguna lihat pick kemarin yang
+    # ditandai basi daripada tidak lihat apa-apa. staleness_note None
+    # kalau cache genuinely masih current hari ini.
+    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
     if not scored:
         await core.safe_reply(
             update.message,
-            "⚠️ Cache /eodscan belum ada atau sudah basi untuk hari ini — jalankan /eodscan dulu."
+            "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu."
         )
         return
 
@@ -1051,6 +1056,8 @@ async def high_conviction_command(update, context):
     pick_date_today = core.get_current_trading_day_close_marker()
 
     lines = [f"🔥 TOP {len(top10)} HIGH CONVICTION — urut {sort_label} (dari {len(candidates)} kandidat, cache /eodscan)\n"]
+    if staleness_note:
+        lines.insert(0, staleness_note)
     for i, r in enumerate(top10, 1):
         s = r.get("scores", {})
         hc = r.get("high_conviction", {})
@@ -1554,9 +1561,11 @@ async def strong_buy_command(update, context):
     yang memang dirancang sekitar likuiditas untuk day-trade, /strongbuy ini
     tujuannya visibilitas penuh, keputusan tetap di tangan user.
     """
-    scored = nightly_engine.load_daily_scan_cache()
+    # MBSS v2 (user request): tampilkan data LAMA dengan keterangan jelas,
+    # bukan tolak total — sama seperti /hc.
+    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
     if not scored:
-        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum ada/basi — jalankan /eodscan dulu.")
+        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
         return
 
     candidates = [r for r in scored.values() if r.get("action_id") == "STRONG_BUY"]
@@ -1573,6 +1582,8 @@ async def strong_buy_command(update, context):
     wr = core.get_winrate_for_label("STRONG_BUY")
     wr_line = f" (winrate historis: {wr})" if wr else ""
     lines = [f"💪 SEMUA STRONG_BUY{wr_line} — {len(candidates)} saham (cache /eodscan, tidak difilter likuiditas/lane apa pun)\n"]
+    if staleness_note:
+        lines.insert(0, staleness_note)
     for i, r in enumerate(candidates, 1):
         s = r.get("scores", {})
         t = r.get("targets", {})
@@ -1618,12 +1629,17 @@ async def consensus_command(update, context):
     bukan Gemini yang menentukan lolos/tidak, itu murni deterministik
     Python duluan.
     """
-    scored = nightly_engine.load_daily_scan_cache()
+    # MBSS v2 (user request): tampilkan data LAMA dengan keterangan jelas,
+    # bukan tolak total — sama seperti /hc.
+    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
     if not scored:
-        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum ada/basi — jalankan /eodscan dulu.")
+        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
         return
 
-    await core.safe_reply(update.message, f"🔗 Mencari konsensus lintas-tool dari {len(scored)} kandidat cache...")
+    status_msg = f"🔗 Mencari konsensus lintas-tool dari {len(scored)} kandidat cache..."
+    if staleness_note:
+        status_msg = f"{staleness_note}\n{status_msg}"
+    await core.safe_reply(update.message, status_msg)
 
     GOOD_SDT_LANES = {"PRIORITY FRESH", "PRIORITY CONT"}  # SECONDARY WATCH/LOW EDGE sengaja TIDAK dihitung (lihat revisi minggu lalu)
     GPTPICK_MIN_SCORE = 65  # kira-kira ambang bawah yang biasanya masuk top 3-5 nyata

@@ -118,6 +118,40 @@ def load_daily_scan_cache() -> dict:
     return scored
 
 
+def load_daily_scan_cache_allow_stale() -> tuple[dict, str | None]:
+    """
+    Varian load_daily_scan_cache() (user request) — return apa pun yang ada
+    di cache SEKALIPUN dari hari bursa sebelumnya atau formula versi lama,
+    untuk command yang lebih baik "tampilkan data lama, tandai jelas"
+    daripada menolak total. Return (scored_dict, staleness_note) —
+    staleness_note None kalau cache genuinely masih current, kalau tidak
+    string Indonesia siap-tampil yang menjelaskan seberapa basi.
+
+    SENGAJA bukan perilaku default load_daily_scan_cache() sendiri — caller
+    lain (mis. fallback fetch-langsung /testbrief untuk ticker yang hilang)
+    mengandalkan staleness ketat untuk tahu kapan mereka butuh data segar;
+    mengubah itu secara luas berisiko diam-diam menyajikan skor basi di
+    tempat yang akurasinya lebih penting daripada ketersediaan.
+    """
+    meta = cache_manager.get_meta("eod")
+    if not meta:
+        return {}, None  # genuinely belum pernah ada cache — bukan "basi", memang kosong
+
+    payload = cache_manager.get("eod", default={})
+    scored = payload.get("scored", {}) if isinstance(payload, dict) else {}
+    if not isinstance(scored, dict):
+        return {}, None
+
+    current_marker = core.get_current_trading_day_close_marker()
+    staleness_note = None
+    if meta.get("trading_day_marker") != current_marker:
+        staleness_note = f"⚠️ Data dari scan {meta.get('trading_day_marker') or '?'}, BELUM update untuk hari ini — jalankan /eodscan untuk data terbaru."
+    elif meta.get("formula_version") != core.SCORING_FORMULA_VERSION:
+        staleness_note = f"⚠️ Data dari formula versi lama ({meta.get('formula_version')}), belum dihitung ulang dengan formula terbaru — jalankan /eodscan."
+
+    return scored, staleness_note
+
+
 def migrate_legacy_daily_scan_cache():
     """
     One-time migration: kalau cache/eod.pkl (format baru) belum ada TAPI file
