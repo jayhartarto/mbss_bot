@@ -62,6 +62,63 @@ from engine import legacy_core as core
 import engine.market as market_engine
 import engine.broker as broker_engine
 
+# MBSS v2 (user request — log /eodscan terlalu berisik): PB/PE anomali dari
+# yfinance (lihat PB_SANITY_MAX/PE_SANITY_MAX di compute_factor_scoring) itu
+# masalah yfinance yang KRONIS untuk ticker YANG SAMA tiap malam (bukan
+# temuan baru tiap kali) — sebelumnya di-print SATU BARIS PER TICKER,
+# langsung saat itu juga, jadi log /eodscan penuh puluhan baris berulang
+# tanpa info baru.
+#
+# Fix: BATCH MODE toggle, bukan sekadar buffer polos — kalau cuma buffer
+# tanpa penanda ini, panggilan compute_factor_scoring() dari luar loop
+# bulk (/check, /myportfolio, dll — SEMUANYA lewat fungsi yang sama persis)
+# akan diam-diam MENUMPUK ke buffer tanpa PERNAH di-flush, jadi warning-nya
+# hilang sama sekali untuk pemakaian on-demand, bukan cuma jadi ringkas.
+# Default batch mode = False (OFF) — pemakaian on-demand TETAP print
+# langsung persis seperti sebelumnya, TIDAK ADA perubahan perilaku di sana.
+# HANYA loop bulk (engine/nightly.py fetch_all_tickers_scored, yang
+# menaungi baik /eodscan maupun fallback fetch /testbrief) yang menyalakan
+# batch mode di sekitar loop-nya lalu flush di akhir.
+_data_quality_warnings: list = []
+_batch_mode_active = False
+
+
+def set_scoring_batch_mode(active: bool):
+    """Toggle SEKALI oleh caller bulk (fetch_all_tickers_scored) — lihat
+    catatan di atas kenapa ini tidak boleh jadi default global."""
+    global _batch_mode_active
+    _batch_mode_active = active
+
+
+def _report_data_quality_warning(short_note: str, full_message: str):
+    """
+    short_note dipakai kalau nanti diringkas (batch mode ON), full_message
+    dipakai kalau print langsung (batch mode OFF, default — sama seperti
+    perilaku sebelum perubahan ini).
+    """
+    if _batch_mode_active:
+        _data_quality_warnings.append(short_note)
+    else:
+        print(full_message)
+
+
+def flush_data_quality_warnings() -> int:
+    """
+    Cetak SATU baris ringkasan untuk semua anomali PB/PE yang terkumpul
+    sepanjang batch ini, lalu kosongkan buffer-nya. Return jumlahnya (0
+    kalau tidak ada). Dipanggil dari fetch_all_tickers_scored SETELAH
+    set_scoring_batch_mode(False) — kalau batch mode masih ON belum
+    dipanggil di sini, buffer akan menumpuk lintas-scan.
+    """
+    global _data_quality_warnings
+    count = len(_data_quality_warnings)
+    if count:
+        shown = ", ".join(_data_quality_warnings[:30])
+        more = f" ...dan {count - 30} lainnya" if count > 30 else ""
+        print(f"⚠️ {count} ticker dengan data PB/PE tidak wajar dari yfinance (diperlakukan sebagai tidak diketahui, bukan sinyal distress): {shown}{more}")
+    _data_quality_warnings = []
+    return count
+
 # MBSS v2 (user request — ditemukan lewat kasus nyata DOSS/FWCT/BAIK/PMUI
 # "tidak pernah berhasil di-check" padahal user cek manual datanya ADA di
 # Yahoo): compute_factor_scoring() punya 7 titik `return None` berbeda,
@@ -939,16 +996,25 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         book_value_per_share = core._safe_float(info.get("bookValue"), default=0.0)
         pb_recomputed = (current_price / book_value_per_share) if book_value_per_share > 0 else 0.0
         if 0 < pb_recomputed <= PB_SANITY_MAX:
-            print(f"⚠️ {ticker}: PB {pb} dari field priceToBook rusak (>{PB_SANITY_MAX}x) — "
-                  f"dihitung ULANG dari price/bookValue = {pb_recomputed:.2f}, dipakai sebagai ganti.")
+            _report_data_quality_warning(
+                f"{ticker} (PB dipulihkan: {pb_recomputed:.1f})",
+                f"⚠️ {ticker}: PB {pb} dari field priceToBook rusak (>{PB_SANITY_MAX}x) — "
+                f"dihitung ULANG dari price/bookValue = {pb_recomputed:.2f}, dipakai sebagai ganti."
+            )
             pb = pb_recomputed
         else:
-            print(f"⚠️ {ticker}: PB {pb} dari yfinance melewati batas wajar ({PB_SANITY_MAX}x) — "
-                  f"kemungkinan data quality issue, diperlakukan sebagai tidak diketahui, bukan sinyal distress")
+            _report_data_quality_warning(
+                f"{ticker} (PB {pb:.0f})",
+                f"⚠️ {ticker}: PB {pb} dari yfinance melewati batas wajar ({PB_SANITY_MAX}x) — "
+                f"kemungkinan data quality issue, diperlakukan sebagai tidak diketahui, bukan sinyal distress"
+            )
             pb = 0.0
     if pe > PE_SANITY_MAX:
-        print(f"⚠️ {ticker}: PE {pe} dari yfinance melewati batas wajar ({PE_SANITY_MAX}x) — "
-              f"kemungkinan data quality issue, diperlakukan sebagai tidak diketahui")
+        _report_data_quality_warning(
+            f"{ticker} (PE {pe:.0f})",
+            f"⚠️ {ticker}: PE {pe} dari yfinance melewati batas wajar ({PE_SANITY_MAX}x) — "
+            f"kemungkinan data quality issue, diperlakukan sebagai tidak diketahui"
+        )
         pe = 0.0
 
     # MBSS v2 (user request — perkaya insights, "explore variable data yfinance

@@ -196,38 +196,50 @@ def fetch_all_tickers_scored(tickers):
     string for anything that DIDN'T make it into results. This exists because
     console scrollback in Pydroid isn't reliable for a run this long; having the
     bot report failures directly in Telegram gives real, persistent visibility.
+
+    MBSS v2 (user request — log terlalu berisik): PB/PE data-quality warnings
+    dari compute_factor_scoring (yfinance chronically bermasalah untuk saham
+    IDX yang sama tiap malam) dikumpulkan jadi SATU baris ringkasan di akhir
+    fungsi ini, bukan satu baris per ticker selama loop berjalan — lihat
+    scoring_engine.set_scoring_batch_mode. try/finally memastikan batch mode
+    selalu dimatikan lagi bahkan kalau loop di bawah gagal di tengah jalan.
     """
     results = []
     skip_reasons = {}
-    for chunk_start in range(0, len(tickers), core.ITICK_CHUNK_SIZE):
-        chunk = tickers[chunk_start:chunk_start + core.ITICK_CHUNK_SIZE]
-        for ticker in chunk:
-            # MBSS v2 (user request): skip ticker yang sudah dikonfirmasi gagal
-            # fetch berkali-kali berturut-turut (biasanya delisted) — tidak ada
-            # gunanya coba lagi setiap run, cuma buang waktu. Dicoba ulang
-            # otomatis sesekali (lihat FAILED_FETCH_BLACKLIST_DAYS di
-            # legacy_core.py) siapa tahu datanya pulih/relisting.
-            if core.is_ticker_blacklisted(ticker):
-                reason = core.get_blacklist_reason(ticker)
-                skip_reasons[ticker] = f"blacklisted ({reason})" if reason else "blacklisted (persisten gagal fetch)"
-                continue
-            try:
-                res = scoring_engine.compute_factor_scoring(ticker, include_quote_check=False)
-                core.record_fetch_result(ticker, success=bool(res))
-                if res:
-                    results.append(res)
-                else:
-                    skip_reasons[ticker] = "excluded (see console for specific reason)"
-            except Exception as e:
-                print(f"Error processing {ticker}: {e}")
-                core.record_fetch_result(ticker, success=False)
-                skip_reasons[ticker] = f"exception: {str(e)[:100]}"
-            core.time.sleep(1.0)  # light pacing within a chunk
-        is_last_chunk = (chunk_start + core.ITICK_CHUNK_SIZE) >= len(tickers)
-        if not is_last_chunk:
-            print(f"⏳ Fetch/scoring: cooling down {core.ITICK_COOLDOWN_SECONDS}s before next chunk "
-                  f"({chunk_start + len(chunk)}/{len(tickers)} tickers done)...")
-            core.time.sleep(core.ITICK_COOLDOWN_SECONDS)
+    scoring_engine.set_scoring_batch_mode(True)
+    try:
+        for chunk_start in range(0, len(tickers), core.ITICK_CHUNK_SIZE):
+            chunk = tickers[chunk_start:chunk_start + core.ITICK_CHUNK_SIZE]
+            for ticker in chunk:
+                # MBSS v2 (user request): skip ticker yang sudah dikonfirmasi gagal
+                # fetch berkali-kali berturut-turut (biasanya delisted) — tidak ada
+                # gunanya coba lagi setiap run, cuma buang waktu. Dicoba ulang
+                # otomatis sesekali (lihat FAILED_FETCH_BLACKLIST_DAYS di
+                # legacy_core.py) siapa tahu datanya pulih/relisting.
+                if core.is_ticker_blacklisted(ticker):
+                    reason = core.get_blacklist_reason(ticker)
+                    skip_reasons[ticker] = f"blacklisted ({reason})" if reason else "blacklisted (persisten gagal fetch)"
+                    continue
+                try:
+                    res = scoring_engine.compute_factor_scoring(ticker, include_quote_check=False)
+                    core.record_fetch_result(ticker, success=bool(res))
+                    if res:
+                        results.append(res)
+                    else:
+                        skip_reasons[ticker] = "excluded (see console for specific reason)"
+                except Exception as e:
+                    print(f"Error processing {ticker}: {e}")
+                    core.record_fetch_result(ticker, success=False)
+                    skip_reasons[ticker] = f"exception: {str(e)[:100]}"
+                core.time.sleep(1.0)  # light pacing within a chunk
+            is_last_chunk = (chunk_start + core.ITICK_CHUNK_SIZE) >= len(tickers)
+            if not is_last_chunk:
+                print(f"⏳ Fetch/scoring: cooling down {core.ITICK_COOLDOWN_SECONDS}s before next chunk "
+                      f"({chunk_start + len(chunk)}/{len(tickers)} tickers done)...")
+                core.time.sleep(core.ITICK_COOLDOWN_SECONDS)
+    finally:
+        scoring_engine.set_scoring_batch_mode(False)
+        scoring_engine.flush_data_quality_warnings()
     return results, skip_reasons
 
 
