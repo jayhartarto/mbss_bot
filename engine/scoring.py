@@ -595,6 +595,83 @@ def apply_brokersum_adjustment(scoring: dict, brokersum: dict) -> dict:
     return adjusted
 
 
+def apply_whitelist_accumulation_adjustment(scoring: dict, signal: dict | None) -> dict:
+    """
+    Nightly-batch accumulation/distribution adjustment (MBSS v2, RapidAPI
+    integration) — same mechanism as _apply_brokersum_adjustment_original
+    (bounded sentiment adjustment, decide_action() re-run so the ACTUAL
+    decision reflects it, not just the displayed number), but three
+    deliberate differences:
+
+    1. Sourced from the nightly whitelist sweep
+       (engine.broker.compute_whitelist_accumulation_signal) — applied for
+       FREE to every ticker the sweep covers during the nightly batch
+       itself, not just opt-in per-tool enrichment. Index Alpha's scarce
+       5-10 calls/day quota never made this affordable before; the
+       whitelist sweep's flat 13-call cost does.
+    2. Gated on WHITELIST broker presence specifically
+       (num_whitelist_brokers), not generic concentration — concentration
+       alone doesn't tell you WHO is concentrated; a single large
+       retail-serving desk having a big day looks identical to genuine
+       informed accumulation without this distinction.
+    3. ASYMMETRIC: distribution penalty (-4) weighted heavier than
+       accumulation bonus (+3) — a deliberate capital-preservation bias.
+       Missing a good buy costs less than buying into real distribution.
+
+    signal: output of compute_whitelist_accumulation_signal, or None (no
+    whitelist broker active in this ticker — most tickers, most nights).
+    """
+    if not signal:
+        scoring["whitelist_accumulation_adjusted"] = False
+        return scoring
+
+    net_pct = signal.get("net_pct", 0)
+    num_brokers = signal.get("num_whitelist_brokers", 0)
+    if num_brokers < 1:
+        scoring["whitelist_accumulation_adjusted"] = False
+        return scoring
+
+    # Full weight at 3+ distinct whitelist brokers agreeing — less likely a
+    # single desk's idiosyncratic flow, more likely genuine institutional lean.
+    confidence_factor = min(1.0, num_brokers / 3)
+
+    if net_pct >= 15:
+        adjustment = 3.0 * confidence_factor
+    elif net_pct <= -15:
+        adjustment = -4.0 * confidence_factor
+    else:
+        scoring["whitelist_accumulation_adjusted"] = False
+        return scoring
+
+    old_sentiment = scoring["scores"]["sentiment"]
+    new_sentiment = max(1.0, min(10.0, old_sentiment + adjustment))
+
+    value_score = scoring["scores"]["value"]
+    momentum_score = scoring["scores"]["momentum"]
+    new_final = (value_score * 0.25) + (momentum_score * 0.45) + (new_sentiment * 0.30)
+
+    decision = decide_action(
+        final_score=new_final, value_score=value_score, momentum_score=momentum_score,
+        sentiment_score=new_sentiment, is_financial_distress_flag=scoring.get("is_financial_distress_flag", False),
+        chart_pattern=scoring.get("chart_pattern", "none"), is_overbought_caution=scoring.get("is_overbought_caution", False),
+        obv_divergence=scoring.get("obv_divergence", "none"), is_volume_spike_anomaly=scoring.get("is_volume_spike_anomaly", False),
+        is_near_price_floor=scoring.get("is_near_price_floor", False), is_unusually_low_pe=scoring.get("is_unusually_low_pe", False),
+        macd_bearish_cross=scoring.get("macd_bearish_cross", False), is_below_sma50=scoring.get("is_below_sma50", False),
+    )
+
+    scoring["scores"]["sentiment"] = round(new_sentiment, 1)
+    scoring["scores"]["final"] = round(new_final, 1)
+    scoring["action_id"] = decision["action_id"]
+    scoring["action_label_id"] = decision["action_label_id"]
+    scoring["action_ceiling_applied"] = decision["ceiling_applied"]
+    scoring["action_component_spread"] = decision["component_spread"]
+    scoring["whitelist_accumulation_adjusted"] = True
+    scoring["whitelist_accumulation_adjustment_applied"] = round(adjustment, 2)
+    scoring["whitelist_accumulation_net_pct"] = net_pct
+    scoring["whitelist_num_brokers"] = num_brokers
+    return scoring
+
+
 ACTION_RANK = {"AVOID_SELL": 0, "HOLD": 1, "BUY_ACCUMULATE": 2, "STRONG_BUY": 3}
 ACTION_LABEL_ID = {
     "STRONG_BUY": "BELI KUAT",

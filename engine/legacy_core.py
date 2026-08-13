@@ -1389,6 +1389,16 @@ ITICK_BATCH_SIZE = 3  # confirmed working free-tier limit for region=ID (per iTi
 INDEXALPHA_API_TOKEN = os.environ.get("INDEXALPHA_API_TOKEN", "")
 INDEXALPHA_HEADERS = {"accept": "application/json", "Authorization": f"Bearer {INDEXALPHA_API_TOKEN}"}
 INDEXALPHA_BASE_URL = "https://api.indexalpha.id"
+
+# 🏦 RAPIDAPI IDX MARKET INTELLIGENCE — interim real-broker-data source while
+# Index Alpha's monthly quota is exhausted (resets next month). Basic free
+# plan: 500 requests/month total, 1 req/sec. Budget-limited like Index Alpha
+# — see engine/broker.py RAPIDAPI_IDX_MONTHLY_BUDGET and the quota tracker
+# (_rapidapi_idx_quota_check_and_increment) for the enforced monthly cap.
+RAPIDAPI_IDX_KEY = os.environ.get("RAPIDAPI_IDX_KEY", "")
+RAPIDAPI_IDX_HOST = os.environ.get("RAPIDAPI_IDX_HOST", "indonesia-stock-exchange-idx.p.rapidapi.com")
+RAPIDAPI_IDX_BASE_URL = f"https://{RAPIDAPI_IDX_HOST}"
+RAPIDAPI_IDX_HEADERS = {"x-rapidapi-key": RAPIDAPI_IDX_KEY, "x-rapidapi-host": RAPIDAPI_IDX_HOST}
 # NOTE (MBSS v2 refactor, Phase 4): BROKERSUM_LOOKBACK_DAYS, BROKERSUM_CACHE_FILE,
 # BROKERSUM_HISTORY_FILE, BROKERSUM_HISTORY_MAX_ENTRIES_PER_TICKER, and
 # fetch_broker_summary_raw() moved to engine/broker.py (BrokerEngine).
@@ -4742,6 +4752,38 @@ async def run_morning_brief(context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(context.bot, morning_brief_text, chat_id=TELEGRAM_CHAT_ID)
         print(f"✅ Telegram Sharia Morning Brief sent! (top {len(top_picks)} of {len(analyzed_dataset)} scored)")
 
+        # MBSS v2 (RapidAPI integration, user request) — "Longer-Horizon
+        # Watchlist" — pesan KEDUA, TERPISAH dari brief Gemini di atas (pure
+        # Python formatting, tidak diparafrase LLM, supaya angka target/
+        # entry-zone-nya persis apa adanya). Baca cache /eodscan malam ini
+        # (build_rapidapi_market_intelligence_sweep), TIDAK fetch apa pun
+        # baru. Timeframe 6-12 bulan — genuinely beda horizon dari sisa
+        # /testbrief yang fokus swing/day-trade jangka pendek, makanya
+        # dipisah jadi section sendiri, bukan dicampur ke top_picks di atas.
+        try:
+            multibagger_data = nightly_engine.load_rapidapi_market_intelligence().get("multibagger") or {}
+            candidates = multibagger_data.get("candidates") or []
+            if candidates:
+                mb_lines = [f"📈 LONGER-HORIZON WATCHLIST — {len(candidates)} kandidat 6-12 bulan (cache /eodscan malam ini)\n"]
+                for i, c in enumerate(candidates[:10], 1):
+                    entry = c.get("entry_zone") or {}
+                    targets = c.get("target_prices") or []
+                    target_str = ", ".join(
+                        f"{t.get('target')} ({t.get('timeframe', '-')}, +{t.get('potential_gain', 0)}%)"
+                        for t in targets[:3]
+                    ) or "-"
+                    mb_lines.append(
+                        f"{i}. {c.get('symbol')} — skor {c.get('multibagger_score', '-')}/100 | "
+                        f"potensi {c.get('potential_return', '-')} ({c.get('timeframe', '-')})\n"
+                        f"   Harga {c.get('current_price', '-')} | Entry ideal {entry.get('ideal_price', '-')}-{entry.get('max_price', '-')} | "
+                        f"Risiko {c.get('risk_level', '-')} | SL {c.get('stop_loss', '-')}\n"
+                        f"   Target: {target_str}"
+                    )
+                mb_lines.append("\n⚠️ Horizon 6-12 bulan — BUKAN sinyal day-trade/swing seperti bagian di atas, timing entry tetap perlu dicek manual (/check TICKER).")
+                await safe_reply(context.bot, "\n\n".join(mb_lines), chat_id=TELEGRAM_CHAT_ID)
+        except Exception as e:
+            print(f"⚠️ Gagal mengirim Longer-Horizon Watchlist: {e}")
+
     except Exception as e:
         # Last-resort catch: never fail silently. Even if the brief itself couldn't be
         # built or sent, try to at least notify so you know something broke this morning.
@@ -4989,12 +5031,19 @@ def _executiongate_decision_original(scoring: dict) -> dict:
 
 
 
-def compute_executiongate_bandarmology_proxy(scoring: dict) -> dict:
+def compute_executiongate_bandarmology_proxy(scoring: dict, real_bandar: dict | None = None) -> dict:
     """
     Proxy jejak akumulasi/distribusi khusus Execution Gate.
 
     Ini tidak mengklaim mengetahui identitas bandar. Input hanya berasal dari
     OHLCV, CMF, OBV, volume, posisi harga, dan broker-flow jika sudah tersedia.
+
+    real_bandar (MBSS v2, RapidAPI integration, optional): hasil
+    fetch_rapidapi_bandar_accumulation — skor akumulasi REAL dari data broker,
+    bukan proxy OHLCV. Kalau ada, dipakai sebagai penyesuaian ADDITIVE di atas
+    heuristik yang sudah ada (TIDAK menggantikannya) — kalau None (API down,
+    kuota habis, atau memang belum dicek), perilaku fungsi ini identik persis
+    dengan sebelum integrasi RapidAPI ada.
     """
     def num(value, default=0.0):
         try:
@@ -5102,6 +5151,24 @@ def compute_executiongate_bandarmology_proxy(scoring: dict) -> dict:
             dist += 18
             dist_reasons.append("broker-flow negatif terkonsentrasi")
 
+    # Real broker-derived accumulation/distribution signal (MBSS v2, RapidAPI
+    # integration — source deliberately NOT named in user-facing text, this
+    # should read as a natural extension of the bot's own broker/bandar
+    # vocabulary, not an external-API callout). Additive on top of the
+    # OHLCV-only heuristic above, NEVER replacing it. Bounded the same way
+    # as the existing broker-flow bonus just above (max +/-15) — distinct
+    # from that one, though: broker-flow above is raw net-direction, this is
+    # a broker-confirmed ACCUMULATION/DISTRIBUTION PATTERN specifically.
+    if real_bandar:
+        rb_status = str(real_bandar.get("status", "")).upper()
+        rb_confidence = num(real_bandar.get("confidence"))
+        if rb_confidence >= 60 and "ACC" in rb_status:
+            acc += 15
+            acc_reasons.append(f"pola akumulasi broker riil terkonfirmasi (confidence {rb_confidence:.0f}%)")
+        elif rb_confidence >= 60 and "DIST" in rb_status:
+            dist += 15
+            dist_reasons.append(f"pola distribusi broker riil terkonfirmasi (confidence {rb_confidence:.0f}%)")
+
     acc = int(max(0, min(100, acc)))
     dist = int(max(0, min(100, dist)))
 
@@ -5122,21 +5189,27 @@ def compute_executiongate_bandarmology_proxy(scoring: dict) -> dict:
         "phase": phase,
         "accumulation_reasons": acc_reasons[:3],
         "distribution_reasons": dist_reasons[:3],
+        "real_bandar": real_bandar,  # passed through as-is (entry_zone/recommendation/signals) for display, or None
     }
 
 
-def executiongate_decision(scoring: dict) -> dict:
+def executiongate_decision(scoring: dict, real_bandar: dict | None = None) -> dict:
     """
     Wrapper atas Execution Gate lama:
     - Bandarmology hanya memberi bonus kecil.
     - Distribution risk tinggi memblokir ENTER.
+
+    real_bandar (MBSS v2, RapidAPI integration, optional): diteruskan langsung
+    ke compute_executiongate_bandarmology_proxy — lihat docstring-nya.
     """
     result = _executiongate_decision_original(scoring)
-    bandar = compute_executiongate_bandarmology_proxy(scoring)
+    bandar = compute_executiongate_bandarmology_proxy(scoring, real_bandar=real_bandar)
 
     result["bandar_accumulation_score"] = bandar["accumulation_score"]
     result["bandar_distribution_risk"] = bandar["distribution_risk"]
     result["bandar_phase"] = bandar["phase"]
+    if bandar.get("real_bandar"):
+        result["real_bandar"] = bandar["real_bandar"]
 
     reasons = result.setdefault("reasons", [])
     reasons.append(
@@ -5210,7 +5283,19 @@ def evaluate_executiongate_watchlist(scored_watchlist: list) -> list:
                         "trigger_price": None,
                         "downside_to_invalidation_pct": 99,
                     }
-            decision = executiongate_decision(item)
+            # RapidAPI real bandar/accumulation signal (MBSS v2, RapidAPI
+            # integration) — same-day cached inside get_cached_or_fetch_
+            # rapidapi_bandar_accumulation, so re-running /executiongate on
+            # the same ticker within a trading day never spends a second
+            # live call. Wrapped so a RapidAPI outage/quota-exhaustion never
+            # blocks Execution Gate itself — falls back to the OHLCV-only
+            # proxy exactly as before this integration existed.
+            real_bandar = None
+            try:
+                real_bandar = broker_engine.get_cached_or_fetch_rapidapi_bandar_accumulation(ticker)
+            except Exception as e:
+                print(f"⚠️ RapidAPI real bandar gagal untuk {ticker}: {e}")
+            decision = executiongate_decision(item, real_bandar=real_bandar)
             decision["source"] = item.get("executiongate_source", "screendaytrade")
             evaluated.append(decision)
         except Exception as e:
@@ -5751,6 +5836,28 @@ def compute_screendaytrade_positive_bias(r: dict) -> dict:
     Refactor ranking /screendaytrade:
     Pisahkan Fresh Breakout lane dan Continuation lane.
     Tujuan: memperkuat probabilitas saham positif, bukan sekadar volatil.
+
+    MBSS v2 (RapidAPI integration, "diskusi trader" session, user request):
+    tiga tambahan, semua ADDITIVE terhadap lane lama, tidak menggantikan:
+    1. Lane baru "PRIORITY ACCUMULATION" — saham yang whitelist broker-nya
+       net-buy KUAT tapi harga BELUM bergerak (breakout score masih rendah).
+       Ini justru kandidat paling berharga karena ketemu SEBELUM ramai,
+       bukan setelah — tapi risikonya juga nyata (belum ada konfirmasi
+       harga), jadi priority-nya sengaja DI BAWAH FRESH/CONT (priority 2,
+       bukan 3), dan cuma lane baru ini yang sanggup nunjukkan tanpa
+       terjebak filter breakout/momentum lane lain (yang secara struktural
+       akan selalu menolak saham dengan breakout score rendah).
+    2. Smart-money divergence — harga masih naik kuat (breakout score
+       tinggi) TAPI whitelist broker justru NET JUAL. Sinyal risiko ini
+       TIDAK BISA dideteksi dari OHLCV/orderbook manapun (butuh identitas
+       broker riil), ditambahkan sebagai pemicu independen ke lane
+       "EXTENDED / CHASE WATCH" yang sudah ada, bukan pengganti heuristik
+       CHASE lama — kalau keduanya kompak (CHASE teknikal + divergence),
+       penalti keduanya diakumulasi, sinyal makin kuat.
+    3. Konfirmasi breakout riil dari RapidAPI (severity HIGH + probability
+       tinggi) — bonus kecil tambahan di atas active_score yang sudah ada,
+       validasi silang breakout OHLCV kita dengan level support/resistance
+       broker riil, bukan penentu utama.
     """
     v5 = compute_daytrade_v5_summary(r)
 
@@ -5806,6 +5913,16 @@ def compute_screendaytrade_positive_bias(r: dict) -> dict:
         sf >= 75
     )
 
+    # Sinyal whitelist accumulation/distribution — sudah dihitung SEKALI di
+    # batch malam (apply_whitelist_accumulation_adjustment, engine/scoring.py)
+    # dan disimpan langsung di scoring dict, jadi di sini TINGGAL BACA, tidak
+    # fetch/hitung ulang apa pun.
+    whitelist_net_pct = r.get("whitelist_accumulation_net_pct")
+    whitelist_num_brokers = r.get("whitelist_num_brokers", 0) or 0
+    strong_accumulation = (
+        whitelist_net_pct is not None and whitelist_net_pct >= 15 and whitelist_num_brokers >= 2
+    )
+
     if fresh_ok and fresh_score >= continuation_score:
         lane = "PRIORITY FRESH"
         score = fresh_score + 6
@@ -5814,6 +5931,12 @@ def compute_screendaytrade_positive_bias(r: dict) -> dict:
         lane = "PRIORITY CONT"
         score = continuation_score + 6
         priority = 3
+    elif strong_accumulation and b < 50:
+        accumulation_strength = min(1.0, (whitelist_net_pct - 15) / 35)  # 0 at 15%, 1.0 at 50%+
+        broker_agreement = min(1.0, whitelist_num_brokers / 4)
+        lane = "PRIORITY ACCUMULATION"
+        score = 50 + 15 * accumulation_strength + 10 * broker_agreement + 5 * (rm / 100)
+        priority = 2
     elif rm < 55 and a < 75:
         lane = "LOW EDGE / CHASE"
         score = max(fresh_score, continuation_score) - 8
@@ -5835,13 +5958,46 @@ def compute_screendaytrade_positive_bias(r: dict) -> dict:
     if active_score >= 60:
         score += min((active_score - 60) / 4, 8)
 
+    # MBSS v2 (RapidAPI integration): konfirmasi breakout riil dari RapidAPI
+    # — validasi silang breakout OHLCV kita dengan level support/resistance
+    # broker riil. Bonus kecil, bukan penentu utama, cuma untuk breakout
+    # yang SUDAH kuat secara teknikal (b >= 50) — bukan dipakai untuk
+    # PRIORITY ACCUMULATION di atas (itu justru butuh breakout BELUM terjadi).
+    if b >= 50:
+        try:
+            alert = nightly_engine.get_breakout_alert_for_ticker(r.get("ticker", ""))
+        except Exception:
+            alert = None
+        if alert and str(alert.get("severity", "")).upper() == "HIGH" and (alert.get("indicators", {}) or {}).get("breakout_probability", 0) >= 80:
+            score += 4
+
     # Chase risk dari label lama tetap diberi penalti.
     old_label = str(v5.get("label", "")).upper()
-    if "CHASE" in old_label:
-        score -= 10
+    technical_chase = "CHASE" in old_label
+    # Smart-money divergence: harga sudah bergerak kuat TAPI whitelist
+    # broker net JUAL — sinyal risiko independen dari heuristik CHASE lama.
+    smart_money_divergence = b >= 60 and whitelist_net_pct is not None and whitelist_net_pct <= -15
+
+    if technical_chase or smart_money_divergence:
+        if technical_chase:
+            score -= 10
+        if smart_money_divergence:
+            score -= 12
         if lane != "LOW EDGE / CHASE":
             lane = "EXTENDED / CHASE WATCH"
             priority = min(priority, 1)
+
+    # MBSS v2 (RapidAPI integration, user request — "pelajari secara
+    # adaptif untuk hindari picks yang cenderung gagal"): lapisan TAMBAHAN
+    # di atas penalti manual yang sudah ada (SECONDARY WATCH -10, LOW
+    # EDGE/CHASE -8 di atas) — additive, TIDAK menggantikan tuning yang
+    # sudah divalidasi. Terapkan ke lane FINAL (setelah kemungkinan
+    # direklasifikasi jadi EXTENDED/CHASE WATCH di atas), supaya lane BARU
+    # (PRIORITY FRESH/CONT/ACCUMULATION/EXTENDED CHASE WATCH — yang
+    # sebelumnya TIDAK PUNYA penalti berbasis winrate sama sekali) ikut
+    # terlindungi, sekaligus terus ter-update otomatis seiring data
+    # /winrate bertambah, bukan angka statis yang perlu diedit manual lagi.
+    score += get_adaptive_lane_penalty(lane)
 
     score = max(0, min(100, round(score, 1)))
 
@@ -6286,6 +6442,28 @@ async def run_opening_dynamics(context: ContextTypes.DEFAULT_TYPE):
             macro_lines = "\n".join(f"- {k}: {v:+.2f}%" for k, v in macro_context.items())
             extra_context_str = f"Macro indices (% change, most recent session):\n{macro_lines}"
 
+        # MBSS v2 (RapidAPI integration, user request): tambahkan konteks
+        # top gainer intraday (checkpoint 09:30/14:30 WIB — lihat
+        # broker_engine.get_or_refresh_intraday_market_snapshot) ke konteks
+        # yang sama dipakai Gemini buat menulis brief-nya, supaya narasi
+        # otomatis mempertimbangkan saham yang benar-benar ramai PAGI INI,
+        # bukan cuma data cache semalam. Sumber datanya sendiri TIDAK
+        # disebut ke Gemini (konvensi teks user-facing sesi ini) — cukup
+        # sebagai konteks pasar tambahan, sama seperti macro_context.
+        try:
+            snapshot = await asyncio.to_thread(broker_engine.get_or_refresh_intraday_market_snapshot)
+            movers = (snapshot.get("market_mover") or {}).get("mover_list") or []
+            if movers:
+                mover_lines = "\n".join(
+                    f"- {(m.get('stock_detail') or {}).get('code')}: "
+                    f"{((m.get('stock_detail') or {}).get('change') or {}).get('percentage', 0):+.1f}%"
+                    for m in movers[:10]
+                )
+                mover_block = f"Top gainers pagi ini (data intraday terkini):\n{mover_lines}"
+                extra_context_str = f"{extra_context_str}\n\n{mover_block}" if extra_context_str else mover_block
+        except Exception as e:
+            print(f"⚠️ Gagal menambahkan konteks top gainer ke Opening Dynamics: {e}")
+
         # Use nightly scan cache to enrich opening dynamics with existing action/score/TP/SL.
         # If cache is empty/stale, the report still works from intraday dynamics alone.
         scored_cache = nightly_engine.load_daily_scan_cache()
@@ -6429,6 +6607,7 @@ def build_app():
     app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.strong_buy_command))
     app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
     app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
+    app.add_handler(CommandHandler("brokerdiscovery", commands_scan.broker_discovery_command))
     app.add_handler(CommandHandler("bsjp", commands_scan.bsjp_screening_command))
     app.add_handler(CommandHandler(["eodscan", "nightlyscan"], commands_scan.eodscan_command))
     app.add_handler(CallbackQueryHandler(commands_scan.gptpick_callback, pattern="^gptpick:(3|5)$"))
@@ -6547,6 +6726,95 @@ def get_winrate_for_label(label: str) -> str:
     wins = sum(1 for p in picks if p["status"] in ("win", "win_timebased"))
     winrate_pct = wins / len(picks) * 100
     return f"{winrate_pct:.0f}% ({len(picks)}x)"
+
+
+def get_days_to_breakout_for_label(label: str) -> str:
+    """
+    MBSS v2 (RapidAPI integration, user request) — jawaban jujur untuk
+    "confidence breakout terjadi dalam berapa hari": SEBELUM ini, klaim
+    seperti itu di kriteria HC ("prediksi 1-2 hari ke depan") murni TARGET
+    DESAIN yang membentuk pemilihan parameter (jendela 5 hari, high 10 hari,
+    EMA9/SMA20) — bukan angka yang benar-benar dihitung. Ini gantinya:
+    median hari KALENDER dari pick_date sampai resolved_date, dihitung dari
+    track record /winrate kita sendiri, HANYA untuk resolusi win/
+    win_timebased (breakout beneran kejadian) — supaya jujur menjawab
+    "kalau sinyal ini benar, historisnya berapa lama sampai kejadian",
+    bukan tercampur dengan yang gagal sama sekali.
+
+    Sama seperti get_winrate_for_label: butuh sampel >=3 sebelum dipercaya,
+    return "" (bukan angka spekulatif) kalau belum cukup data — makin
+    banyak pick terkumpul dari waktu ke waktu, makin akurat angkanya,
+    bukan statis seperti klaim desain lama.
+    """
+    now = datetime.datetime.now(WIB)
+    if _winrate_label_cache["loaded_at"] is None or (now - _winrate_label_cache["loaded_at"]).total_seconds() > 300:
+        _rebuild_winrate_label_cache()
+
+    picks = _winrate_label_cache["stats"].get(label)
+    if not picks:
+        return ""
+
+    day_counts = []
+    for p in picks:
+        if p.get("status") not in ("win", "win_timebased"):
+            continue
+        if not p.get("pick_date") or not p.get("resolved_date"):
+            continue
+        try:
+            d1 = datetime.datetime.strptime(p["pick_date"], "%Y-%m-%d").date()
+            d2 = datetime.datetime.strptime(p["resolved_date"], "%Y-%m-%d").date()
+            day_counts.append((d2 - d1).days)
+        except Exception:
+            continue
+
+    if len(day_counts) < 3:
+        return ""
+
+    day_counts.sort()
+    median_days = day_counts[len(day_counts) // 2]
+    return f"median {median_days} hari kalender sampai TP (n={len(day_counts)})"
+
+
+def get_adaptive_lane_penalty(label: str, min_sample: int = 10) -> float:
+    """
+    MBSS v2 (RapidAPI integration, user request — "pelajari secara adaptif
+    untuk hindari picks yang cenderung gagal"): generalisasi dari pola yang
+    SEBELUMNYA dikerjakan manual untuk lane SECONDARY WATCH (winrate 38%
+    diamati manual dari data /winrate, lalu di-hardcode jadi penalti skor
+    -10 langsung di compute_screendaytrade_positive_bias — lihat komentar
+    "berbasis data /winrate real — 162 pick selesai" di fungsi itu).
+    Sekarang berlaku OTOMATIS untuk SEMUA label, terus ter-update seiring
+    data terkumpul — bukan cuma lane yang kebetulan diperhatikan manusia.
+
+    Ambang sampel SENGAJA lebih tinggi dari get_winrate_for_label (n>=10,
+    bukan n>=3) — MENAMPILKAN statistik dengan sampel kecil cukup aman
+    (user menilai sendiri), tapi BERTINDAK berdasarkan itu (mengurangi
+    skor rekomendasi, mempengaruhi keputusan beli) butuh keyakinan lebih
+    tinggi, supaya lane BARU (mis. PRIORITY ACCUMULATION, yang saat ini
+    nol data histori) tidak langsung kena penalti dari kebetulan jangka
+    pendek begitu beberapa pick pertamanya gagal.
+
+    Return 0.0 kalau data belum cukup atau winrate >=50% (tidak ada alasan
+    memberi penalti — cuma winrate DI BAWAH koin-lempar yang direspon).
+    Return NEGATIF, dibatasi maks -15 (jangan sampai mendominasi skor
+    teknikal), proporsional linear ke seberapa jauh di bawah 50%.
+    """
+    now = datetime.datetime.now(WIB)
+    if _winrate_label_cache["loaded_at"] is None or (now - _winrate_label_cache["loaded_at"]).total_seconds() > 300:
+        _rebuild_winrate_label_cache()
+
+    picks = _winrate_label_cache["stats"].get(label)
+    if not picks or len(picks) < min_sample:
+        return 0.0
+
+    wins = sum(1 for p in picks if p["status"] in ("win", "win_timebased"))
+    winrate_pct = wins / len(picks) * 100
+    if winrate_pct >= 50:
+        return 0.0
+
+    # 0% winrate -> -15, 50% winrate -> 0, linear di antaranya.
+    penalty = -15.0 * (50 - winrate_pct) / 50
+    return round(penalty, 1)
 
 
 # ==========================================

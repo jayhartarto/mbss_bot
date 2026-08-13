@@ -16,6 +16,20 @@ three sources:
   - **Screenshot OCR** (`extract_brokersum_from_screenshot`,
     `compute_brokersum_from_screenshot_data`) — user sends a screenshot of
     their own trading app, read via Gemini vision. Free, no API quota.
+  - **RapidAPI IDX Market Intelligence** (`fetch_rapidapi_broker_activity`,
+    `fetch_rapidapi_sentiment`, `fetch_rapidapi_bandar_accumulation`, near the
+    bottom of this file) — interim real-broker-data source while Index
+    Alpha's monthly quota is exhausted. Basic free plan: 500 requests/month,
+    1 req/sec — see `RAPIDAPI_IDX_MONTHLY_BUDGET` and
+    `_rapidapi_idx_quota_check_and_increment` for the enforced monthly cap
+    (separate budget from Index Alpha's own). `fetch_rapidapi_broker_activity`
+    is broker-scoped, not ticker-scoped — one call returns that broker's
+    activity across every ticker on the exchange for a date range, which is
+    what makes sweeping `SMART_MONEY_BROKER_WHITELIST` (13 calls) cheaper
+    than a per-ticker approach; `rapidapi_broker_activity_to_broksum_rows`
+    reshapes its response into this file's existing per-ticker row shape so
+    it can merge straight into the `broksum_250` pipeline in
+    `engine/nightly.py` with no changes to any downstream consumer.
 
 Deliberately NOT moved here — these APPLY broker data to a stock's score
 and stay with the rest of the scoring/ranking logic in legacy_core.py:
@@ -440,6 +454,11 @@ def append_brokersum_history(ticker: str, brokersum: dict):
         "net_foreign_flow_idr": brokersum.get("net_foreign_flow_idr"),
         "net_foreign_flow_pct": brokersum.get("net_foreign_flow_pct"),
         "broker_concentration_pct": brokersum.get("broker_concentration_pct"),
+        # MBSS v2 (RapidAPI integration, Top Buyer Persistence): broker codes
+        # from top_net_buyers, added so compute_top_buyer_persistence() can
+        # detect the same broker(s) recurring as a top buyer across days —
+        # older entries simply won't have this key, callers use .get(..., []).
+        "top_buyer_codes": [b["code"] for b in brokersum.get("top_net_buyers", []) if b.get("code")],
     })
     # Dedup: kalau entri untuk tanggal yang sama sudah ada (dipanggil >1x di hari
     # bursa yang sama), timpa yang lama, jangan duplikat.
@@ -994,6 +1013,29 @@ def format_smart_money_tag(ticker: str, tickers_data: dict, prefix: str = "\n   
     return f"{prefix}💰 Akumulasi smart money: {', '.join(parts)}"
 
 
+def format_market_mover_tag(ticker: str, prefix: str = "\n   ") -> str:
+    """
+    MBSS v2 (RapidAPI integration) — formatter satu pintu untuk tools live/
+    intraday (mengikuti konvensi format_sector_tag/format_smart_money_tag
+    yang sama persis), tag KALAU ticker ini muncul di checkpoint intraday
+    (09:30/14:30 WIB, get_or_refresh_intraday_market_snapshot) sebagai top
+    gainer hari ini. Sumber data TIDAK disebut di teks (konvensi user-
+    facing sesi ini) — tampil sebagai konfirmasi "aktif hari ini", bukan
+    callout API eksternal. String kosong kalau tidak ada data/ticker tidak
+    muncul (None-safe, sama seperti tag lain).
+    """
+    try:
+        mover = get_market_mover_for_ticker(ticker)
+    except Exception:
+        mover = None
+    if not mover:
+        return ""
+    change_pct = (mover.get("change") or {}).get("percentage", 0)
+    net_foreign_buy = (mover.get("net_foreign_buy") or {}).get("formatted")
+    fbuy_note = f", asing net beli {net_foreign_buy}" if net_foreign_buy and net_foreign_buy != "-" else ""
+    return f"{prefix}📶 Aktif hari ini: top gainer {change_pct:+.1f}%{fbuy_note}"
+
+
 def get_broker_entry_ceiling_from_broksum250(ticker: str, tickers_data: dict) -> dict | None:
     """
     MBSS v2 (user request — jadikan broksum_250 SUMBER UTAMA ceiling
@@ -1101,3 +1143,875 @@ def classify_bias_bandar(ticker: str, daily_history: dict, price_change_pct: flo
         return {"label": "AKUMULASI SEGAR", "detail": f"net-buy masih aktif, Rp{latest_net:,.0f} hari terakhir", "overall_avg_buy": overall_avg_buy}
 
     return {"label": "AKUMULASI BASI", "detail": "net-buy historis positif tapi aktivitas terbaru sudah melemah jauh", "overall_avg_buy": overall_avg_buy}
+
+
+# ==========================================
+# 🏦 RAPIDAPI IDX MARKET INTELLIGENCE — 4th brokersum source (MBSS v2,
+# RapidAPI integration). Interim real-broker-data source while Index Alpha's
+# monthly quota is exhausted (resets next month). Basic free plan: 500
+# requests/month total, 1 req/sec — separate budget from Index Alpha's own,
+# tracked here via _rapidapi_idx_quota_check_and_increment (raw JSON file,
+# same pattern as BROKERSUM_CACHE_FILE above, not engine.cache's
+# cache_manager — that abstraction is engine/nightly.py's convention for
+# the nightly-refreshed pipeline, this file's own caches have always been
+# plain JSON).
+# ==========================================
+RAPIDAPI_IDX_QUOTA_FILE = os.path.join(core.PROJECT_ROOT, "rapidapi_idx_quota.json")
+RAPIDAPI_IDX_MONTHLY_LIMIT = 500
+RAPIDAPI_IDX_MONTHLY_BUDGET = 400  # soft cap, leaves headroom for overage safety
+RAPIDAPI_ONDEMAND_CACHE_FILE = os.path.join(core.PROJECT_ROOT, "rapidapi_idx_ondemand_cache.json")
+RAPIDAPI_WHITELIST_SWEEP_LOOKBACK_DAYS = 10  # matches BROKSUM_250_LOOKBACK_DAYS in engine/nightly.py
+
+
+def _load_rapidapi_idx_quota() -> dict:
+    if not os.path.exists(RAPIDAPI_IDX_QUOTA_FILE):
+        return {}
+    try:
+        with open(RAPIDAPI_IDX_QUOTA_FILE) as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Gagal membaca RapidAPI IDX quota tracker: {e}")
+        return {}
+
+
+def _save_rapidapi_idx_quota(quota: dict):
+    try:
+        with open(RAPIDAPI_IDX_QUOTA_FILE, "w") as f:
+            json.dump(quota, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Gagal menyimpan RapidAPI IDX quota tracker: {e}")
+
+
+def _rapidapi_idx_quota_check_and_increment(endpoint: str) -> bool:
+    """
+    Hard monthly budget gate shared by every RapidAPI IDX fetcher below — a
+    real overage cost is at stake past RAPIDAPI_IDX_MONTHLY_BUDGET (soft cap,
+    below the hard RAPIDAPI_IDX_MONTHLY_LIMIT), so this is checked BEFORE any
+    HTTP call, never after. Returns False (no HTTP call should happen) once
+    the month's budget is used up; every caller must degrade to its existing
+    fallback rather than crash/block when this returns False — same
+    discipline as every other API integration in this file.
+    """
+    quota = _load_rapidapi_idx_quota()
+    current_month = datetime.datetime.now(core.WIB).strftime("%Y-%m")
+    if quota.get("month") != current_month:
+        quota = {"month": current_month, "calls": {}}
+    calls = quota.setdefault("calls", {})
+    total_used = sum(calls.values())
+    if total_used >= RAPIDAPI_IDX_MONTHLY_BUDGET:
+        print(f"⚠️ RapidAPI IDX monthly budget ({RAPIDAPI_IDX_MONTHLY_BUDGET}) reached for {current_month} — skipping {endpoint}.")
+        return False
+    calls[endpoint] = calls.get(endpoint, 0) + 1
+    _save_rapidapi_idx_quota(quota)
+    return True
+
+
+def get_rapidapi_idx_quota_status() -> dict:
+    """Read-only status for diagnostics/tuning — never gates anything itself."""
+    current_month = datetime.datetime.now(core.WIB).strftime("%Y-%m")
+    quota = _load_rapidapi_idx_quota()
+    if quota.get("month") != current_month:
+        return {"used": 0, "budget": RAPIDAPI_IDX_MONTHLY_BUDGET, "remaining": RAPIDAPI_IDX_MONTHLY_BUDGET, "month": current_month, "by_endpoint": {}}
+    calls = quota.get("calls", {})
+    used = sum(calls.values())
+    return {
+        "used": used,
+        "budget": RAPIDAPI_IDX_MONTHLY_BUDGET,
+        "remaining": max(0, RAPIDAPI_IDX_MONTHLY_BUDGET - used),
+        "month": current_month,
+        "by_endpoint": calls,
+    }
+
+
+def fetch_rapidapi_broker_activity(broker_code: str, from_date: str, to_date: str, limit: int = 50) -> dict | None:
+    """
+    GET /api/market-detector/broker-activity/{code} — confirmed live (session
+    testing): a single call returns ONE broker's net buy/sell activity across
+    EVERY ticker on the exchange for the given date range (transactionType=
+    TRANSACTION_TYPE_NET — each row is single-sided, buy OR sell, not both).
+    This is what makes sweeping SMART_MONEY_BROKER_WHITELIST (13 calls) cover
+    the whole market for those brokers, far cheaper than a per-ticker
+    approach. Returns the {"bandar_detector": {...}, "broker_summary":
+    {"brokers_buy": [...], "brokers_sell": [...]}} payload, or None on any
+    failure (quota exhausted, network error, non-success response) — never
+    raises.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("broker_activity"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/market-detector/broker-activity/{broker_code}",
+            params={
+                "limit": limit, "marketBoard": "MARKET_BOARD_ALL", "page": 1,
+                "investorType": "INVESTOR_TYPE_ALL", "from": from_date, "to": to_date,
+                "transactionType": "TRANSACTION_TYPE_NET",
+            },
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print(f"⚠️ RapidAPI IDX rate-limited (429) for broker-activity/{broker_code} — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for broker-activity/{broker_code}: {data}")
+            return None
+        return data.get("data", {}).get("data", {})
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for broker-activity/{broker_code}: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)  # respect confirmed 1 req/sec limit
+
+
+def fetch_rapidapi_sentiment(ticker: str, days: int = 7) -> dict | None:
+    """
+    GET /api/analysis/sentiment/{ticker} — retail-vs-bandar divergence, the
+    one signal in this whole integration with no OHLCV-derivable proxy at
+    all (Sprint 2 roadmap's blocked "Retail vs Institution Estimate" item).
+    Returns the {"symbol", "retail_sentiment", "bandar_sentiment",
+    "divergence", "top_brokers", "summary", ...} payload, or None on failure.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("sentiment"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/analysis/sentiment/{ticker}",
+            params={"days": days},
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print(f"⚠️ RapidAPI IDX rate-limited (429) for sentiment/{ticker} — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for sentiment/{ticker}: {data}")
+            return None
+        return data.get("data", {})
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for sentiment/{ticker}: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)
+
+
+def fetch_rapidapi_bandar_accumulation(ticker: str, days: int = 30) -> dict | None:
+    """
+    GET /api/analysis/bandar/accumulation/{ticker} — real broker-derived
+    accumulation score/status/confidence/recommendation. Used only by
+    /executiongate's on-demand fallback (a specific per-decision check, not a
+    bulk nightly fetch) to validate/augment the existing OHLCV-only
+    compute_executiongate_bandarmology_proxy() heuristic in legacy_core.py.
+    Returns the {"symbol", "accumulation_score", "status", "confidence",
+    "indicators", "signals", "recommendation", "entry_zone", ...} payload, or
+    None on failure.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("bandar_accumulation"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/analysis/bandar/accumulation/{ticker}",
+            params={"days": days},
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print(f"⚠️ RapidAPI IDX rate-limited (429) for bandar/accumulation/{ticker} — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for bandar/accumulation/{ticker}: {data}")
+            return None
+        return data.get("data", {})
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for bandar/accumulation/{ticker}: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)
+
+
+def rapidapi_broker_activity_to_broksum_rows(activity_data: dict) -> dict:
+    """
+    Reshape one broker's RapidAPI activity response (TRANSACTION_TYPE_NET)
+    into this file's existing per-ticker row shape — the same shape Index
+    Alpha's fetch_broker_summary_raw/fetch_broker_summary_batch_raw already
+    produce: {ticker: [{code, buy_value, sell_value, buy_volume, sell_volume,
+    buy_avg, sell_avg, buy_freq, sell_freq}, ...]}. This is what lets the
+    whitelist sweep merge straight into build_broksum_250's output in
+    engine/nightly.py with zero changes to any consumer
+    (get_smart_money_accumulation, classify_bias_bandar,
+    format_smart_money_tag, get_broker_entry_ceiling, etc. all already read
+    this exact shape).
+
+    Fields confirmed live: buy rows have netbs_broker_code, netbs_stock_code,
+    bval, blot, netbs_buy_avg_price; sell rows have the same but
+    sval/slot/netbs_sell_avg_price, with sval/slot already NEGATIVE (net
+    query — each row is single-sided, buy OR sell, never both) — abs() them
+    here. Because each row is single-sided, the "other side" of every
+    reshaped row is left as 0/None — this stays arithmetically compatible
+    with existing consumers like get_smart_money_accumulation, which compute
+    net = buy_value - sell_value regardless of source.
+    """
+    by_ticker: dict = {}
+    bs = activity_data.get("broker_summary", {}) or {}
+    for row in bs.get("brokers_buy", []) or []:
+        ticker = row.get("netbs_stock_code")
+        if not ticker:
+            continue
+        by_ticker.setdefault(ticker, []).append({
+            "code": row.get("netbs_broker_code"),
+            "buy_value": row.get("bval") or 0,
+            "sell_value": 0,
+            "buy_volume": row.get("blot") or 0,
+            "sell_volume": 0,
+            "buy_avg": row.get("netbs_buy_avg_price"),
+            "sell_avg": None,
+            "buy_freq": row.get("freq"),
+            "sell_freq": None,
+        })
+    for row in bs.get("brokers_sell", []) or []:
+        ticker = row.get("netbs_stock_code")
+        if not ticker:
+            continue
+        by_ticker.setdefault(ticker, []).append({
+            "code": row.get("netbs_broker_code"),
+            "buy_value": 0,
+            "sell_value": abs(row.get("sval") or 0),
+            "buy_volume": 0,
+            "sell_volume": abs(row.get("slot") or 0),
+            "buy_avg": None,
+            "sell_avg": row.get("netbs_sell_avg_price"),
+            "buy_freq": None,
+            "sell_freq": row.get("freq"),
+        })
+    return by_ticker
+
+
+def _load_rapidapi_ondemand_cache() -> dict:
+    if not os.path.exists(RAPIDAPI_ONDEMAND_CACHE_FILE):
+        return {}
+    try:
+        with open(RAPIDAPI_ONDEMAND_CACHE_FILE) as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Gagal membaca RapidAPI on-demand cache: {e}")
+        return {}
+
+
+def _save_rapidapi_ondemand_cache(cache: dict):
+    try:
+        with open(RAPIDAPI_ONDEMAND_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Gagal menyimpan RapidAPI on-demand cache: {e}")
+
+
+def get_cached_rapidapi_idx(ticker: str, endpoint: str):
+    """
+    Read-only same-trading-day cache lookup — mirrors get_cached_brokersum's
+    contract exactly (never fetches on its own, returns None if the entry is
+    missing or from a stale trading day).
+    """
+    cache = _load_rapidapi_ondemand_cache()
+    entry = cache.get(ticker, {}).get(endpoint)
+    if not entry:
+        return None
+    if entry.get("date") != get_last_published_trading_day():
+        return None
+    return entry.get("data")
+
+
+def get_cached_or_fetch_rapidapi_bandar_accumulation(ticker: str) -> dict | None:
+    """
+    Cache-check → fetch → cache-write, same orchestration shape as
+    get_cached_or_fetch_brokersum. Used only by /executiongate's on-demand
+    fallback for tickers outside the nightly whitelist sweep / sentiment
+    shortlist coverage — same-day cached so repeated /executiongate calls on
+    the same ticker within a trading day never spend a second live call.
+    """
+    cached = get_cached_rapidapi_idx(ticker, "bandar_accumulation")
+    if cached is not None:
+        return cached
+    data = fetch_rapidapi_bandar_accumulation(ticker)
+    if data is None:
+        return None
+    cache = _load_rapidapi_ondemand_cache()
+    cache.setdefault(ticker, {})["bandar_accumulation"] = {
+        "date": get_last_published_trading_day(),
+        "data": data,
+    }
+    _save_rapidapi_ondemand_cache(cache)
+    return data
+
+
+def compute_top_buyer_persistence(ticker: str, lookback_entries: int = 5) -> dict:
+    """
+    Top Buyer Persistence (Sprint 2 roadmap item, engine/broker.py) — zero
+    new API cost, pure computation over brokersum_history.json (already
+    populated by append_brokersum_history on every real brokersum fetch, no
+    matter the source — Index Alpha, Zapi, screenshot, or now RapidAPI via
+    the nightly whitelist sweep). Counts which broker codes recur as a
+    top-net-buyer across the last N history entries for this ticker.
+
+    Complementary to (not a duplicate of) the whitelist-only Bias Bandar
+    system (classify_bias_bandar above, fed by append_broksum_daily_history
+    in engine/nightly.py) — that one only tracks
+    SMART_MONEY_BROKER_WHITELIST codes, this tracks whichever brokers
+    actually showed up as top buyers, whitelist or not.
+    """
+    history = _load_brokersum_history().get(ticker, [])
+    recent = history[-lookback_entries:] if lookback_entries > 0 else history
+    if not recent:
+        return {"persistent_buyers": [], "has_persistent_buyer": False}
+
+    counts: dict = {}
+    for entry in recent:
+        for code in entry.get("top_buyer_codes", []) or []:
+            counts[code] = counts.get(code, 0) + 1
+
+    persistent = [
+        {"code": code, "days_present": n, "of_last": len(recent)}
+        for code, n in sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        if n >= 2  # showed up as a top buyer on at least 2 of the recent entries
+    ]
+    return {"persistent_buyers": persistent, "has_persistent_buyer": bool(persistent)}
+
+
+# ==========================================
+# 💹 /check "BROKER INFO" (MBSS v2, RapidAPI integration) — replaces the old
+# "💹 BROKER RIIL" block + the old ceiling logic in commands/check.py with a
+# single, uniformly RapidAPI-sourced view (user request — mixing Index
+# Alpha/Zapi/RapidAPI in the same display made day-to-day numbers
+# incomparable, and having two different "ceiling" concepts in one message
+# was confusing). Deliberately reuses market-detector/broker-summary/{ticker}
+# — the one RapidAPI endpoint earlier excluded from the nightly pipeline as
+# redundant — because /check needs the FULL per-ticker broker breakdown
+# (whoever actually traded, not just the smart-money whitelist), which is
+# exactly what this endpoint (and only this endpoint) provides.
+# ==========================================
+
+
+def fetch_rapidapi_broker_summary(ticker: str, from_date: str, to_date: str, limit: int = 25) -> dict | None:
+    """
+    GET /api/market-detector/broker-summary/{ticker} — full per-ticker broker
+    breakdown (every broker that transacted, not just the smart-money
+    whitelist). Same TRANSACTION_TYPE_NET row shape as
+    fetch_rapidapi_broker_activity (confirmed live: identical field names),
+    reshaped with the same rapidapi_broker_activity_to_broksum_rows helper.
+    Returns the raw {"bandar_detector": {...}, "broker_summary":
+    {"brokers_buy": [...], "brokers_sell": [...]}} payload, or None on any
+    failure.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("broker_summary"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/market-detector/broker-summary/{ticker}",
+            params={
+                "limit": limit, "marketBoard": "MARKET_BOARD_ALL",
+                "transactionType": "TRANSACTION_TYPE_NET", "investorType": "INVESTOR_TYPE_ALL",
+                "from": from_date, "to": to_date,
+            },
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print(f"⚠️ RapidAPI IDX rate-limited (429) for broker-summary/{ticker} — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for broker-summary/{ticker}: {data}")
+            return None
+        return data.get("data", {}).get("data", {})
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for broker-summary/{ticker}: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)
+
+
+def get_cached_or_fetch_rapidapi_broker_summary(ticker: str, lookback_days: int = 10) -> dict | None:
+    """
+    Cache-check → fetch → cache-write, same-day cached like every other
+    on-demand RapidAPI function — repeated /check calls on the same ticker
+    within a trading day never spend a second live call. 10-day lookback by
+    default (matches RAPIDAPI_WHITELIST_SWEEP_LOOKBACK_DAYS's convention) —
+    widening the date range costs nothing extra, it's still one call, just a
+    more representative multi-day read instead of a single noisy day.
+    """
+    cached = get_cached_rapidapi_idx(ticker, "broker_summary")
+    if cached is not None:
+        return cached
+    to_date = datetime.datetime.now(core.WIB).date()
+    from_date = to_date - datetime.timedelta(days=lookback_days)
+    data = fetch_rapidapi_broker_summary(ticker, from_date.isoformat(), to_date.isoformat())
+    if data is None:
+        return None
+    cache = _load_rapidapi_ondemand_cache()
+    cache.setdefault(ticker, {})["broker_summary"] = {
+        "date": get_last_published_trading_day(),
+        "data": data,
+    }
+    _save_rapidapi_ondemand_cache(cache)
+    return data
+
+
+def append_dominance_history(ticker: str, dominance_pct: float):
+    """
+    Zero-extra-cost trend tracking (user request — "kalau memang ada saham
+    yang sinyalnya muncul berulang, data ini jadi pelengkap yang bagus").
+    Records TODAY's top-3 net-buy dominance % into the SAME
+    brokersum_history.json used by append_brokersum_history/
+    compute_top_buyer_persistence — merged into today's existing entry if
+    one already exists (so this never clobbers fields another call wrote
+    earlier the same day), or creates a new entry if not. Organic and
+    opportunistic: only fills in on days /check actually ran for this
+    ticker, gaps are real gaps, never interpolated. Read back via
+    compute_dominance_trend().
+    """
+    history = _load_brokersum_history()
+    entries = history.setdefault(ticker, [])
+    today = get_last_published_trading_day()
+    existing = next((e for e in entries if e.get("date") == today), None)
+    if existing:
+        existing["dominance_pct"] = dominance_pct
+    else:
+        entries.append({"date": today, "dominance_pct": dominance_pct})
+    history[ticker] = sorted(entries, key=lambda e: e["date"])[-BROKERSUM_HISTORY_MAX_ENTRIES_PER_TICKER:]
+    _save_brokersum_history(history)
+
+
+def compute_dominance_trend(ticker: str, lookback_entries: int = 5) -> str | None:
+    """
+    Formats a simple trend string (e.g. "37% → 41% → 44%") from whatever
+    dominance_pct entries exist in history. Returns None if fewer than 2
+    data points exist — caller should omit the trend line entirely in that
+    case, not show a 1-point "trend".
+    """
+    history = _load_brokersum_history().get(ticker, [])
+    recent = [e for e in history[-lookback_entries:] if e.get("dominance_pct") is not None]
+    if len(recent) < 2:
+        return None
+    return " → ".join(f"{e['dominance_pct']:.0f}%" for e in recent)
+
+
+def compute_check_broker_info(ticker: str, lookback_days: int = 10) -> dict | None:
+    """
+    /check's "💹 BROKER INFO" block — combines two RapidAPI sources:
+    market-detector/broker-summary/{ticker} (top-3 net buyers over the last
+    10 days, dominance %, ceiling price) and analysis/bandar/accumulation/
+    {ticker} (accumulation status/confidence/target — already built for
+    /executiongate, reused here as-is via
+    get_cached_or_fetch_rapidapi_bandar_accumulation). Returns None if the
+    broker-summary fetch fails or no broker shows a positive net buy; the
+    accumulation piece is optional — shown if available, omitted otherwise.
+
+    IMPORTANT (user-facing text convention, decided this session): nothing
+    in this function's OUTPUT should ever be rendered as "RapidAPI ___" in
+    Telegram text — the caller (commands/check.py) must phrase this as a
+    natural extension of the bot's existing broker/bandar vocabulary. This
+    function itself is free to say "RapidAPI" in comments/docstrings.
+    """
+    raw = get_cached_or_fetch_rapidapi_broker_summary(ticker, lookback_days=lookback_days)
+    if not raw:
+        return None
+
+    rows = rapidapi_broker_activity_to_broksum_rows(raw).get(ticker, [])
+    net_by_code: dict = {}
+    for row in rows:
+        code = row.get("code")
+        if not code:
+            continue
+        entry = net_by_code.setdefault(code, {"code": code, "net_value": 0, "net_volume": 0, "buy_avg": None})
+        entry["net_value"] += (row.get("buy_value") or 0) - (row.get("sell_value") or 0)
+        entry["net_volume"] += (row.get("buy_volume") or 0) - (row.get("sell_volume") or 0)
+        if row.get("buy_avg"):
+            entry["buy_avg"] = row["buy_avg"]
+
+    top3 = sorted(
+        (e for e in net_by_code.values() if e["net_value"] > 0),
+        key=lambda e: e["net_value"], reverse=True,
+    )[:3]
+    if not top3:
+        return None
+    for e in top3:
+        e["tag"] = "smart money" if e["code"] in SMART_MONEY_BROKER_WHITELIST else "broker"
+
+    total_market_value = (raw.get("bandar_detector") or {}).get("value") or 0
+    net_buy_top3_value = sum(e["net_value"] for e in top3)
+    net_buy_top3_volume = sum(e["net_volume"] for e in top3)
+    dominance_pct = round((net_buy_top3_value / total_market_value) * 100, 1) if total_market_value > 0 else None
+    priced = [e for e in top3 if e["buy_avg"]]
+    ceiling = max(priced, key=lambda e: e["buy_avg"]) if priced else None
+
+    if dominance_pct is not None:
+        append_dominance_history(ticker, dominance_pct)
+
+    return {
+        "top_brokers": top3,  # [{code, net_value, net_volume, buy_avg, tag}, ...] up to 3
+        "lookback_days": lookback_days,
+        "net_buy_top3_value": net_buy_top3_value,
+        "net_buy_top3_volume": net_buy_top3_volume,
+        "dominance_pct": dominance_pct,
+        "dominance_trend": compute_dominance_trend(ticker),
+        "ceiling_price": ceiling["buy_avg"] if ceiling else None,
+        "ceiling_code": ceiling["code"] if ceiling else None,
+        "accumulation": get_cached_or_fetch_rapidapi_bandar_accumulation(ticker),
+    }
+
+
+# ==========================================
+# 📡 RAPIDAPI MARKET-WIDE SCANNERS (MBSS v2, RapidAPI integration) — each
+# covers the ENTIRE exchange in one call (confirmed live: 30 alerts / N
+# candidates per call), a fundamentally cheaper cost profile than the
+# per-ticker/per-broker endpoints above. Nightly-batch only (see
+# engine/nightly.py's build_rapidapi_market_intelligence_sweep) — never
+# called per-ticker/on-demand.
+# ==========================================
+
+
+def fetch_rapidapi_breakout_alerts() -> dict | None:
+    """
+    GET /api/analysis/retail/breakout/alerts — market-wide volume/price
+    breakout scan, no params needed (confirmed live: returns ~30 alerts
+    across the whole exchange in one call). Returns the raw {"scan_date",
+    "total_alerts", "alerts": [{symbol, name, alert_type, severity, price,
+    change_percentage, volume, volume_vs_avg, indicators: {resistance_level,
+    support_level, distance_to_resistance, distance_to_support,
+    volume_confirmation, price_momentum, breakout_probability}, action,
+    entry_trigger, target, stop_loss, timestamp}, ...]} payload, or None on
+    any failure.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("breakout_alerts"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/analysis/retail/breakout/alerts",
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print("⚠️ RapidAPI IDX rate-limited (429) for breakout/alerts — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for breakout/alerts: {data}")
+            return None
+        return data.get("data", {})
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for breakout/alerts: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)
+
+
+def fetch_rapidapi_multibagger_scan(min_score: int = 70, max_results: int = 20) -> dict | None:
+    """
+    GET /api/analysis/retail/multibagger/scan — market-wide multi-factor
+    scanner (technical + volume + foreign_flow + accumulation sub-scores
+    combined), 6-12 month timeframe. Deliberately called WITHOUT a `sector`
+    param — confirmed live that it doesn't reliably filter by sector, and we
+    want full-market coverage for the nightly sweep anyway. Returns the raw
+    {"scan_date", "total_candidates", "filters_applied", "candidates":
+    [{symbol, name, multibagger_score, potential_return, timeframe,
+    current_price, reasons: {technical, volume, foreign_flow, accumulation},
+    entry_zone, target_prices, risk_level, stop_loss, sector, market_cap},
+    ...]} payload, or None on any failure.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("multibagger_scan"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/analysis/retail/multibagger/scan",
+            params={"min_score": min_score, "max_results": max_results},
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print("⚠️ RapidAPI IDX rate-limited (429) for multibagger/scan — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for multibagger/scan: {data}")
+            return None
+        return data.get("data", {})
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for multibagger/scan: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)
+
+
+# ==========================================
+# 🎯 WHITELIST ACCUMULATION/DISTRIBUTION SIGNAL (MBSS v2, RapidAPI
+# integration, user request — "diskusi trader") — computed PURELY from the
+# nightly whitelist sweep's already-fetched broker rows (zero additional API
+# cost), NOT from bandar_accumulation (that endpoint stays reserved for
+# on-demand, per-ticker-triggered paths: /executiongate fallback, /check
+# Broker Info — calling it for every swept ticker would cost one live call
+# per ticker, defeating the whole point of the free whitelist sweep).
+# Prioritizes SMART_MONEY_BROKER_WHITELIST codes specifically over generic
+# broker concentration — concentration alone doesn't tell you WHO is
+# concentrated; a single large retail-serving desk having a big day looks
+# identical to genuine informed accumulation without this distinction.
+# ==========================================
+
+
+def compute_whitelist_accumulation_signal(ticker: str, broksum_rows: list) -> dict | None:
+    """
+    Ticker's whitelist-broker net position from already-fetched
+    broksum_250 rows (Index Alpha + RapidAPI whitelist sweep, merged).
+    Returns None if no whitelist broker appears in the rows at all, or if
+    gross value is zero (can't compute a meaningful ratio).
+    """
+    whitelist_rows = [r for r in broksum_rows if r.get("code") in SMART_MONEY_BROKER_WHITELIST]
+    if not whitelist_rows:
+        return None
+    net_value = sum((r.get("buy_value") or 0) - (r.get("sell_value") or 0) for r in whitelist_rows)
+    gross_value = sum((r.get("buy_value") or 0) + (r.get("sell_value") or 0) for r in whitelist_rows)
+    if gross_value <= 0:
+        return None
+    # Distinct broker codes, not row count (a broker could contribute both
+    # a buy-leg and sell-leg row from different source merges).
+    num_whitelist_brokers = len({r["code"] for r in whitelist_rows if r.get("code")})
+    return {
+        "net_pct": round((net_value / gross_value) * 100, 1),
+        "net_value": net_value,
+        "num_whitelist_brokers": num_whitelist_brokers,
+    }
+
+
+# ==========================================
+# 📡 RAPIDAPI MARKET-WIDE SCANNERS, part 2 (MBSS v2, RapidAPI integration) —
+# sectorRotation, marketMover, topBrokers, topStocks. Paths confirmed live
+# by the user this session. Same shared quota gate, same error-handling
+# shape as the rest of this file.
+# ==========================================
+
+
+def fetch_rapidapi_sector_rotation() -> dict | None:
+    """
+    GET /api/analysis/retail/sector-rotation — market-wide, all ~11 IDX
+    sectors in one call, no params. Returns the raw {"analysis_date",
+    "market_phase", "hot_sectors", "cold_sectors", "all_sectors": [{sector_id,
+    sector_name, momentum_score, status, avg_return_today, total_value,
+    foreign_flow, top_stocks, recommendation, companies_count, gainers_count,
+    losers_count}, ...], "summary"} payload, or None on any failure.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("sector_rotation"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/analysis/retail/sector-rotation",
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print("⚠️ RapidAPI IDX rate-limited (429) for sector-rotation — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for sector-rotation: {data}")
+            return None
+        return data.get("data", {})
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for sector-rotation: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)
+
+
+def fetch_rapidapi_market_mover(mover_type: str = "top-gainer") -> dict | None:
+    """
+    GET /api/movers/{mover_type} — market-wide, confirmed live with
+    mover_type="top-gainer" (path segment, not a query param — e.g. would be
+    "top-loser"/"top-value"/"top-volume" if those variants exist, unconfirmed).
+    filterStocks fixed to MAIN_BOARD + DEVELOPMENT_BOARD (regular tradeable
+    universe, excludes odd boards). Returns the raw {"data": {"mover_list":
+    [{"stock_detail": {code, name, price, change, value, volume, frequency,
+    net_foreign_buy, net_foreign_sell, market_cap, ...}, "mover_type", ...}]}}
+    payload, or None on any failure.
+    """
+    if not _rapidapi_idx_quota_check_and_increment(f"market_mover:{mover_type}"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/movers/{mover_type}",
+            params={"filterStocks": "FILTER_STOCKS_TYPE_MAIN_BOARD,FILTER_STOCKS_TYPE_DEVELOPMENT_BOARD"},
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print(f"⚠️ RapidAPI IDX rate-limited (429) for movers/{mover_type} — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for movers/{mover_type}: {data}")
+            return None
+        return data.get("data", {})
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for movers/{mover_type}: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)
+
+
+def fetch_rapidapi_top_brokers(period: str = "TB_PERIOD_LAST_1_DAY") -> dict | None:
+    """
+    GET /api/market-detector/top-broker — market-wide broker turnover
+    ranking. CAVEAT (confirmed live, see module notes): net_value/buy_value/
+    sell_value come back "0" in the tested call — this is a TURNOVER
+    ranking (sorted by total_value), NOT a net-buying ranking. Used only for
+    the manual /brokerdiscovery command (human-curated candidate discovery
+    for SMART_MONEY_BROKER_WHITELIST) — never wired into an automated
+    scoring path. Returns the raw {"data": {"date": {...}, "list": [{code,
+    name, investor_type, total_value, net_value, buy_value, sell_value,
+    total_volume, total_frequency, group}, ...]}} payload, or None on
+    failure.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("top_brokers"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/market-detector/top-broker",
+            params={
+                "marketType": "MARKET_TYPE_ALL", "period": period,
+                "order": "ORDER_BY_ASC", "sort": "TB_SORT_BY_TOTAL_VALUE",
+            },
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print("⚠️ RapidAPI IDX rate-limited (429) for top-broker — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for top-broker: {data}")
+            return None
+        return data.get("data", {})
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for top-broker: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)
+
+
+def fetch_rapidapi_top_stocks(value_type: str = "VALUE_TYPE_TOTAL") -> dict | None:
+    """
+    GET /api/market-detector/top-stock — market-wide ticker ranking by
+    trading value, with foreign_value per ticker. start/end pinned to
+    today (WIB) — the confirmed sample used a single-day range. Returns the
+    raw {"data": {"top_buy": [...], "top_sell": [...], "total": [{rank,
+    code, value, lot, average, foreign_value, frequency}, ...],
+    "response_info": {...}}} payload, or None on any failure.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("top_stocks"):
+        return None
+    today = datetime.datetime.now(core.WIB).date().isoformat()
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/market-detector/top-stock",
+            params={
+                "start": today, "end": today, "valueType": value_type,
+                "investorType": "INVESTOR_TYPE_ALL", "marketType": "MARKET_TYPE_ALL", "page": 1,
+            },
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print("⚠️ RapidAPI IDX rate-limited (429) for top-stock — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for top-stock: {data}")
+            return None
+        return data.get("data", {})
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for top-stock: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)
+
+
+# ==========================================
+# ⏱️ INTRADAY CHECKPOINT (MBSS v2, RapidAPI integration) — getMarketMover +
+# getTopStocks pulled OUT of the nightly sweep entirely: a last-night
+# snapshot isn't useful for commands that run DURING market hours
+# (/executiongate, /testopening, /screendaytrade live, /bsjp all want
+# CURRENT data). Replaced with a lazy checkpoint at 09:30/14:30 WIB — this
+# bot has NO in-process scheduler (bot.py: "no JobQueue — request-driven
+# only"), so checkpoints are checked on every relevant command call instead
+# of via internal cron. Only the FIRST caller after a checkpoint time
+# passes actually spends an API call; everyone else that window reads cache.
+# ==========================================
+RAPIDAPI_INTRADAY_CHECKPOINT_FILE = os.path.join(core.PROJECT_ROOT, "rapidapi_intraday_checkpoint.json")
+RAPIDAPI_INTRADAY_CHECKPOINTS = ["09:30", "14:30"]  # WIB — market open read, pre-close read
+
+
+def _load_intraday_checkpoint() -> dict:
+    if not os.path.exists(RAPIDAPI_INTRADAY_CHECKPOINT_FILE):
+        return {}
+    try:
+        with open(RAPIDAPI_INTRADAY_CHECKPOINT_FILE) as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Gagal membaca intraday checkpoint: {e}")
+        return {}
+
+
+def _save_intraday_checkpoint(state: dict):
+    try:
+        with open(RAPIDAPI_INTRADAY_CHECKPOINT_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Gagal menyimpan intraday checkpoint: {e}")
+
+
+def get_or_refresh_intraday_market_snapshot() -> dict:
+    """
+    Call this from any live/intraday command before reading mover/top-stock
+    data. If the current WIB time has passed a checkpoint not yet recorded
+    for today, fetches fresh data and updates the checkpoint marker;
+    otherwise returns whatever's already cached. A failed refresh just
+    means the PREVIOUS checkpoint's data (or nothing, before today's first
+    checkpoint) keeps serving — same graceful-degradation contract as every
+    other RapidAPI fetcher in this file.
+    """
+    today = core.get_current_calendar_date_marker()
+    state = _load_intraday_checkpoint()
+    if state.get("date") != today:
+        state = {"date": today, "last_checkpoint": None, "snapshot": {}}
+
+    now_wib = datetime.datetime.now(core.WIB).strftime("%H:%M")
+    passed = [cp for cp in RAPIDAPI_INTRADAY_CHECKPOINTS if now_wib >= cp]
+    target_checkpoint = passed[-1] if passed else None
+
+    if target_checkpoint and state.get("last_checkpoint") != target_checkpoint:
+        mover = fetch_rapidapi_market_mover("top-gainer")
+        top_stocks = fetch_rapidapi_top_stocks()
+        # Non-destructive per-key merge — a failed fetch for one key must
+        # not wipe out the other key's (or the previous checkpoint's) data.
+        merged = dict(state.get("snapshot") or {})
+        if mover is not None:
+            merged["market_mover"] = mover
+        if top_stocks is not None:
+            merged["top_stocks"] = top_stocks
+        state["snapshot"] = merged
+        state["last_checkpoint"] = target_checkpoint
+        _save_intraday_checkpoint(state)
+
+    return state.get("snapshot") or {}
+
+
+def get_market_mover_for_ticker(ticker: str) -> dict | None:
+    """Cheap indexed lookup from the current checkpoint snapshot — triggers a
+    checkpoint refresh check first (see get_or_refresh_intraday_market_snapshot),
+    but only actually fetches if a new checkpoint window has opened."""
+    snapshot = get_or_refresh_intraday_market_snapshot()
+    movers = (snapshot.get("market_mover") or {}).get("mover_list") or []
+    for m in movers:
+        sd = m.get("stock_detail") or {}
+        if sd.get("code") == ticker:
+            return sd
+    return None

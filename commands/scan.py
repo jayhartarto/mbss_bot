@@ -258,6 +258,15 @@ async def screen_daytrade(update, context):
     await asyncio.to_thread(core.save_latest_screendaytrade_picks, top_candidates)
 
     if use_live:
+        # MBSS v2 (RapidAPI integration): warm the intraday checkpoint ONCE
+        # here, in a background thread, before the loop below calls
+        # format_market_mover_tag per candidate — that function does a
+        # synchronous cache read, but the checkpoint refresh itself (an
+        # HTTP call, only on the FIRST caller after 09:30/14:30 WIB passes)
+        # must not happen inline inside the loop, or it'd block the event
+        # loop for the duration of that one live request.
+        await asyncio.to_thread(broker_engine.get_or_refresh_intraday_market_snapshot)
+
         lines = ["⚡ SCREENING DAY TRADE — AKTIF SEKARANG (live VWAP + vol pace)\n"]
         lines.append(f"{filter_tier_note}\n")
         lines.append("Catatan: Diurutkan MURNI dari sinyal live (bukan lane EOD) — proxy terdekat ke \"orderbook condong ke buyer\" dari data yang tersedia (bot ini TIDAK punya akses order-book bid/ask asli). Ini RADAR, bukan entry final.\n")
@@ -270,7 +279,7 @@ async def screen_daytrade(update, context):
                 f"{i}. {r['ticker']} — {label_str} ({ab.get('score', 0)}/100)\n"
                 f"   Harga {r.get('price')} | VWAP {ab.get('vwap', '-')} (jarak {ab.get('vwap_distance_pct', '-')}%) | Vol pace {ab.get('volume_pace_ratio', '-')}x\n"
                 f"   Trigger {ab.get('trigger_price', '-')} | Invalid <{ab.get('invalidation_level', '-')}\n"
-                f"   {ab.get('notes', '') or '-'}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
+                f"   {ab.get('notes', '') or '-'}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}{broker_engine.format_market_mover_tag(r['ticker'])}"
             )
 
         # MBSS v2 (user request — kasus TALF/IATA/SGRO): bagian TERPISAH untuk
@@ -637,6 +646,23 @@ def _gptpick_score(scoring: dict) -> dict:
     except Exception:
         conviction = 5.0
 
+    # MBSS v2 (RapidAPI integration, "diskusi trader" session, user request):
+    # bonus conviction kecil kalau ticker JUGA lolos multibagger scan
+    # (>=75) — gptpick fokus jangka pendek, multibagger fokus 6-12 bulan;
+    # kalau keduanya kompak, itu sinyal momentum jangka pendek DIDUKUNG
+    # kualitas struktural jangka panjang (foreign accumulation berturut-
+    # turut, harga masih jauh dari 52w high), bukan sekadar volatilitas
+    # sesaat. Bounded (+1.5 dari maks 10), tidak menentukan sendirian.
+    multibagger = None
+    ticker_for_mb = scoring.get("ticker")
+    if ticker_for_mb:
+        try:
+            multibagger = nightly_engine.get_multibagger_candidate_for_ticker(ticker_for_mb)
+        except Exception:
+            multibagger = None
+    if multibagger and (multibagger.get("multibagger_score") or 0) >= 75:
+        conviction = min(10.0, conviction + 1.5)
+
     penalty, penalty_labels = _gptpick_penalty(scoring)
 
     raw = (
@@ -695,6 +721,8 @@ def _gptpick_score(scoring: dict) -> dict:
             f"broker net { _gptpick_num(bs.get('net_foreign_flow_pct'), 0.0):+.1f}% "
             f"conc { _gptpick_num(bs.get('broker_concentration_pct'), 0.0):.1f}%"
         )
+    if multibagger and (multibagger.get("multibagger_score") or 0) >= 75:
+        reasons.append(f"juga lolos multibagger scan ({multibagger['multibagger_score']}/100, {multibagger.get('potential_return', '-')})")
 
     return {
         "final": final,
@@ -1067,8 +1095,47 @@ async def high_conviction_command(update, context):
             f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}"
         )
 
+    # MBSS v2 (RapidAPI integration, "diskusi trader" session, user request):
+    # blok TAMBAHAN, independen dari 8-kriteria HC di atas (yang secara
+    # struktural mensyaratkan breakout SUDAH terjadi — konfirmasi close,
+    # body candle kuat, volume tinggi) — saham dengan whitelist broker
+    # net-buy kuat TAPI belum breakout tidak akan pernah lolos kriteria HC
+    # manapun, jadi selalu terlewat sampai SETELAH ramai. Sinyal sudah
+    # dihitung SEKALI di batch malam (apply_whitelist_accumulation_adjustment),
+    # di sini tinggal baca + filter, tidak fetch/hitung ulang apa pun. Sama
+    # seperti pola "2 hal independen, jangan saling menghentikan" yang sudah
+    # dipakai di /consensus.
+    hc_tickers = {r["ticker"] for r in top10}
+    accumulation_candidates = [
+        r for r in scored.values()
+        if r.get("ticker") not in hc_tickers
+        and r.get("whitelist_accumulation_net_pct") is not None
+        and r["whitelist_accumulation_net_pct"] >= 15
+        and (r.get("whitelist_num_brokers") or 0) >= 2
+    ]
+    accumulation_candidates.sort(key=lambda r: r["whitelist_accumulation_net_pct"], reverse=True)
+    accumulation_candidates = accumulation_candidates[:5]
+
+    if accumulation_candidates:
+        # MBSS v2 (RapidAPI integration, user request — "confidence breakout
+        # N hari, dari data historis kita sendiri"): dihitung dari track
+        # record /winrate LANE "PRIORITY ACCUMULATION" itu sendiri (median
+        # hari kalender dari pick sampai TP), bukan klaim tebakan — kosong
+        # kalau sampelnya masih <3 (lane ini baru, wajar belum ada datanya).
+        days_note = core.get_days_to_breakout_for_label("PRIORITY ACCUMULATION")
+        days_str = f" | historis: {days_note}" if days_note else " | belum cukup data historis untuk estimasi hari"
+        lines.append(f"\n🔍 AKUMULASI / PRA-BREAKOUT — {len(accumulation_candidates)} kandidat (belum breakout, whitelist broker net-buy kuat){days_str}\n")
+        for i, r in enumerate(accumulation_candidates, 1):
+            s = r.get("scores", {})
+            lines.append(
+                f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f} | "
+                f"net-buy whitelist {r['whitelist_accumulation_net_pct']:+.0f}% ({r.get('whitelist_num_brokers', 0)} broker)"
+            )
+        lines.append("⚠️ Belum ada konfirmasi harga — risiko timing lebih tinggi dari kandidat HC di atas.")
+
     lines.append("\nDetail lengkap: /check TICKER")
-    buttons = core.build_check_buttons([r["ticker"] for r in top10])
+    all_tickers = [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates]
+    buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
 
@@ -1268,6 +1335,17 @@ async def _run_bsjp_6criteria(update):
             except Exception:
                 pass
 
+        # MBSS v2 (RapidAPI integration, "diskusi trader" session, user
+        # request): konfirmasi breakout dari nightly sweep — INFORMASI saja,
+        # tidak menggugurkan, sama seperti akumulasi_note di atas.
+        try:
+            alert = nightly_engine.get_breakout_alert_for_ticker(ticker)
+        except Exception:
+            alert = None
+        if alert and str(alert.get("severity", "")).upper() == "HIGH":
+            breakout_prob = (alert.get("indicators") or {}).get("breakout_probability", "-")
+            akumulasi_note += f" | Breakout {breakout_prob}%"
+
         # Checklist konfirmasi struktur (TIDAK menggugurkan) — cuma dihitung
         # untuk kandidat yang SUDAH lolos 6 kriteria wajib, supaya multi-timeframe
         # fetch (paling mahal) tidak dilakukan untuk kandidat yang toh akan tersaring.
@@ -1296,6 +1374,14 @@ async def _run_bsjp_6criteria(update):
         return
 
     results.sort(key=lambda r: r["gain_pct"], reverse=True)
+
+    # MBSS v2 (RapidAPI integration): warm the intraday checkpoint ONCE
+    # here (background thread) before the loop below calls
+    # format_market_mover_tag per candidate — /bsjp runs near close
+    # (15:50-16:00 WIB), exactly the pre-close checkpoint window this
+    # mechanism was built for.
+    await asyncio.to_thread(broker_engine.get_or_refresh_intraday_market_snapshot)
+
     lines = [f"🌆 BSJP SCREENING (diperketat) — {len(results)} kandidat lolos SEMUA 6 kriteria wajib\n"]
     lines.append("⚠️ Ambang jarak ARA (0-15%) masih SEMENTARA/permisif — cuma informasi, belum jadi filter.")
     lines.append("⚠️ Checklist struktur (CMF/OBV/MACD/volume-shape/multi-timeframe) KONFIRMASI saja, TIDAK menggugurkan — belum cukup data buat dikunci jadi wajib.\n")
@@ -1308,7 +1394,7 @@ async def _run_bsjp_6criteria(update):
             f"{i}. {r['ticker']} — {r['current_price']:.0f} ({r['gain_pct']:+.1f}%){struct_str}{wr_note}\n"
             f"   Vol {r['vol_vs_ma20']}x MA20 | {r['vol_vs_prev']}x kemarin | SMA5 {r['sma5']:.0f}\n"
             f"   Value {r['value_traded_today']/1e9:.1f}M | RSI {r['rsi']} | Jarak ARA {r['ara_distance']}% | "
-            f"Closing {r['close_pos']*100:.0f}% dari range{r['akumulasi_note']}"
+            f"Closing {r['close_pos']*100:.0f}% dari range{r['akumulasi_note']}{broker_engine.format_market_mover_tag(r['ticker'])}"
         )
         for c in r["structure"]["checklist"]:
             icon = "✅" if c["ok"] else "➖"
@@ -1672,13 +1758,19 @@ async def broksum_command(update, context):
     /broksum KODE [hari] — reverse-lookup broker (MBSS v2, user request,
     direname dari /brokeraktivitas): satu kode broker, saham apa saja yang
     di-akumulasi/distribusi. Baca dari cache broksum_250 yang di-fetch
-    SEKALI tiap malam (bagian /eodscan, 250 ticker berskor tertinggi,
-    5 panggilan batch = persis pas kuota harian Index Alpha) — TIDAK
-    fetch live sama sekali di sini, supaya bisa dipakai berkali-kali
-    sehari tanpa rebutan kuota dengan proses nightly.
+    SEKALI tiap malam (bagian /eodscan) — TIDAK fetch live sama sekali di
+    sini, supaya bisa dipakai berkali-kali sehari tanpa rebutan kuota
+    dengan proses nightly.
 
-    Parameter [hari] SENGAJA tidak lagi mengubah rentang fetch (itu sudah
-    tetap BROKSUM_250_LOOKBACK_DAYS=7 hari dari cache semalam) — kalau ada,
+    MBSS v2 (RapidAPI integration): broksum_250 sekarang gabungan 2 sumber
+    — batch Index Alpha (250 ticker berskor tertinggi, kalau kuota masih
+    ada) DAN whitelist sweep RapidAPI (broker_engine.
+    build_rapidapi_broker_whitelist_sweep — TIDAK dibatasi 250, mencakup
+    SEMUA ticker yang disentuh broker whitelist, window rolling 10 hari).
+    Makanya cakupan/lookback di sini TIDAK LAGI angka tunggal yang pasti —
+    teks tampilan sengaja tidak mengklaim "250 ticker" atau "7 hari" lagi.
+
+    Parameter [hari] SENGAJA tidak mengubah rentang fetch — kalau ada,
     cuma dipakai buat catatan tampilan, bukan parameter fetch baru.
     """
     if not context.args:
@@ -1696,7 +1788,7 @@ async def broksum_command(update, context):
     activity = broker_engine.find_broker_activity_across_tickers(broker_code, broksum_data)
 
     if not activity:
-        await core.safe_reply(update.message, f"📋 {broker_code} tidak terdeteksi NET BUY di {len(broksum_data)} ticker berskor tertinggi malam ini.")
+        await core.safe_reply(update.message, f"📋 {broker_code} tidak terdeteksi NET BUY di {len(broksum_data)} ticker yang tercakup malam ini.")
         return
 
     top_activity = activity[:top_n]
@@ -1704,7 +1796,7 @@ async def broksum_command(update, context):
     age_note = ""
     if age_info and age_info["days_lagging"] > 0:
         age_note = f" ⚠️ Data dari {age_info['last_fetch_date']} ({age_info['days_lagging']} hari lalu, bukan hari ini)"
-    lines = [f"💰 TOP {len(top_activity)} AKUMULASI {broker_code} — {nightly_engine.BROKSUM_250_LOOKBACK_DAYS} hari terakhir (dari {len(activity)} saham net-buy, {len(broksum_data)} ticker berskor tertinggi){age_note}\n"]
+    lines = [f"💰 TOP {len(top_activity)} AKUMULASI {broker_code} — beberapa hari terakhir (dari {len(activity)} saham net-buy, {len(broksum_data)} ticker tercakup){age_note}\n"]
     for i, a in enumerate(top_activity, 1):
         lines.append(f"{i}. {a['ticker']}, net buy {a['buy_volume_lot']:,} lot, {a['buy_avg_price']:.0f} avg price")
     buttons = core.build_check_buttons([a["ticker"] for a in top_activity])
@@ -1713,3 +1805,43 @@ async def broksum_command(update, context):
 
 # Alias lama, tetap didukung sementara supaya transisi tidak mendadak (MBSS v2)
 broker_activity_command = broksum_command
+
+
+async def broker_discovery_command(update, context):
+    """
+    /brokerdiscovery — MBSS v2 (RapidAPI integration, user request):
+    discovery broker BARU, human-curated, TIDAK PERNAH otomatis. Menampilkan
+    broker dari ranking top-broker malam ini (atau cache terakhir) yang
+    BELUM ada di SMART_MONEY_BROKER_WHITELIST — user meninjau manual, edit
+    sendiri konstantanya di engine/broker.py kalau memang relevan.
+
+    Murni baca cache kalau ada (di-refresh tiap malam ke-10 sebagai bagian
+    /eodscan) — cuma fetch live kalau cache benar-benar kosong.
+    """
+    intel = nightly_engine.load_rapidapi_market_intelligence()
+    top_brokers_data = intel.get("top_brokers")
+    if not top_brokers_data:
+        await core.safe_reply(update.message, "🔎 Mengambil data top broker (belum ada di cache)...")
+        top_brokers_data = await asyncio.to_thread(broker_engine.fetch_rapidapi_top_brokers)
+    if not top_brokers_data:
+        await core.safe_reply(update.message, "⚠️ Data top broker tidak tersedia (kuota habis atau API gagal).")
+        return
+
+    broker_list = top_brokers_data.get("list", [])
+    candidates = [b for b in broker_list if b.get("code") not in broker_engine.SMART_MONEY_BROKER_WHITELIST]
+    if not candidates:
+        await core.safe_reply(update.message, "📋 Semua broker teraktif sudah ada di whitelist.")
+        return
+
+    group_label_id = {"BROKER_GROUP_FOREIGN": "asing", "BROKER_GROUP_LOCAL": "lokal", "BROKER_GROUP_GOVERNMENT": "pemerintah"}
+    lines = [f"🔎 KANDIDAT BROKER BARU — {len(candidates)} broker aktif TAPI belum di whitelist\n"]
+    for i, b in enumerate(candidates[:15], 1):
+        group_label = group_label_id.get(b.get("group"), "-")
+        lines.append(f"{i}. {b.get('code')} — {b.get('name', '-')} ({group_label})")
+    lines.append(
+        "\n⚠️ Ini ranking TURNOVER (aktivitas transaksi), BUKAN ranking "
+        "net-buy — aktif ramai bukan berarti 'smart money'. Tinjau manual, "
+        "tambahkan ke SMART_MONEY_BROKER_WHITELIST (engine/broker.py) "
+        "kalau memang relevan — tidak ada yang otomatis di sini."
+    )
+    await core.safe_reply(update.message, "\n".join(lines))

@@ -299,15 +299,108 @@ async def run_nightly_full_scan(context):
         # harian Index Alpha (5 panggilan batch x 50 = 250 ticker, persis
         # pas). /broksum siang/sore TINGGAL baca cache ini, TIDAK fetch
         # live sama sekali.
+        trading_night_index = _get_and_increment_trading_night_index()
+
+        broksum_250_data = {}
         try:
             broksum_250_data = await asyncio.to_thread(build_broksum_250, results)
-            save_broksum_250(broksum_250_data)
-            # MBSS v2 (user request — Bias Bandar): TAMBAHKAN snapshot hari
-            # ini ke histori harian (bukan cuma cache sesaat) — supaya trend
-            # akumulasi/distribusi bisa dilihat beberapa hari ke belakang.
-            await asyncio.to_thread(append_broksum_daily_history, broksum_250_data)
         except Exception as e:
-            print(f"⚠️ Gagal membangun BROKSUM 250: {e}")
+            print(f"⚠️ Gagal membangun BROKSUM 250 (Index Alpha): {e}")
+
+        # RapidAPI IDX (MBSS v2, RapidAPI integration) — interim real-broker-
+        # data source while Index Alpha's monthly quota is exhausted. Sweeps
+        # the SAME SMART_MONEY_BROKER_WHITELIST used by Bias Bandar below,
+        # one call per broker (13 total) covering that broker's activity
+        # across EVERY ticker, not just the 250 highest-scored — reshaped
+        # into Index Alpha's row format and merged in below, so every
+        # existing broksum_250 consumer picks it up with zero changes. Every
+        # 2nd trading night (10-day lookback window already overlaps
+        # night-to-night, daily refresh is unnecessary — see budget in the
+        # RapidAPI integration plan).
+        rapidapi_whitelist_data = {}
+        if trading_night_index % 2 == 0:
+            try:
+                rapidapi_whitelist_data = await asyncio.to_thread(build_rapidapi_broker_whitelist_sweep)
+            except Exception as e:
+                print(f"⚠️ Gagal membangun RapidAPI broker whitelist sweep: {e}")
+
+        merged_broksum = _merge_broksum_sources(broksum_250_data, rapidapi_whitelist_data)
+        save_broksum_250(merged_broksum)
+        # MBSS v2 (user request — Bias Bandar): TAMBAHKAN snapshot hari
+        # ini ke histori harian (bukan cuma cache sesaat) — supaya trend
+        # akumulasi/distribusi bisa dilihat beberapa hari ke belakang.
+        await asyncio.to_thread(append_broksum_daily_history, merged_broksum)
+
+        # RapidAPI market-wide sweep (MBSS v2, RapidAPI integration) —
+        # breakout alerts + multibagger scan + sector rotation, every
+        # trading night (all inherently daily-fresh, unlike the whitelist
+        # sweep/sentiment shortlist's every-2-nights cadence). Same
+        # priority tier as the whitelist sweep above — front-loaded in
+        # call order.
+        try:
+            rapidapi_market_intel = await asyncio.to_thread(build_rapidapi_market_intelligence_sweep)
+            # Top brokers (MBSS v2, RapidAPI integration) — discovery/
+            # cross-check only, never wired into an automated scoring path
+            # (it's a turnover ranking, not a net-buying ranking — see
+            # fetch_rapidapi_top_brokers's docstring). Every 10th trading
+            # night only — near-free either way, but no reason to spend
+            # nightly quota on a manual-review-only feature.
+            if trading_night_index % 10 == 0:
+                try:
+                    rapidapi_market_intel["top_brokers"] = await asyncio.to_thread(broker_engine.fetch_rapidapi_top_brokers)
+                except Exception as e:
+                    print(f"⚠️ Gagal membangun RapidAPI top brokers: {e}")
+            merged_market_intel = load_rapidapi_market_intelligence()
+            merged_market_intel.update({k: v for k, v in rapidapi_market_intel.items() if v is not None})
+            save_rapidapi_market_intelligence(merged_market_intel)
+        except Exception as e:
+            print(f"⚠️ Gagal membangun RapidAPI market intelligence sweep: {e}")
+
+        # Whitelist accumulation/distribution adjustment (MBSS v2, RapidAPI
+        # integration, "diskusi trader" session) — folds the whitelist
+        # sweep's already-fetched broker rows into the CORE final score for
+        # every ticker merged_broksum covers, at ZERO additional API cost.
+        # Previously this kind of real-broker adjustment
+        # (apply_brokersum_adjustment) only ever ran opt-in on a handful of
+        # already-shortlisted tickers (gptpick top-10, myportfolio holdings)
+        # because Index Alpha's 5-10/day quota made anything broader
+        # infeasible — the whitelist sweep's flat cost removes that
+        # constraint. Applied to `results` (in place) BEFORE re-saving
+        # daily_scan_cache, so /screendaytrade, /hc, /testbrief, /consensus
+        # all inherit the adjusted score through their normal cache read —
+        # no per-tool wiring needed beyond this one nightly step.
+        try:
+            results_by_ticker = {r["ticker"]: r for r in results if r.get("ticker")}
+            adjusted_count = 0
+            for ticker, rows in merged_broksum.items():
+                r = results_by_ticker.get(ticker)
+                if not r or not r.get("scores"):
+                    continue
+                signal = broker_engine.compute_whitelist_accumulation_signal(ticker, rows)
+                if not signal:
+                    continue
+                scoring_engine.apply_whitelist_accumulation_adjustment(r, signal)
+                if r.get("whitelist_accumulation_adjusted"):
+                    adjusted_count += 1
+            if adjusted_count:
+                save_daily_scan_cache(results)
+                print(f"🎯 Whitelist accumulation/distribution: {adjusted_count} ticker skornya disesuaikan, cache di-update ulang.")
+        except Exception as e:
+            print(f"⚠️ Gagal menerapkan whitelist accumulation adjustment: {e}")
+
+        # RapidAPI IDX sentiment shortlist (MBSS v2, RapidAPI integration) —
+        # retail-vs-bandar divergence for a small top-scored shortlist, the
+        # one signal in the whole RapidAPI integration with no OHLCV-
+        # derivable proxy. Lowest priority of the RapidAPI nightly work —
+        # first thing to silently shrink if the shared monthly quota runs
+        # hot, since it's called last and every fetch call is gated by the
+        # same budget counter regardless of call order.
+        if trading_night_index % 2 == 0:
+            try:
+                rapidapi_sentiment_data = await asyncio.to_thread(build_rapidapi_sentiment_shortlist, results)
+                save_rapidapi_sentiment_shortlist(rapidapi_sentiment_data)
+            except Exception as e:
+                print(f"⚠️ Gagal membangun RapidAPI sentiment shortlist: {e}")
 
         # Market breadth + sector returns + regime — dihitung dari data yang
         # SAMA yang baru saja dikumpulkan di atas (results), tanpa fetch baru.
@@ -494,6 +587,178 @@ def load_bsjp_ara_candidates() -> list:
         return []
     payload = cache_manager.get("bsjp_ara", default={})
     return payload.get("candidates", []) if isinstance(payload, dict) else []
+
+
+# ==========================================
+# 🏦 RAPIDAPI IDX NIGHTLY (MBSS v2, RapidAPI integration) — interim real-
+# broker-data source while Index Alpha's monthly quota is exhausted. Two
+# pieces: a broker-whitelist sweep that merges straight into BROKSUM 250
+# below (same shape, zero changes needed in any consumer), and a small
+# ticker-scoped sentiment shortlist for the one signal (retail-vs-bandar
+# divergence) nothing else in this file provides.
+# ==========================================
+
+
+def _get_and_increment_trading_night_index() -> int:
+    """
+    Persisted counter, incremented once per run_nightly_full_scan call
+    (which itself already skips IDX holidays) — used to gate every-N-nights
+    cadences (whitelist sweep, sentiment shortlist) without needing
+    real-calendar-date math around weekends/holidays.
+    """
+    current = cache_manager.get("rapidapi_night_index", default=0)
+    if not isinstance(current, int):
+        current = 0
+    new_index = current + 1
+    cache_manager.set("rapidapi_night_index", new_index)
+    return new_index
+
+
+def build_rapidapi_broker_whitelist_sweep() -> dict:
+    """
+    Sweep engine.broker.SMART_MONEY_BROKER_WHITELIST (13 codes) via
+    fetch_rapidapi_broker_activity, one call per broker over a rolling
+    RAPIDAPI_WHITELIST_SWEEP_LOOKBACK_DAYS window, reshape each response with
+    rapidapi_broker_activity_to_broksum_rows, and merge into one
+    {ticker: [rows, ...]} dict covering every ticker any whitelisted broker
+    touched — broader than BROKSUM 250's top-N-by-score scope, since it's
+    keyed by broker activity, not by which tickers happened to score well.
+    Unlike Index Alpha's 250-ticker cap, this has NO ticker cap at all.
+    """
+    to_date = core.datetime.datetime.now(core.WIB).date()
+    from_date = to_date - core.datetime.timedelta(days=broker_engine.RAPIDAPI_WHITELIST_SWEEP_LOOKBACK_DAYS)
+    from_str, to_str = from_date.isoformat(), to_date.isoformat()
+
+    merged: dict = {}
+    for code in broker_engine.SMART_MONEY_BROKER_WHITELIST:
+        activity = broker_engine.fetch_rapidapi_broker_activity(code, from_str, to_str)
+        if not activity:
+            continue
+        for ticker, rows in broker_engine.rapidapi_broker_activity_to_broksum_rows(activity).items():
+            merged.setdefault(ticker, []).extend(rows)
+    print(f"🏦 RapidAPI whitelist sweep: {len(merged)} ticker tercakup dari {len(broker_engine.SMART_MONEY_BROKER_WHITELIST)} broker whitelist.")
+    return merged
+
+
+def _merge_broksum_sources(index_alpha_data: dict, rapidapi_data: dict) -> dict:
+    """
+    Union by ticker; within a ticker, dedupe by broker code — Index Alpha's
+    row wins if both sources have the same broker+ticker (richer gross-
+    figures source when it's actually working), RapidAPI only fills gaps.
+    Currently Index Alpha is exhausted, so in practice this is close to a
+    pass-through of the RapidAPI data until next month's reset.
+    """
+    if not rapidapi_data:
+        return index_alpha_data
+    if not index_alpha_data:
+        return rapidapi_data
+
+    merged: dict = {}
+    for ticker in set(index_alpha_data) | set(rapidapi_data):
+        by_code: dict = {}
+        for row in rapidapi_data.get(ticker, []):
+            code = row.get("code")
+            if code:
+                by_code[code] = row
+        for row in index_alpha_data.get(ticker, []):  # Index Alpha rows overwrite RapidAPI's for the same code
+            code = row.get("code")
+            if code:
+                by_code[code] = row
+        merged[ticker] = list(by_code.values())
+    return merged
+
+
+def build_rapidapi_sentiment_shortlist(results: list) -> dict:
+    """
+    Top RAPIDAPI_SENTIMENT_SHORTLIST_SIZE tickers by (final score,
+    active_breakout score) from tonight's full scan — same selection logic
+    used to answer "pick the top candidates from all tools, higher scoring
+    or nearest breakout readiness," since final score already reflects the
+    shared scoring engine /screendaytrade, /hc, /gptpick all read from.
+    Fetches RapidAPI sentiment (retail-vs-bandar divergence) for each.
+    """
+    scored = [r for r in results if r.get("scores", {}).get("final") is not None]
+    ranked = sorted(
+        scored,
+        key=lambda r: (r["scores"]["final"], r.get("active_breakout", {}).get("score", 0)),
+        reverse=True,
+    )[:broker_engine.RAPIDAPI_SENTIMENT_SHORTLIST_SIZE]
+
+    data = {}
+    for r in ranked:
+        result = broker_engine.fetch_rapidapi_sentiment(r["ticker"])
+        if result:
+            data[r["ticker"]] = result
+    print(f"🎭 RapidAPI sentiment shortlist: {len(data)}/{len(ranked)} ticker berhasil.")
+    return data
+
+
+def save_rapidapi_sentiment_shortlist(data: dict):
+    meta = {"trading_day_marker": core.get_current_calendar_date_marker()}
+    ok = cache_manager.set("rapidapi_sentiment_shortlist", {"data": data}, meta=meta)
+    if ok:
+        print(f"💾 RapidAPI sentiment shortlist tersimpan: {len(data)} ticker")
+    else:
+        print("⚠️ Gagal menyimpan RapidAPI sentiment shortlist cache.")
+
+
+def load_rapidapi_sentiment_shortlist() -> dict:
+    payload = cache_manager.get("rapidapi_sentiment_shortlist", default={})
+    return payload.get("data", {}) if isinstance(payload, dict) else {}
+
+
+# ==========================================
+# 📡 RAPIDAPI MARKET INTELLIGENCE SWEEP (MBSS v2, RapidAPI integration) —
+# breakout alerts + multibagger scan, each a single market-wide call
+# covering the WHOLE exchange (~30 alerts / N candidates per call) — every
+# trading night, since both are inherently daily-fresh signals (breakout
+# alerts are about TODAY's volume/price action; multibagger candidates feed
+# the next morning's /testbrief). No sector filter — confirmed live it
+# doesn't reliably filter anyway, and full-market coverage is what the
+# nightly sweep needs.
+# ==========================================
+
+
+def build_rapidapi_market_intelligence_sweep() -> dict:
+    """
+    One call each to breakout/alerts, multibagger/scan, and sector-rotation
+    — each independently try/excepted internally (a fetch failure returns
+    None for that key, never raises) so one failing doesn't block the
+    others. Returns {"breakout_alerts": {...}|None, "multibagger": {...}|None,
+    "sector_rotation": {...}|None}.
+    """
+    breakout = broker_engine.fetch_rapidapi_breakout_alerts()
+    multibagger = broker_engine.fetch_rapidapi_multibagger_scan()
+    sector_rotation = broker_engine.fetch_rapidapi_sector_rotation()
+    return {"breakout_alerts": breakout, "multibagger": multibagger, "sector_rotation": sector_rotation}
+
+
+def save_rapidapi_market_intelligence(data: dict):
+    meta = {"trading_day_marker": core.get_current_calendar_date_marker()}
+    ok = cache_manager.set("rapidapi_market_intel", {"data": data}, meta=meta)
+    if ok:
+        n_breakout = len((data.get("breakout_alerts") or {}).get("alerts") or [])
+        n_multibagger = len((data.get("multibagger") or {}).get("candidates") or [])
+        print(f"💾 RapidAPI market intelligence tersimpan: {n_breakout} breakout alert, {n_multibagger} multibagger candidate")
+    else:
+        print("⚠️ Gagal menyimpan RapidAPI market intelligence cache.")
+
+
+def load_rapidapi_market_intelligence() -> dict:
+    payload = cache_manager.get("rapidapi_market_intel", default={})
+    return payload.get("data", {}) if isinstance(payload, dict) else {}
+
+
+def get_breakout_alert_for_ticker(ticker: str) -> dict | None:
+    """Cheap indexed lookup, built fresh from load_rapidapi_market_intelligence() each call."""
+    alerts = (load_rapidapi_market_intelligence().get("breakout_alerts") or {}).get("alerts") or []
+    return next((a for a in alerts if a.get("symbol") == ticker), None)
+
+
+def get_multibagger_candidate_for_ticker(ticker: str) -> dict | None:
+    """Cheap indexed lookup, built fresh from load_rapidapi_market_intelligence() each call."""
+    candidates = (load_rapidapi_market_intelligence().get("multibagger") or {}).get("candidates") or []
+    return next((c for c in candidates if c.get("symbol") == ticker), None)
 
 
 # ==========================================

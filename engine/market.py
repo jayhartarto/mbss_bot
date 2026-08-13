@@ -53,6 +53,7 @@ import requests
 
 from engine import legacy_core as core
 from engine.cache import cache_manager
+import engine.nightly as nightly_engine
 
 # Cached per calendar day (WIB), not per call — get_ihsg_return_today() is
 # invoked once per ticker inside compute_factor_scoring, so an uncached
@@ -277,7 +278,26 @@ def get_sector_rank_info(sector: str) -> dict | None:
         return None
     ranked = list(sectors.items())  # sudah terurut kuat->lemah dari compute_market_breadth
     rank = next((i for i, (s, _) in enumerate(ranked, 1) if s == sector), None)
-    return {"sector": sector, "avg_return_pct": sectors[sector], "rank": rank, "total_sectors": len(ranked)}
+    info = {"sector": sector, "avg_return_pct": sectors[sector], "rank": rank, "total_sectors": len(ranked)}
+
+    # MBSS v2 (RapidAPI integration) — perkaya rank same-day avg-return di
+    # atas (sudah ada bertahun-tahun) dengan momentum/status/rekomendasi/
+    # foreign-flow riil dari RapidAPI, KALAU ada. Byte-identical fallback
+    # kalau data RapidAPI tidak tersedia (kuota habis, endpoint down,
+    # sektor tidak match nama) — caller lama tidak perlu berubah sama
+    # sekali, cuma dapat field TAMBAHAN kalau kebetulan ada.
+    try:
+        rapidapi_sectors = (nightly_engine.load_rapidapi_market_intelligence().get("sector_rotation") or {}).get("all_sectors") or []
+        match = next((s for s in rapidapi_sectors if s.get("sector_name") == sector), None)
+        if match:
+            info["momentum_score"] = match.get("momentum_score")
+            info["status"] = match.get("status")
+            info["recommendation"] = match.get("recommendation")
+            info["foreign_flow"] = match.get("foreign_flow")
+    except Exception:
+        pass  # graceful fallback — info tetap valid tanpa field tambahan ini
+
+    return info
 
 
 def format_sector_tag(sector: str, prefix: str = "\n   ") -> str:
@@ -286,8 +306,17 @@ def format_sector_tag(sector: str, prefix: str = "\n   ") -> str:
     /hc & /consensus): formatter satu pintu supaya tampilannya konsisten
     di mana pun dipakai. Return string kosong kalau data sektor tidak ada
     (None-safe, aman dipakai tanpa cek terpisah di tiap command).
+
+    MBSS v2 (RapidAPI integration): tambahan status/rekomendasi momentum
+    sektor di akhir baris KALAU ada di get_sector_rank_info — tidak ada
+    perubahan kalau datanya tidak tersedia. Sumber data TIDAK disebut di
+    teks (konvensi teks user-facing sesi ini) — tampil sebagai perluasan
+    natural dari label sektor yang sudah ada, bukan callout API eksternal.
     """
     info = get_sector_rank_info(sector)
     if not info:
         return ""
-    return f"{prefix}🏭 Sektor {info['sector']}: #{info['rank']}/{info['total_sectors']} terkuat ({info['avg_return_pct']:+.1f}% avg)"
+    base = f"{prefix}🏭 Sektor {info['sector']}: #{info['rank']}/{info['total_sectors']} terkuat ({info['avg_return_pct']:+.1f}% avg)"
+    if info.get("status") and info.get("recommendation"):
+        base += f" | Momentum: {info['status']} → {info['recommendation']}"
+    return base

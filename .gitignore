@@ -1,9 +1,13 @@
 .env
+.claude/settings.local.json
 *.db
 cache/
 daytrade_picks_history.json
 brokersum_cache.json
 brokersum_history.json
 failed_fetch_tracking.json
+rapidapi_idx_quota.json
+rapidapi_idx_ondemand_cache.json
+rapidapi_intraday_checkpoint.json
 __pycache__/
 *.pyc

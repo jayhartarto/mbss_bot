@@ -1,13 +1,12 @@
 {
   "permissions": {
     "allow": [
+      "Bash(git clone *)",
+      "Bash(rtk ls *)",
+      "Bash(rtk find *)",
+      "Bash(rtk read *)",
       "WebSearch",
-      "WebFetch(domain:help.pythonanywhere.com)",
-      "Bash(python -m py_compile bot.py webhook_app.py set_webhook.py)",
-      "Bash(python -m py_compile bot.py)",
-      "Bash(python -m py_compile webhook_app.py)",
-      "WebFetch(domain:www.pythonanywhere.com)",
-      "Bash(python *)"
+      "WebFetch(domain:rapidapi.com)"
     ]
   }
 }

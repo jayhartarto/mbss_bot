@@ -184,43 +184,6 @@ async def check_stock(update, context):
     # Raw deterministic data — plain Python formatting, NOT AI-generated — so every
     # number Gemini referenced above can be independently cross-checked directly.
     freshness_line = f"⚠️ {result['data_freshness_warning']}\n" if result.get("data_freshness_warning") else ""
-    brokersum_line = ""
-    if result.get("brokersum"):
-        bs = result["brokersum"]
-        source = bs.get("source", "api")
-        source_label = {"screenshot": "screenshot", "zapi": "Zapi"}.get(source, "Index Alpha")
-        adjusted_note = " [SUDAH MENGUBAH SKOR]" if result.get("brokersum_adjusted") else " [info saja, konsentrasi <10%]"
-        trend = bs.get("trend", {})
-        trend_str = ""
-        if trend.get("trend") and trend["trend"] != "tidak_ada_histori":
-            shift_note = "vs hari bursa sebelumnya" if trend.get("is_single_day_shift") else f"vs {trend.get('compared_to_date')}"
-            trend_str = f"\nTren: {trend['trend']} ({shift_note}, delta Rp{trend.get('delta_idr', 0):,})"
-        estimate_note = " (ESTIMASI dari volume x harga, bukan value asli)" if bs.get("net_foreign_flow_idr_is_estimate") else ""
-        zapi_extra = ""
-        if source == "zapi":
-            zapi_extra = (
-                f"\nBid: {bs.get('bid')} ({bs.get('bid_volume')} lembar) | "
-                f"Offer: {bs.get('offer')} ({bs.get('offer_volume')} lembar)\n"
-                f"Non-Reguler: Vol {bs.get('non_regular_volume')} | Value Rp{bs.get('non_regular_value') or 0:,}"
-            )
-        broker_detail_lines = ""
-        if bs.get("top_net_buyers") or bs.get("top_net_sellers"):
-            broker_detail_lines = (
-                f"\nTop Net Buyers: {bs.get('top_net_buyers')}\n"
-                f"Top Net Sellers: {bs.get('top_net_sellers')}"
-            )
-        elif source == "zapi":
-            broker_detail_lines = "\n(Rincian per-broker tidak tersedia dari Zapi — hanya total net foreign di atas)"
-
-        brokersum_line = (
-            f"\n💹 BROKER RIIL ({source_label}, {bs.get('lookback_days')} hari, cache):\n"
-            f"Broker Flow ALL 3D: {bs.get('net_foreign_flow_pct')}%{estimate_note} | "
-            f"Konsentrasi: {bs.get('broker_concentration_pct')}%{adjusted_note}"
-            f"{trend_str}"
-            f"{zapi_extra}\n"
-            f"Proxy Agreement: {bs.get('proxy_agreement')}"
-            f"{broker_detail_lines}"
-        )
 
     intraday_line = (
         f"Intraday: High {result['intraday_high']} | Low {result['intraday_low']}\n"
@@ -288,6 +251,59 @@ async def check_stock(update, context):
     }
     risk_label = RISK_CHARACTER_LABEL_ID.get(result.get("risk_character"), "")
 
+    # MBSS v2 (RapidAPI integration, user request) — replaces the old
+    # "💹 BROKER RIIL" block (which mixed Index Alpha/Zapi/screenshot sources,
+    # each with a different calc basis, making day-to-day numbers
+    # incomparable). Uniformly sourced from one place now
+    # (compute_check_broker_info), so this is the single broker-data section
+    # in the whole /check message — deliberately does NOT name the data
+    # source in this text, reads as a natural extension of the bot's own
+    # broker/bandar vocabulary (per this session's user-facing text
+    # convention decision).
+    broker_info = broker_engine.compute_check_broker_info(ticker)
+    brokersum_line = ""
+    if broker_info:
+        broker_parts = " | ".join(
+            f"{b['code']} [{b['tag']}] {_fmt(b['buy_avg'])}" if b.get("buy_avg") else f"{b['code']} [{b['tag']}]"
+            for b in broker_info["top_brokers"]
+        )
+        netbuy_lot = broker_info["net_buy_top3_volume"] / 100  # 1 lot = 100 lembar
+        netbuy_str = f"{netbuy_lot:,.0f} lot (Rp{broker_info['net_buy_top3_value']/1e9:.1f}M)"
+        dominance = broker_info.get("dominance_pct")
+        dominance_str = f" — {dominance:.0f}% dari total transaksi {broker_info['lookback_days']} hari terakhir" if dominance is not None else ""
+        trend = broker_info.get("dominance_trend")
+        trend_str = f"\nTren dominasi: {trend}" if trend else ""
+
+        acc = broker_info.get("accumulation") or {}
+        acc_status = str(acc.get("status", "")).upper()
+        acc_confidence = acc.get("confidence")
+        acc_line = ""
+        if acc_status and acc_confidence is not None:
+            pola = "akumulasi" if "ACC" in acc_status else ("distribusi" if "DIST" in acc_status else None)
+            if pola:
+                acc_line = f"\n↳ Pola {pola} terkonfirmasi (confidence {acc_confidence:.0f}%)"
+
+        ceiling_price_val = broker_info.get("ceiling_price")
+        ceiling_code = broker_info.get("ceiling_code")
+        acc_targets = acc.get("target_prices")
+        target = (acc.get("entry_zone") or {}).get("ideal_price")
+        if not target and isinstance(acc_targets, list) and acc_targets:
+            target = acc_targets[0].get("target")
+        ceiling_line = ""
+        if ceiling_price_val:
+            ceiling_line = f"\nCeiling: {_fmt(ceiling_price_val)} (avg tertinggi {ceiling_code})"
+            if target:
+                ceiling_line += f" | Target: {_fmt(target)} ({(target/price-1)*100:+.1f}%)"
+
+        brokersum_line = (
+            f"\n💹 BROKER INFO:\n"
+            f"Top Broker: {broker_parts}\n"
+            f"Net-buy Top-3: {netbuy_str}{dominance_str}"
+            f"{trend_str}"
+            f"{acc_line}"
+            f"{ceiling_line}"
+        )
+
     # ── Skor baris ─────────────────────────────────────────────────
     sv, sm, ss, sf = scores["value"], scores["momentum"], scores["sentiment"], scores["final"]
     skor_line = (
@@ -298,15 +314,13 @@ async def check_stock(update, context):
     )
 
     # ── Target intraday ────────────────────────────────────────────
-    # MBSS v2 (user request): SEKARANG prioritaskan broksum_250 (otomatis,
-    # cakupan 250 saham, update tiap malam) dulu — jatuh ke
-    # result["brokersum"] (screenshot manual/fetch Zapi barusan) kalau
-    # ticker di luar cakupan broksum_250 atau tidak ada broker whitelist
-    # yang net buy di situ.
-    ceiling = broker_engine.get_best_available_ceiling(ticker, nightly_engine.load_broksum_250())
-    if not ceiling and result.get("brokersum"):
-        ceiling = broker_engine.get_broker_entry_ceiling(result["brokersum"])
-    ceiling_str = f" / {_fmt(ceiling['avg_price'])}*" if ceiling else ""
+    # MBSS v2 (RapidAPI integration, user request — "ganti total"): ceiling
+    # sekarang SATU-SATUNYA sumbernya broker_info (avg tertinggi di antara
+    # top-3 net buyer), bukan lagi avg beli broker net-buy terbesar dari
+    # broksum_250 — biar cuma ada satu definisi ceiling di seluruh pesan
+    # /check, bukan dua definisi berbeda yang membingungkan.
+    ceiling_price = broker_info.get("ceiling_price") if broker_info else None
+    ceiling_str = f" / {_fmt(ceiling_price)}*" if ceiling_price else ""
 
     if it:
         above = " ▲" if it.get("entry_atas_above_price") else ""
@@ -323,8 +337,8 @@ async def check_stock(update, context):
             f"RR     : TP1=1:{it['rr_tp1']}"
             + (f"  |  TP2=1:{it['rr_tp2']}" if it.get("rr_tp2") else "") + "\n"
             f"↳ {it['entry_bawah_context']}"
-            + (f"\n* Rp{_fmt(ceiling['avg_price'])} = avg beli {ceiling['broker_label']} {ceiling['code']} "
-               f"({ceiling['share_pct']}% dari net-buy teridentifikasi) — stopper chase, bukan level teknikal" if ceiling else "")
+            # Ceiling explanation moved to the "💹 BROKER INFO" block below —
+            # no footnote here anymore, avoids explaining the same number twice.
         )
     else:
         tgt = result.get("targets", {})
