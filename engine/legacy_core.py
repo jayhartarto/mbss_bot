@@ -11,6 +11,7 @@ import datetime
 import sqlite3
 import requests
 import xml.etree.ElementTree as ET
+import email.utils
 
 # NOTE (MBSS v2 refactor): this file now lives at engine/legacy_core.py, one
 # level below the project root where bot.py, .env, portfolio.json, the
@@ -512,6 +513,55 @@ def fetch_company_news(ticker, company_name, max_items=5):
     except Exception as e:
         print(f"⚠️ Failed to fetch company news for {ticker}: {e}")
         return []
+
+
+def enrich_news_with_price_reaction(news_items: list, hist: pd.DataFrame, current_price: float) -> list:
+    """
+    MBSS v2 (user request — real case: /check NELY showed a Rp2T
+    acquisition headline with no way to tell if the price had already
+    reacted to it, same question for GIAA's Pelita Air acquisition news).
+    For each headline, compute price movement since ITS publish date using
+    OHLCV we already hold locally (get_ohlcv_smart's SQLite EOD cache) —
+    zero extra API cost, purely a local lookup — so both the person and
+    Gemini can see "has the market already moved on this, or is it still
+    fresh" instead of guessing from the headline text alone.
+
+    Adds a "price_reaction" key ({"days_ago": int, "price_change_since_pct":
+    float}) to headlines whose pubDate we can parse AND that falls within
+    `hist`'s window. Silently omits it otherwise (unparseable date, or
+    headline older than the history window) — no crash, no fabricated
+    numbers, that headline just shows without reaction context.
+
+    CAVEAT: pubDate is when Google News surfaced this ARTICLE, not
+    necessarily the exact date of the underlying event — a republished or
+    follow-up piece can carry a recent pubDate for old news. This is
+    "price behavior since the article appeared", a strong proxy, not a
+    guarantee of the event's true timing.
+    """
+    if hist is None or hist.empty:
+        return news_items
+
+    enriched = []
+    for item in news_items:
+        item = dict(item)
+        published = item.get("published")
+        if published and current_price:
+            try:
+                pub_date = email.utils.parsedate_to_datetime(published).date()
+                # Ticker mula pertama di/setelah tanggal artikel — close
+                # paling awal yang mungkin sudah mencerminkan reaksi pasar.
+                on_or_after = hist.index[hist.index.date >= pub_date]
+                if len(on_or_after) > 0:
+                    price_then = float(hist.loc[on_or_after[0], "Close"])
+                    if price_then > 0:
+                        item["price_reaction"] = {
+                            "days_ago": (datetime.datetime.now(WIB).date() - pub_date).days,
+                            "price_change_since_pct": round((current_price - price_then) / price_then * 100, 1),
+                        }
+            except Exception:
+                pass  # pubDate tidak bisa di-parse — headline tetap tampil, tanpa konteks reaksi harga
+        enriched.append(item)
+    return enriched
 
 
 def fetch_recent_corporate_actions(ticker, months_back=12):
@@ -3963,8 +4013,15 @@ EXACTLY as given, verbatim, as the recommendation line for that stock.
 NEWS DISMISSAL RULE: if 'recent_news' mentions a large investor, strategic partner, or
 insider SELLING or DIVESTING shares, that is a genuine bearish signal. Do NOT dismiss
 it with vague, unfalsifiable reasoning like "this is already priced in by the market"
-or "the market has absorbed this" — that is not something you can actually verify from
-the data you have, and stating it as if it were a fact is a serious credibility failure.
+or "the market has absorbed this" UNLESS that specific headline actually carries a
+'price_reaction' field (days_ago + price_change_since_pct, computed from real OHLCV
+history since the article's publish date) — that is real, verifiable data, and you
+SHOULD use it to say whether the move looks already reflected in price (large move
+since publish) or still fresh/unreacted (flat since publish). For any headline WITHOUT
+a 'price_reaction' field, you have no way to verify "priced in" either way — saying it
+anyway (without the data to back it) is still a serious credibility failure. Also note
+'price_reaction' tracks price action since the ARTICLE's publish date, not necessarily
+the exact date of the underlying event — treat it as a strong proxy, not a guarantee.
 If real news indicates insider/large-holder selling, mention it as a real caution factor,
 and if your own CMF/OBV signals disagree with that news (e.g. they show accumulation
 while news says a major holder is selling), explicitly say so as a genuine open tension

@@ -115,6 +115,7 @@ async def check_stock(update, context):
 
     # Intraday targets — entry range/TP1/TP2/SL yang lebih presisi dari data live
     # + history SQLite, TERPISAH dari scoring['targets'] yang dipakai /myportfolio dan winrate
+    hist = None
     try:
         hist = core.get_ohlcv_smart(ticker, limit=60)
         result["intraday_targets"] = await asyncio.to_thread(
@@ -172,8 +173,12 @@ async def check_stock(update, context):
     # actually surface corporate actions like buybacks or earnings releases,
     # unlike the general market-wide news used in the daily briefs.
     company_news = await asyncio.to_thread(core.fetch_company_news, ticker, result.get("name", ticker))
+    # MBSS v2 (user request — real case: NELY/GIAA acquisition headlines):
+    # anggota "sudah di-react market atau belum" dari harga sejak tanggal
+    # artikel, pakai hist yang sudah di-fetch di atas (zero extra API cost).
+    company_news = core.enrich_news_with_price_reaction(company_news, hist, result["price"])
     corporate_actions = await asyncio.to_thread(core.fetch_recent_corporate_actions, ticker)
-    result["recent_news"] = [h["title"] for h in company_news]
+    result["recent_news"] = company_news  # [{"title", "published", "price_reaction"?}, ...] — bukan cuma title lagi
     result["recent_dividends"] = corporate_actions["recent_dividends"]
     result["recent_splits"] = corporate_actions["recent_splits"]
 
@@ -484,10 +489,22 @@ async def check_stock(update, context):
     # call tiap /check) tapi TIDAK PERNAH ditampilkan di manapun — user
     # bayar biaya fetch-nya tanpa pernah lihat hasilnya. Sekarang benar-benar
     # ditampilkan, maksimal 3 judul terbaru.
+    # MBSS v2 (user request — real case: NELY/GIAA acquisition headlines):
+    # tampilkan reaksi harga sejak tanggal artikel ini muncul (kalau
+    # kehitung), supaya kelihatan langsung apakah beritanya kemungkinan
+    # sudah "priced in" atau masih belum direspons pasar — bukan cuma
+    # dugaan dari narasi Gemini.
     news_block = ""
     if result.get("recent_news"):
-        news_lines = "\n".join(f"• {title}" for title in result["recent_news"][:3])
-        news_block = f"📰 Berita Terkini\n{news_lines}"
+        news_lines = []
+        for item in result["recent_news"][:3]:
+            reaction = item.get("price_reaction")
+            reaction_str = (
+                f" ({reaction['days_ago']} hari lalu, harga {reaction['price_change_since_pct']:+.1f}% sejak saat itu)"
+                if reaction else ""
+            )
+            news_lines.append(f"• {item['title']}{reaction_str}")
+        news_block = f"📰 Berita Terkini\n" + "\n".join(news_lines)
 
     msg1 = "\n".join(filter(None, [
         f"{result.get('name', ticker)} ({ticker})",
