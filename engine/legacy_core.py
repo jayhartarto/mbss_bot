@@ -6435,7 +6435,12 @@ async def run_opening_dynamics(context: ContextTypes.DEFAULT_TYPE):
 
         portfolio = load_portfolio()
         held_tickers = set(portfolio.get("positions", {}).keys())
-        sharia_universe = fetch_online_sharia_list()
+        # Filter lewat whitelist cache likuiditas bulanan (sama seperti run_morning_brief)
+        # — tanpa ini, scan jalan ke seluruh ~450 ticker ISSI mentah tiap kali, yang
+        # memicu throttling Yahoo Finance dan bikin ticker likuid pun ikut gagal
+        # ("possibly delisted") padahal sebenarnya cuma kena rate-limit.
+        raw_sharia_universe = fetch_online_sharia_list()
+        sharia_universe = set(await asyncio.to_thread(load_or_build_whitelist, list(raw_sharia_universe)))
 
         # Macro backdrop shown in the first 1-2 sentences.
         macro_context = await asyncio.to_thread(market_engine.fetch_macro_context)
