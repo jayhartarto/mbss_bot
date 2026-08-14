@@ -343,8 +343,20 @@ async def run_nightly_full_scan(context):
         # 389 ticker (naik dari 212) butuh headroom lebih; 50 menit juga
         # sekarang cocok dengan pesan timeout di except block bawah (di kode
         # lama pesannya sudah bilang "50 menit" tapi timeout aslinya cuma 30).
+        # MBSS v2 (user request, quota conservation): fetch_tickers_scored_with_cache
+        # (bukan fetch_all_tickers_scored langsung) — kalau /eodscan dipanggil
+        # ulang di hari trading yang SAMA (dev testing, manual re-run), ticker
+        # yang SUDAH ke-score di run sebelumnya hari ini (marker + formula
+        # version cocok, lihat load_daily_scan_cache) di-reuse dari cache,
+        # bukan compute_factor_scoring ulang — itu masih hit yfinance .info()
+        # (PE/PB/dividend) per ticker TANPA pengecekan tanggal sama sekali,
+        # beda dari OHLCV yang sudah di-filter di atas. Untuk run PERTAMA di
+        # hari trading baru, perilakunya SAMA PERSIS seperti sebelumnya (cache
+        # kemarin otomatis dianggap basi oleh trading_day_marker, full rescan
+        # tetap jalan) — no-op change untuk kasus normal, cuma menghindari
+        # kerja ulang percuma untuk re-run di hari yang sama.
         results, skip_reasons = await asyncio.wait_for(
-            asyncio.to_thread(fetch_all_tickers_scored, universe_tickers), timeout=3000
+            asyncio.to_thread(fetch_tickers_scored_with_cache, universe_tickers), timeout=3000
         )
         save_daily_scan_cache(results)
         core.update_scan_metadata(len(results), len(skip_reasons), latest_marker, universe_name=universe_label)

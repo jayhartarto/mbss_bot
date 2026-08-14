@@ -2641,7 +2641,7 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
 # new factors, etc). This makes it visible when a score difference between two runs is
 # due to a real formula change vs. genuine day-to-day market movement — comparing scores
 # across different versions isn't apples-to-apples.
-SCORING_FORMULA_VERSION = "3.16.0"  # v3.16.0: Bias Bandar (studi kasus manual TMPO/MDIA/JGLE/DOOH/ICON) — klasifikasi 5 kategori dari histori harian broker whitelist (AKUMULASI SEGAR/PULLBACK DIDUKUNG/DISTRIBUSI/AKUMULASI BASI/TANPA DUKUNGAN), sekarang jadi PENALTI SKOR nyata (bukan cuma tag): DISTRIBUSI -1.5 (atau -3.0 kalau digabung posisi di atas MA50/extended), TANPA DUKUNGAN -1.0 (atau -2.0 kalau extended). Histori harian baru mulai terkumpul dari sekarang, TIDAK retroaktif — butuh minimal 2 hari data sebelum klasifikasi genuine (sebelum itu "BELUM CUKUP DATA", tidak kena penalti apa pun).
+SCORING_FORMULA_VERSION = "3.17.0"  # v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
 
 
 # NOTE (MBSS v2 refactor, Sprint 2 Tier 1.1): compute_factor_scoring moved to
