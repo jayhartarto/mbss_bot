@@ -1609,41 +1609,23 @@ async def strong_buy_command(update, context):
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
 
-async def consensus_command(update, context):
+def compute_consensus_candidates(scored: dict, broksum_data: dict) -> tuple[list, list]:
     """
-    /consensus — saham yang muncul sebagai kandidat POSITIF di >=2 dari 5
-    lensa screening independen kita (MBSS v2, user request, tindak lanjut
-    diskusi positioning /hc vs /screendaytrade + integrasi smart money):
-    HIGH CONVICTION (pola chart), STRONG_BUY (verdict inti value/momentum/
-    sentimen), SCREENDAYTRADE (lane timing entry), GPTPICK (shortlist
-    momentum/likuiditas/RR), SMART MONEY (broker whitelist net-buy dari
-    broksum_250).
+    Shared cross-tool tagging logic behind /consensus, extracted so /tanya can
+    reuse the SAME "which tools agree on this ticker" computation instead of
+    re-deriving a parallel version (REUSE daripada bikin formula baru lagi).
 
-    SEMUA murni dari cache /eodscan (TIDAK fetch live apa pun) — lane
-    screendaytrade & skor gptpick dihitung ulang di sini dari data cache
-    (keduanya EOD-computable, tidak butuh data live, sudah dikonfirmasi
-    sebelumnya), jadi instan.
-
-    Kandidat yang lolos dikirim ke Gemini untuk ringkasan naratif KENAPA
-    beberapa lensa berbeda ini kompak, plus risiko dari data mentah —
-    bukan Gemini yang menentukan lolos/tidak, itu murni deterministik
-    Python duluan.
+    Returns (qualifying, multi_broker_lines):
+    - qualifying: tickers tagged by >=2 independent tools (HIGH CONVICTION,
+      STRONG_BUY, SCREENDAYTRADE lane, GPTPICK, MULTIBAGGER, SMART MONEY),
+      each dict is the original scored record + "_consensus_tools"/"_multibagger",
+      sorted by tool-count then final score (both descending).
+    - multi_broker_lines: [(net_value_idr, "TICKER: broker detail"), ...] for
+      tickers net-bought by >1 whitelist broker AND tagged by >=1 other tool,
+      sorted by net value descending.
     """
-    # MBSS v2 (user request): tampilkan data LAMA dengan keterangan jelas,
-    # bukan tolak total — sama seperti /hc.
-    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
-    if not scored:
-        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
-        return
-
-    status_msg = f"🔗 Mencari konsensus lintas-tool dari {len(scored)} kandidat cache..."
-    if staleness_note:
-        status_msg = f"{staleness_note}\n{status_msg}"
-    await core.safe_reply(update.message, status_msg)
-
     GOOD_SDT_LANES = {"PRIORITY FRESH", "PRIORITY CONT"}  # SECONDARY WATCH/LOW EDGE sengaja TIDAK dihitung (lihat revisi minggu lalu)
     GPTPICK_MIN_SCORE = 65  # kira-kira ambang bawah yang biasanya masuk top 3-5 nyata
-    broksum_data = nightly_engine.load_broksum_250()  # MBSS v2 (user request): smart-money jadi dimensi ke-5
 
     qualifying = []
     # MBSS v2 (user request — irisan lintas-tool buat filter section
@@ -1732,6 +1714,45 @@ async def consensus_command(update, context):
             parts = ", ".join(f"{a['code']} @ avg {a['buy_avg_price']:.0f}" for a in accum)
             multi_broker_lines.append((sum(a["net_value_idr"] for a in accum), f"{ticker}: {parts}"))
     multi_broker_lines.sort(key=lambda x: x[0], reverse=True)
+
+    qualifying.sort(key=lambda r: (len(r["_consensus_tools"]), r.get("scores", {}).get("final", 0)), reverse=True)
+    return qualifying, multi_broker_lines
+
+
+async def consensus_command(update, context):
+    """
+    /consensus — saham yang muncul sebagai kandidat POSITIF di >=2 dari 5
+    lensa screening independen kita (MBSS v2, user request, tindak lanjut
+    diskusi positioning /hc vs /screendaytrade + integrasi smart money):
+    HIGH CONVICTION (pola chart), STRONG_BUY (verdict inti value/momentum/
+    sentimen), SCREENDAYTRADE (lane timing entry), GPTPICK (shortlist
+    momentum/likuiditas/RR), SMART MONEY (broker whitelist net-buy dari
+    broksum_250).
+
+    SEMUA murni dari cache /eodscan (TIDAK fetch live apa pun) — lane
+    screendaytrade & skor gptpick dihitung ulang di sini dari data cache
+    (keduanya EOD-computable, tidak butuh data live, sudah dikonfirmasi
+    sebelumnya), jadi instan.
+
+    Kandidat yang lolos dikirim ke Gemini untuk ringkasan naratif KENAPA
+    beberapa lensa berbeda ini kompak, plus risiko dari data mentah —
+    bukan Gemini yang menentukan lolos/tidak, itu murni deterministik
+    Python duluan.
+    """
+    # MBSS v2 (user request): tampilkan data LAMA dengan keterangan jelas,
+    # bukan tolak total — sama seperti /hc.
+    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
+    if not scored:
+        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
+        return
+
+    status_msg = f"🔗 Mencari konsensus lintas-tool dari {len(scored)} kandidat cache..."
+    if staleness_note:
+        status_msg = f"{staleness_note}\n{status_msg}"
+    await core.safe_reply(update.message, status_msg)
+
+    broksum_data = nightly_engine.load_broksum_250()  # MBSS v2 (user request): smart-money jadi dimensi ke-5
+    qualifying, multi_broker_lines = compute_consensus_candidates(scored, broksum_data)
     multi_broker_block = (
         "\n\n🏦 Multi-broker net-buy (bandarmology terkuat — >1 broker whitelist kompak, irisan tool lain):\n"
         + "\n".join(line for _, line in multi_broker_lines[:5])
@@ -1742,8 +1763,6 @@ async def consensus_command(update, context):
         early_buttons = core.build_check_buttons([line.split(":")[0] for _, line in multi_broker_lines[:5]])
         await core.safe_reply(update.message, msg + multi_broker_block, reply_markup=early_buttons)
         return
-
-    qualifying.sort(key=lambda r: (len(r["_consensus_tools"]), r.get("scores", {}).get("final", 0)), reverse=True)
 
     # Kunci ke winrate juga — source="consensus", supaya bisa diukur apakah
     # "beberapa tool setuju" genuinely lebih akurat dari 1 tool sendirian.

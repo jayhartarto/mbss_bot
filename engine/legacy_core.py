@@ -411,6 +411,7 @@ import commands.scan as commands_scan
 import commands.misc as commands_misc
 import commands.portfolio as commands_portfolio
 import commands.check as commands_check
+import commands.chat as commands_chat
 import engine.scoring as scoring_engine
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import BadRequest
@@ -849,6 +850,60 @@ def reduce_position(ticker: str, lots: int, sell_price: float):
         f"{pnl_label} direalisasikan: Rp{abs(realized_pnl):,.0f}\n"
         f"Cash sekarang: Rp{portfolio['cash']:,.0f}"
     )
+
+
+# ==========================================
+# 💬 /tanya CHAT HISTORY STORAGE (simple local JSON file, per chat_id)
+# ==========================================
+TANYA_HISTORY_FILE = os.path.join(PROJECT_ROOT, "tanya_history.json")
+TANYA_HISTORY_MAX_TURNS = 16  # 8 user+model pairs — bounds how much old conversation gets resent to Gemini each turn
+
+
+def load_tanya_history(chat_id) -> list:
+    """Returns [{"role": "user"|"model", "text": ...}, ...] for this chat, oldest first."""
+    if not os.path.exists(TANYA_HISTORY_FILE):
+        return []
+    try:
+        with open(TANYA_HISTORY_FILE, "r") as f:
+            data = json.load(f)
+        return data.get(str(chat_id), [])
+    except Exception as e:
+        print(f"⚠️ Failed to read tanya history file: {e}")
+        return []
+
+
+def save_tanya_turn(chat_id, question: str, answer: str):
+    """Appends this Q&A pair to the chat's history, trimmed to TANYA_HISTORY_MAX_TURNS."""
+    data = {}
+    if os.path.exists(TANYA_HISTORY_FILE):
+        try:
+            with open(TANYA_HISTORY_FILE, "r") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"⚠️ Failed to read tanya history file before save: {e}")
+            data = {}
+
+    key = str(chat_id)
+    history = data.get(key, [])
+    history.append({"role": "user", "text": question})
+    history.append({"role": "model", "text": answer})
+    data[key] = history[-TANYA_HISTORY_MAX_TURNS:]
+
+    with open(TANYA_HISTORY_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def reset_tanya_history(chat_id):
+    if not os.path.exists(TANYA_HISTORY_FILE):
+        return
+    try:
+        with open(TANYA_HISTORY_FILE, "r") as f:
+            data = json.load(f)
+        data.pop(str(chat_id), None)
+        with open(TANYA_HISTORY_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Failed to reset tanya history: {e}")
 
 
 # ==========================================
@@ -4257,6 +4312,44 @@ OUTPUT STYLE:
 - If outside market hours, say the signal is EOD-only and avoid pretending it is live.
 """
 
+TANYA_INSTRUCTION = BASE_SYSTEM_INSTRUCTION + """
+Context: This is /tanya, a freeform conversational Q&A command (MBSS v2, user
+request) — the user asks natural questions like "saham apa yang lebih baik
+sekarang?", "bandingkan TICKER_A vs TICKER_B", or "entry sekarang di harga X
+volume Y, masih bagus atau sudah telat?". Unlike the other briefs, there is
+NO fixed output template here — answer the actual question asked, directly
+and conversationally, in Indonesian.
+
+You are given:
+- CURRENT MARKET DATA: a JSON bundle built fresh for THIS turn — cross-tool
+  consensus picks (which independent screening lenses agree on which
+  tickers, and why), HIGH CONVICTION top picks, the user's portfolio
+  (positions/watchlist/cash), and — if the user's question named specific
+  tickers — live intraday data fetched just now for those tickers.
+- Prior turns in this same conversation (if any), for continuity — the user
+  may refer back to something asked earlier ("yang tadi", "saham itu").
+
+Rules specific to this command:
+- Always answer the CURRENT question using the CURRENT MARKET DATA block —
+  never rely on numbers from earlier turns in the conversation, since prices
+  and scores can change between messages.
+- If the user names a ticker that is NOT present anywhere in the provided
+  data (not in consensus/HC picks, not in portfolio, not in live-fetched
+  data), say plainly that you don't have data for it right now — don't
+  guess or fabricate figures for it.
+- If comparing two or more tickers, structure the comparison around what the
+  DATA actually shows for each (score, action, RR, consensus tools, risk
+  flags) — don't just give a vibes-based preference.
+- If the question is about entry timing at a specific price/volume the user
+  supplied, weigh that against the live/cached technicals provided (VWAP,
+  trigger, invalidation, volume pace, RSI/ADX/CMF) rather than ignoring the
+  user's numbers.
+- Keep answers conversational and reasonably short — this is chat, not a
+  formal brief. A few sentences is usually enough; only go longer if the
+  question genuinely needs a multi-point comparison.
+- No Markdown, no rigid headers — plain conversational Indonesian text.
+"""
+
 
 def get_portfolio_reasoning_and_synthesis(combined_data: list, portfolio_context: str) -> dict:
     """
@@ -4345,6 +4438,38 @@ def ask_gemini_to_analyze(processed_stocks, system_instruction=MORNING_BRIEF_INS
         except Exception as e:
             last_error = e
             print(f"⚠️ Gemini call failed (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                time.sleep(3 * attempt)  # 3s, 6s backoff
+
+    raise RuntimeError(f"Gemini API failed after {max_retries} attempts: {last_error}")
+
+
+def ask_gemini_chat(history_turns: list, question: str, context_json, system_instruction: str = TANYA_INSTRUCTION, max_retries: int = 3) -> str:
+    """
+    Multi-turn Gemini call behind /tanya. `history_turns` is prior
+    [{"role": "user"|"model", "text": ...}, ...] turns from THIS conversation
+    (see load_tanya_history/save_tanya_turn) — sent as-is so Gemini can
+    follow references like "saham itu" back to earlier turns.
+
+    Fresh market-data context is attached ONLY to the current turn, not
+    re-sent for old turns — prices/scores can change between messages within
+    the same conversation, and old turns already got their own context when
+    they were first answered.
+    """
+    contents = [{"role": t["role"], "parts": [{"text": t["text"]}]} for t in history_turns]
+    current_prompt = (
+        f"CURRENT MARKET DATA (use this, not memory from earlier turns, for any numbers):\n{context_json}\n\n"
+        f"USER QUESTION: {question}"
+    )
+    contents.append({"role": "user", "parts": [{"text": current_prompt}]})
+
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return _gemini_rest(contents, system_instruction=system_instruction)
+        except Exception as e:
+            last_error = e
+            print(f"⚠️ Gemini chat call failed (attempt {attempt}/{max_retries}): {e}")
             if attempt < max_retries:
                 time.sleep(3 * attempt)  # 3s, 6s backoff
 
@@ -6592,6 +6717,8 @@ def build_app():
     app.add_handler(CommandHandler(["glossary", "istilah"], commands_misc.show_glossary))
     app.add_handler(CommandHandler("rebuildwhitelist", commands_misc.rebuild_whitelist_command))
     app.add_handler(CommandHandler(["check", "cek"], commands_check.check_stock))
+    app.add_handler(CommandHandler("tanya", commands_chat.tanya_command))
+    app.add_handler(CommandHandler("tanyareset", commands_chat.tanya_reset_command))
     app.add_handler(CallbackQueryHandler(commands_check.skip_brokersum_callback, pattern="^skip_brokersum$"))
     app.add_handler(CallbackQueryHandler(commands_check.quick_check_callback, pattern="^qchk_"))
     app.add_handler(CallbackQueryHandler(commands_portfolio.order_clear_callback, pattern="^orderclear_"))
