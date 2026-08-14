@@ -256,6 +256,24 @@ async def check_stock(update, context):
     }
     risk_label = RISK_CHARACTER_LABEL_ID.get(result.get("risk_character"), "")
 
+    # MBSS v2 (user request — diskusi Bollinger Bands): label human-readable
+    # untuk bb_signal_note (lihat compute_factor_scoring) — band_walking_*
+    # SENGAJA ditandai "BUKAN sinyal mantul/capek", supaya user tidak salah
+    # baca band walking sebagai reversal (persis kekhawatiran user waktu
+    # diskusi: "kekuatan arus bisa menabrak aturan ini").
+    BB_SIGNAL_LABEL_ID = {
+        "near_lower_band_bounce_candidate": "📉 Dekat lower Bollinger Band — kandidat mantul (mean-reversion)",
+        "near_upper_band_caution": "📈 Dekat upper Bollinger Band — waspada potensi mantul turun",
+        "band_walking_down": "⬇️ Band walking (downtrend kuat) — pelemahan berlanjut, BUKAN sinyal mantul",
+        "band_walking_up": "⬆️ Band walking (uptrend kuat) — kelanjutan tren, BUKAN sinyal capek",
+    }
+    bb_line = ""
+    bb_note_text = BB_SIGNAL_LABEL_ID.get(result.get("bb_signal_note"))
+    if bb_note_text:
+        bb_line += f"\n{bb_note_text}"
+    if result.get("bollinger_squeeze"):
+        bb_line += f"\n🎯 Bollinger squeeze (bandwidth persentil {result.get('bollinger_bandwidth_percentile', '-')}) — volatilitas terkompresi, potensi pra-breakout (arah belum pasti)"
+
     # MBSS v2 (RapidAPI integration, user request) — replaces the old
     # "💹 BROKER RIIL" block (which mixed Index Alpha/Zapi/screenshot sources,
     # each with a different calc basis, making day-to-day numbers
@@ -298,6 +316,7 @@ async def check_stock(update, context):
         f"{_icon_score(sv)} Nilai {sv}  |  "
         f"{_icon_score(sm)} Momentum {sm}  |  "
         f"{_icon_score(ss)} Sentimen {ss}"
+        f"{bb_line}"
     )
 
     # ── Target intraday ────────────────────────────────────────────

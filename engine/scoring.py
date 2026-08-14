@@ -1324,6 +1324,84 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     else:
         current_cmf = None
 
+    # --- Bollinger Band position + squeeze (MBSS v2, user request — diskusi
+    # Investopedia Bollinger Bands). Dua sinyal terpisah dari band yang sama:
+    #
+    # 1) Band touch (bounce/waspada) — sentuh lower/upper band adalah sinyal
+    #    mean-reversion KLASIK, TAPI cuma valid di kondisi ranging/lemah — di
+    #    trend KUAT harga bisa "band walking" (nempel di satu sisi band
+    #    berhari-hari, itu justru KELANJUTAN trend, bukan reversal). Gate
+    #    pakai current_adx (cutoff 25, sama seperti format_adx_label "tren
+    #    kuat") + is_below_ema21 (arah trend) supaya tidak salah kaprah treat
+    #    band-walking sebagai sinyal reversal:
+    #    - ADX<25 (ranging) ATAU arah trend BERLAWANAN dari band yang
+    #      disentuh (mis. dekat upper band tapi is_below_ema21=True) ->
+    #      mean-reversion genuinely lebih kredibel -> adjustment penuh ke
+    #      sentiment_score.
+    #    - ADX>=25 DAN arah trend SEARAH band yang disentuh -> band walking,
+    #      bukan reversal -> adjustment ditekan ke 0.
+    #    Konfirmasi tambahan dari CMF (ambang 0.15, sama dengan cmf_adjustment
+    #    di atas) mengurangi keyakinan adjustment kalau arus uang masih kuat
+    #    melawan arah reversal yang diharapkan.
+    #
+    # 2) Squeeze (bandwidth di persentil rendah histori ~6 bulan) — sinyal
+    #    PRA-breakout, muncul SEBELUM harga mulai bergerak. SENGAJA TIDAK
+    #    dijadikan kriteria di compute_high_conviction_score: kandidat yang
+    #    lagi squeeze biasanya belum breakout_close_confirmed/near_high sama
+    #    sekali (masih konsolidasi di tengah), jadi menggabungkannya ke
+    #    threshold HC yang mensyaratkan >=70% kriteria breakout-SUDAH-terjadi
+    #    justru membuatnya nyaris tidak pernah lolos — pick yang muncul dari
+    #    scanner sering kali memang sudah terlanjur naik (user observation).
+    #    Disimpan sebagai field informasi murni (bollinger_squeeze,
+    #    bollinger_bandwidth_percentile) — TIDAK mengubah skor apa pun —
+    #    supaya bisa ditampilkan terpisah sebagai watchlist pra-breakout
+    #    (pola sama seperti AKUMULASI/PRA-BREAKOUT di /hc).
+    bb_signal_note = None
+    bollinger_squeeze = None
+    bollinger_bandwidth_percentile = None
+    if len(close_prices) >= 20:
+        _bb_sma20_series = close_prices.rolling(20).mean()
+        _bb_std20_series = close_prices.rolling(20).std()
+        _bb_sma20 = _bb_sma20_series.iloc[-1]
+        _bb_std20 = _bb_std20_series.iloc[-1]
+        bb_upper_val = _bb_sma20 + 2 * _bb_std20
+        bb_lower_val = _bb_sma20 - 2 * _bb_std20
+        bb_width = bb_upper_val - bb_lower_val
+
+        _bandwidth_series = ((_bb_sma20_series + 2 * _bb_std20_series) - (_bb_sma20_series - 2 * _bb_std20_series)) / _bb_sma20_series
+        _bandwidth_history = _bandwidth_series.dropna().tail(core.MIN_HISTORY_FOR_ADAPTIVE)
+        if len(_bandwidth_history) >= 20:
+            current_bandwidth = _bandwidth_history.iloc[-1]
+            bandwidth_pct_rank = core.percentile_rank(_bandwidth_history.iloc[:-1], current_bandwidth)
+            bollinger_bandwidth_percentile = round(bandwidth_pct_rank * 100, 1)
+            bollinger_squeeze = bool(bandwidth_pct_rank <= 0.20)
+
+        if bb_width > 0:
+            percent_b = (current_price - bb_lower_val) / bb_width
+            strong_trend = bool(current_adx >= 25)
+            trend_bullish = not is_below_ema21
+            bb_adjustment = 0.0
+            if percent_b <= 0.1:  # dekat/menembus lower band
+                band_walking_down = strong_trend and is_below_ema21
+                if not band_walking_down:
+                    bb_adjustment = 1.5
+                    if current_cmf is not None and not pd.isna(current_cmf) and current_cmf < -0.15:
+                        bb_adjustment = 0.5  # arus jual masih dominan, kurangi keyakinan bounce
+                    bb_signal_note = "near_lower_band_bounce_candidate"
+                else:
+                    bb_signal_note = "band_walking_down"
+            elif percent_b >= 0.9:  # dekat/menembus upper band
+                band_walking_up = strong_trend and trend_bullish
+                if not band_walking_up:
+                    bb_adjustment = -1.5
+                    if current_cmf is not None and not pd.isna(current_cmf) and current_cmf > 0.15:
+                        bb_adjustment = -0.5  # arus beli masih kuat, kurangi urgency waspada
+                    bb_signal_note = "near_upper_band_caution"
+                else:
+                    bb_signal_note = "band_walking_up"
+            if bb_adjustment:
+                sentiment_score = max(1.0, min(10.0, sentiment_score + bb_adjustment))
+
     # OBV divergence: the key check for "price looks fine but volume flow disagrees"
     obv_series = core.calculate_obv(close_prices, volumes)
     obv_divergence = core.detect_obv_divergence(close_prices, obv_series)
@@ -1493,6 +1571,9 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "is_below_ema21": is_below_ema21,
         "adx": round(current_adx, 1),
         "is_weak_trend": is_weak_trend,
+        "bollinger_squeeze": bollinger_squeeze,  # True kalau bandwidth BB di persentil <=20 histori ~6bln — sinyal PRA-breakout, lihat catatan di atas
+        "bollinger_bandwidth_percentile": bollinger_bandwidth_percentile,
+        "bb_signal_note": bb_signal_note,  # near_lower_band_bounce_candidate / near_upper_band_caution / band_walking_up / band_walking_down / None
         "macd_cross_days_ago": macd_cross_days_ago,
         "macd_cross_direction": macd_cross_direction,
         "is_new_high_20d": is_new_high_20d,

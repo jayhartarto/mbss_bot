@@ -1141,8 +1141,33 @@ async def high_conviction_command(update, context):
             )
         lines.append("⚠️ Belum ada konfirmasi harga — risiko timing lebih tinggi dari kandidat HC di atas.")
 
+    # MBSS v2 (user request — diskusi Bollinger Bands): blok TAMBAHAN lain,
+    # independen juga dari 8-kriteria HC — kandidat squeeze (bandwidth BB di
+    # persentil rendah, lihat compute_factor_scoring) sering kali BELUM
+    # breakout_close_confirmed/near_high sama sekali (masih konsolidasi di
+    # tengah), jadi kalau ditunggu sampai lolos kriteria HC penuh, momennya
+    # sering sudah lewat (user observation: pick yang muncul dari scanner
+    # sering kali memang sudah terlanjur naik). Murni baca field yang sudah
+    # dihitung di /eodscan, tidak fetch/hitung ulang apa pun.
+    squeeze_candidates = [
+        r for r in scored.values()
+        if r.get("ticker") not in hc_tickers and r.get("bollinger_squeeze")
+    ]
+    squeeze_candidates.sort(key=lambda r: r.get("bollinger_bandwidth_percentile", 100))
+    squeeze_candidates = squeeze_candidates[:5]
+
+    if squeeze_candidates:
+        lines.append(f"\n🎯 SQUEEZE / PRA-BREAKOUT — {len(squeeze_candidates)} kandidat (volatilitas terkompresi, belum tentu breakout)\n")
+        for i, r in enumerate(squeeze_candidates, 1):
+            s = r.get("scores", {})
+            lines.append(
+                f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f} | "
+                f"bandwidth BB persentil {r.get('bollinger_bandwidth_percentile', '-')}"
+            )
+        lines.append("⚠️ Squeeze cuma tanda volatilitas lagi rendah — TIDAK menjamin arah breakout (bisa naik atau turun), risiko timing lebih tinggi dari kandidat HC di atas.")
+
     lines.append("\nDetail lengkap: /check TICKER")
-    all_tickers = [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates]
+    all_tickers = [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates] + [r["ticker"] for r in squeeze_candidates]
     buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
