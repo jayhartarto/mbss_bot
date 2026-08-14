@@ -303,7 +303,26 @@ async def run_nightly_full_scan(context):
         universe_label = "ISSI eligible (Yahoo whitelist)"
         print(f"🌙 Nightly full scan dimulai: {len(universe_tickers)} ticker {universe_label}...")
 
-        db_stats_payload = await asyncio.to_thread(core.populate_from_yfinance, universe_tickers, "10d", 50)
+        # MBSS v2 (user request, quota conservation): filter ke ticker yang
+        # BELUM punya bar hari ini di SQLite lokal sebelum bulk-fetch yfinance
+        # — /eodscan yang dipanggil berkali-kali di hari yang sama (dev
+        # testing, manual re-run) sebelumnya tetap fetch SEMUA ~389 ticker
+        # lagi lewat populate_from_yfinance (beda dari get_ohlcv_smart yang
+        # dipakai /check, itu SUDAH per-ticker skip kalau up-to-date — ini
+        # jalur bulk terpisah yang belum punya pengecekan sama). Sekarang
+        # cuma yang genuinely kurang yang di-fetch.
+        def _filter_tickers_needing_refresh():
+            today_marker = core.get_current_trading_day_close_marker()
+            return [t for t in universe_tickers if core.get_latest_daily_date_in_db(t) != today_marker]
+
+        tickers_needing_refresh = await asyncio.to_thread(_filter_tickers_needing_refresh)
+        already_fresh = len(universe_tickers) - len(tickers_needing_refresh)
+        if already_fresh:
+            print(f"📋 OHLCV: {already_fresh}/{len(universe_tickers)} ticker sudah up-to-date hari ini, skip — fetch cuma {len(tickers_needing_refresh)} yang kurang.")
+        db_stats_payload = (
+            await asyncio.to_thread(core.populate_from_yfinance, tickers_needing_refresh, "10d", 50)
+            if tickers_needing_refresh else {}
+        )
         db_stats = core.get_db_stats()
         latest_marker = db_stats.get("last_ohlcv_update_marker") or db_stats_payload.get("latest_marker") or "-"
         try:
@@ -375,24 +394,38 @@ async def run_nightly_full_scan(context):
         index_alpha_failed = not broksum_250_data
         rapidapi_whitelist_data = {}
         if trading_night_index % 2 == 0 or index_alpha_failed:
-            try:
-                rapidapi_whitelist_data = await asyncio.to_thread(build_rapidapi_broker_whitelist_sweep)
-                # BUGFIX (user report, /consensus multi-broker menampilkan
-                # BBCA/BBRI/BMRI dkk — saham non-syariah): broker-activity
-                # endpoint per broker mencakup SELURUH ticker di bursa, bukan
-                # cuma universe syariah kita. build_broksum_250 (Index Alpha)
-                # otomatis aman karena hanya query ticker dari `results`
-                # (sudah scoped ke universe_tickers), tapi sweep ini query
-                # per broker code jadi tidak otomatis ter-filter. Saring di
-                # sini SEBELUM merge, supaya broksum_250 dan SEMUA
-                # konsumennya (smart money tag, /consensus multi-broker,
-                # Bias Bandar, /check) tetap murni syariah.
+            # MBSS v2 (user request, quota conservation): kalau sweep ini
+            # SUDAH sukses jalan hari ini (mis. /eodscan dipanggil ulang
+            # buat testing), jangan fetch 13 broker lagi buat data yang
+            # genuinely sama — pakai ULANG hasil yang sudah ke-cache di
+            # broksum_250 (sudah tersaring ke universe_tickers dari fetch
+            # sebelumnya hari ini).
+            if _rapidapi_cache_fresh_today("rapidapi_whitelist_sweep_marker"):
+                print("📋 RapidAPI whitelist sweep: sudah jalan hari ini, pakai cache yang ada (hemat kuota).")
                 rapidapi_whitelist_data = {
-                    ticker: rows for ticker, rows in rapidapi_whitelist_data.items()
+                    ticker: rows for ticker, rows in load_broksum_250().items()
                     if ticker in universe_tickers
                 }
-            except Exception as e:
-                print(f"⚠️ Gagal membangun RapidAPI broker whitelist sweep: {e}")
+            else:
+                try:
+                    rapidapi_whitelist_data = await asyncio.to_thread(build_rapidapi_broker_whitelist_sweep)
+                    # BUGFIX (user report, /consensus multi-broker menampilkan
+                    # BBCA/BBRI/BMRI dkk — saham non-syariah): broker-activity
+                    # endpoint per broker mencakup SELURUH ticker di bursa, bukan
+                    # cuma universe syariah kita. build_broksum_250 (Index Alpha)
+                    # otomatis aman karena hanya query ticker dari `results`
+                    # (sudah scoped ke universe_tickers), tapi sweep ini query
+                    # per broker code jadi tidak otomatis ter-filter. Saring di
+                    # sini SEBELUM merge, supaya broksum_250 dan SEMUA
+                    # konsumennya (smart money tag, /consensus multi-broker,
+                    # Bias Bandar, /check) tetap murni syariah.
+                    rapidapi_whitelist_data = {
+                        ticker: rows for ticker, rows in rapidapi_whitelist_data.items()
+                        if ticker in universe_tickers
+                    }
+                    _mark_rapidapi_whitelist_sweep_done_today()
+                except Exception as e:
+                    print(f"⚠️ Gagal membangun RapidAPI broker whitelist sweep: {e}")
 
         merged_broksum = _merge_broksum_sources(broksum_250_data, rapidapi_whitelist_data)
         save_broksum_250(merged_broksum)
@@ -408,18 +441,27 @@ async def run_nightly_full_scan(context):
         # priority tier as the whitelist sweep above — front-loaded in
         # call order.
         try:
-            rapidapi_market_intel = await asyncio.to_thread(build_rapidapi_market_intelligence_sweep)
-            # Top brokers (MBSS v2, RapidAPI integration) — discovery/
-            # cross-check only, never wired into an automated scoring path
-            # (it's a turnover ranking, not a net-buying ranking — see
-            # fetch_rapidapi_top_brokers's docstring). Every 10th trading
-            # night only — near-free either way, but no reason to spend
-            # nightly quota on a manual-review-only feature.
-            if trading_night_index % 10 == 0:
-                try:
-                    rapidapi_market_intel["top_brokers"] = await asyncio.to_thread(broker_engine.fetch_rapidapi_top_brokers)
-                except Exception as e:
-                    print(f"⚠️ Gagal membangun RapidAPI top brokers: {e}")
+            # MBSS v2 (user request, quota conservation): breakout/multibagger/
+            # sector-rotation adalah 1 snapshot MARKET-WIDE per hari (bukan
+            # per-ticker) — kalau sudah berhasil di-fetch hari ini, hasilnya
+            # genuinely SAMA persis kalau di-fetch ulang beberapa jam kemudian
+            # di hari yang sama, jadi skip total daripada buang 3 call lagi.
+            if _rapidapi_cache_fresh_today("rapidapi_market_intel"):
+                print("📋 RapidAPI market intelligence sweep: sudah jalan hari ini, skip (hemat kuota).")
+                rapidapi_market_intel = {}
+            else:
+                rapidapi_market_intel = await asyncio.to_thread(build_rapidapi_market_intelligence_sweep)
+                # Top brokers (MBSS v2, RapidAPI integration) — discovery/
+                # cross-check only, never wired into an automated scoring path
+                # (it's a turnover ranking, not a net-buying ranking — see
+                # fetch_rapidapi_top_brokers's docstring). Every 10th trading
+                # night only — near-free either way, but no reason to spend
+                # nightly quota on a manual-review-only feature.
+                if trading_night_index % 10 == 0:
+                    try:
+                        rapidapi_market_intel["top_brokers"] = await asyncio.to_thread(broker_engine.fetch_rapidapi_top_brokers)
+                    except Exception as e:
+                        print(f"⚠️ Gagal membangun RapidAPI top brokers: {e}")
             merged_market_intel = load_rapidapi_market_intelligence()
             merged_market_intel.update({k: v for k, v in rapidapi_market_intel.items() if v is not None})
             save_rapidapi_market_intelligence(merged_market_intel)
@@ -466,11 +508,14 @@ async def run_nightly_full_scan(context):
         # hot, since it's called last and every fetch call is gated by the
         # same budget counter regardless of call order.
         if trading_night_index % 2 == 0:
-            try:
-                rapidapi_sentiment_data = await asyncio.to_thread(build_rapidapi_sentiment_shortlist, results)
-                save_rapidapi_sentiment_shortlist(rapidapi_sentiment_data)
-            except Exception as e:
-                print(f"⚠️ Gagal membangun RapidAPI sentiment shortlist: {e}")
+            if _rapidapi_cache_fresh_today("rapidapi_sentiment_shortlist"):
+                print("📋 RapidAPI sentiment shortlist: sudah jalan hari ini, skip (hemat kuota).")
+            else:
+                try:
+                    rapidapi_sentiment_data = await asyncio.to_thread(build_rapidapi_sentiment_shortlist, results)
+                    save_rapidapi_sentiment_shortlist(rapidapi_sentiment_data)
+                except Exception as e:
+                    print(f"⚠️ Gagal membangun RapidAPI sentiment shortlist: {e}")
 
         # Market breadth + sector returns + regime — dihitung dari data yang
         # SAMA yang baru saja dikumpulkan di atas (results), tanpa fetch baru.
@@ -671,17 +716,47 @@ def load_bsjp_ara_candidates() -> list:
 
 def _get_and_increment_trading_night_index() -> int:
     """
-    Persisted counter, incremented once per run_nightly_full_scan call
-    (which itself already skips IDX holidays) — used to gate every-N-nights
-    cadences (whitelist sweep, sentiment shortlist) without needing
-    real-calendar-date math around weekends/holidays.
+    Persisted counter, incremented once per CALENDAR TRADING DAY (not once
+    per run_nightly_full_scan call) — used to gate every-N-nights cadences
+    (whitelist sweep, top brokers) without needing real-calendar-date math
+    around weekends/holidays.
+
+    BUGFIX (user request, quota conservation): previously incremented on
+    EVERY call regardless of calendar day, so running /eodscan more than
+    once on the same day (dev testing, manual re-run) silently drifted the
+    cadence — a night "due" for the whitelist sweep could get skipped next
+    time, or an "off" night could accidentally fire it, and the drift never
+    self-corrected since the counter had no memory of which day it last
+    moved on. Repeat calls on the SAME calendar day now return the SAME
+    index unchanged (migrates transparently from the old plain-int format).
     """
-    current = cache_manager.get("rapidapi_night_index", default=0)
-    if not isinstance(current, int):
-        current = 0
-    new_index = current + 1
-    cache_manager.set("rapidapi_night_index", new_index)
+    state = cache_manager.get("rapidapi_night_index", default={})
+    if not isinstance(state, dict):
+        state = {"index": state if isinstance(state, int) else 0, "last_day": None}
+    current_marker = core.get_current_calendar_date_marker()
+    if state.get("last_day") == current_marker:
+        return state.get("index", 0)
+    new_index = state.get("index", 0) + 1
+    cache_manager.set("rapidapi_night_index", {"index": new_index, "last_day": current_marker})
     return new_index
+
+
+def _rapidapi_cache_fresh_today(cache_key: str) -> bool:
+    """
+    MBSS v2 (user request, quota conservation): True kalau cache RapidAPI
+    ini SUDAH berhasil di-fetch hari ini (trading_day_marker cocok) —
+    dipakai supaya /eodscan yang dipanggil berkali-kali di hari yang sama
+    (dev/testing, manual re-run) tidak fetch ulang data yang genuinely
+    sama persis, sekaligus jawaban langsung ke pertanyaan "kan ada
+    timestamp waktu download-nya, harusnya cukup yang kurang saja".
+    """
+    meta = cache_manager.get_meta(cache_key)
+    return bool(meta) and meta.get("trading_day_marker") == core.get_current_calendar_date_marker()
+
+
+def _mark_rapidapi_whitelist_sweep_done_today():
+    """Marker-only entry — whitelist sweep hasil-nya nempel ke broksum_250 (semantik lebih luas dari cuma RapidAPI), jadi butuh marker sendiri buat same-day dedup yang presisi ke langkah RapidAPI-nya saja."""
+    cache_manager.set("rapidapi_whitelist_sweep_marker", True, meta={"trading_day_marker": core.get_current_calendar_date_marker()})
 
 
 def build_rapidapi_broker_whitelist_sweep() -> dict:
