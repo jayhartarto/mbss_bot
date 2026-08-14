@@ -5410,19 +5410,19 @@ def evaluate_executiongate_watchlist(scored_watchlist: list) -> list:
                         "trigger_price": None,
                         "downside_to_invalidation_pct": 99,
                     }
-            # RapidAPI real bandar/accumulation signal (MBSS v2, RapidAPI
-            # integration) — same-day cached inside get_cached_or_fetch_
-            # rapidapi_bandar_accumulation, so re-running /executiongate on
-            # the same ticker within a trading day never spends a second
-            # live call. Wrapped so a RapidAPI outage/quota-exhaustion never
-            # blocks Execution Gate itself — falls back to the OHLCV-only
-            # proxy exactly as before this integration existed.
-            real_bandar = None
-            try:
-                real_bandar = broker_engine.get_cached_or_fetch_rapidapi_bandar_accumulation(ticker)
-            except Exception as e:
-                print(f"⚠️ RapidAPI real bandar gagal untuk {ticker}: {e}")
-            decision = executiongate_decision(item, real_bandar=real_bandar)
+            # MBSS v2 (user request, quota conservation): previously live-
+            # fetched RapidAPI bandar/accumulation per ticker here (same-day
+            # cached, but a single /executiongate run evaluates 12+ tickers
+            # at once — confirmed the single biggest per-call-volume spend
+            # in production, ~42 calls burned in the first 2 days live).
+            # real_bandar=None makes executiongate_decision() fall back to
+            # its OHLCV-only bandarmology proxy — the same one used before
+            # this RapidAPI integration existed, zero API cost. The
+            # whitelist-sweep accumulation signal (whitelist_accumulation_
+            # net_pct, already computed nightly at zero extra cost) covers
+            # the same "who's accumulating this" question for tickers it
+            # has data on — see /hc's "AKUMULASI / PRA-BREAKOUT" section.
+            decision = executiongate_decision(item, real_bandar=None)
             decision["source"] = item.get("executiongate_source", "screendaytrade")
             evaluated.append(decision)
         except Exception as e:

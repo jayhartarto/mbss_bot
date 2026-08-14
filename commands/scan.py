@@ -279,7 +279,7 @@ async def screen_daytrade(update, context):
                 f"{i}. {r['ticker']} — {label_str} ({ab.get('score', 0)}/100)\n"
                 f"   Harga {r.get('price')} | VWAP {ab.get('vwap', '-')} (jarak {ab.get('vwap_distance_pct', '-')}%) | Vol pace {ab.get('volume_pace_ratio', '-')}x\n"
                 f"   Trigger {ab.get('trigger_price', '-')} | Invalid <{ab.get('invalidation_level', '-')}\n"
-                f"   {ab.get('notes', '') or '-'}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}{broker_engine.format_market_mover_tag(r['ticker'])}"
+                f"   {ab.get('notes', '') or '-'}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}{broker_engine.format_market_mover_tag(r['ticker'])}{nightly_engine.format_breakout_alert_tag(r['ticker'])}"
             )
 
         # MBSS v2 (user request — kasus TALF/IATA/SGRO): bagian TERPISAH untuk
@@ -330,7 +330,7 @@ async def screen_daytrade(update, context):
             f"   Total {v5['total']}/100 | Bias {r.get('_positive_bias', '-')}/100 | Lane {lane_str} | B {br['score']} | C {cont['score']} | Act {v5['activity']['score']} | VolQ {volq['score']} | Room {room['score']} | Safety {risk['score']}{src_live}\n"
             f"   Harga {r.get('price')} | Valid >{v5['valid_level']} | Ideal {v5['ideal']} | Invalid <{v5['invalid']}\n"
             f"   Room: {room['label']} ({room['dist_high_pct']}% ke high, upside TP1 {room['upside_tp1_pct']}%) | VolQ: {volq['label']} | Continuation: {cont['label']}\n"
-            f"   Note: {v5['note']}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
+            f"   Note: {v5['note']}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}{nightly_engine.format_breakout_alert_tag(r['ticker'])}"
         )
 
     buttons = core.build_check_buttons([r["ticker"] for r in top_candidates])
@@ -1086,6 +1086,7 @@ async def high_conviction_command(update, context):
         if sector_info:
             sector_note = f"\n   🏭 Sektor {sector_info['sector']}: #{sector_info['rank']}/{sector_info['total_sectors']} terkuat ({sector_info['avg_return_pct']:+.1f}% avg)"
         smart_money_note = broker_engine.format_smart_money_tag(r["ticker"], broksum_data)
+        breakout_alert_note = nightly_engine.format_breakout_alert_tag(r["ticker"])
 
         # MBSS v2 (user request — inline winrate per label, supaya tidak perlu
         # recall/cross-reference manual): tampilkan angka winrate historis
@@ -1099,7 +1100,7 @@ async def high_conviction_command(update, context):
             f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
             f"   {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)} kriteria | "
             f"RR {rr_str} | {label_str}\n"
-            f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}"
+            f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}{breakout_alert_note}"
         )
 
     # MBSS v2 (RapidAPI integration, "diskusi trader" session, user request):

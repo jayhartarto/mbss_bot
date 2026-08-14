@@ -260,7 +260,7 @@ async def check_stock(update, context):
     # source in this text, reads as a natural extension of the bot's own
     # broker/bandar vocabulary (per this session's user-facing text
     # convention decision).
-    broker_info = broker_engine.compute_check_broker_info(ticker)
+    broker_info = broker_engine.compute_check_broker_info(ticker, nightly_engine.load_broksum_250())
     brokersum_line = ""
     if broker_info:
         broker_parts = " | ".join(
@@ -274,33 +274,15 @@ async def check_stock(update, context):
         trend = broker_info.get("dominance_trend")
         trend_str = f"\nTren dominasi: {trend}" if trend else ""
 
-        acc = broker_info.get("accumulation") or {}
-        acc_status = str(acc.get("status", "")).upper()
-        acc_confidence = acc.get("confidence")
-        acc_line = ""
-        if acc_status and acc_confidence is not None:
-            pola = "akumulasi" if "ACC" in acc_status else ("distribusi" if "DIST" in acc_status else None)
-            if pola:
-                acc_line = f"\n↳ Pola {pola} terkonfirmasi (confidence {acc_confidence:.0f}%)"
-
         ceiling_price_val = broker_info.get("ceiling_price")
         ceiling_code = broker_info.get("ceiling_code")
-        acc_targets = acc.get("target_prices")
-        target = (acc.get("entry_zone") or {}).get("ideal_price")
-        if not target and isinstance(acc_targets, list) and acc_targets:
-            target = acc_targets[0].get("target")
-        ceiling_line = ""
-        if ceiling_price_val:
-            ceiling_line = f"\nCeiling: {_fmt(ceiling_price_val)} (avg tertinggi {ceiling_code})"
-            if target:
-                ceiling_line += f" | Target: {_fmt(target)} ({(target/price-1)*100:+.1f}%)"
+        ceiling_line = f"\nCeiling: {_fmt(ceiling_price_val)} (avg tertinggi {ceiling_code})" if ceiling_price_val else ""
 
         brokersum_line = (
             f"\n💹 BROKER INFO:\n"
             f"Top Broker: {broker_parts}\n"
             f"Net-buy Top-3: {netbuy_str}{dominance_str}"
             f"{trend_str}"
-            f"{acc_line}"
             f"{ceiling_line}"
         )
 

@@ -825,6 +825,24 @@ def get_breakout_alert_for_ticker(ticker: str) -> dict | None:
     return next((a for a in alerts if a.get("symbol") == ticker), None)
 
 
+def format_breakout_alert_tag(ticker: str) -> str:
+    """
+    Zero-cost formatter — reads TODAY's already-cached nightly RapidAPI
+    breakout-alert sweep (get_breakout_alert_for_ticker, no fetch). MBSS v2
+    (user request): surface this as a confirmation signal wherever a
+    ticker already qualifies through our OWN formula (/hc,
+    /screendaytrade), not just /bsjp — an intersection with an independent
+    outside signal is worth flagging, same spirit as /consensus's
+    cross-tool tagging. Only HIGH severity surfaces (same threshold /bsjp
+    already uses) — this stays a confirmation tag, not a standalone feed.
+    """
+    alert = get_breakout_alert_for_ticker(ticker)
+    if not alert or str(alert.get("severity", "")).upper() != "HIGH":
+        return ""
+    breakout_prob = (alert.get("indicators") or {}).get("breakout_probability", "-")
+    return f" | 🚨 Breakout Alert {breakout_prob}%"
+
+
 def get_multibagger_candidate_for_ticker(ticker: str) -> dict | None:
     """Cheap indexed lookup, built fresh from load_rapidapi_market_intelligence() each call."""
     candidates = (load_rapidapi_market_intelligence().get("multibagger") or {}).get("candidates") or []

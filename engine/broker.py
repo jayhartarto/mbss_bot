@@ -1596,28 +1596,54 @@ def compute_dominance_trend(ticker: str, lookback_entries: int = 5) -> str | Non
     return " → ".join(f"{e['dominance_pct']:.0f}%" for e in recent)
 
 
-def compute_check_broker_info(ticker: str, lookback_days: int = 10) -> dict | None:
+def compute_check_broker_info(ticker: str, broksum_data: dict, lookback_days: int = RAPIDAPI_WHITELIST_SWEEP_LOOKBACK_DAYS) -> dict | None:
     """
-    /check's "💹 BROKER INFO" block — combines two RapidAPI sources:
-    market-detector/broker-summary/{ticker} (top-3 net buyers over the last
-    10 days, dominance %, ceiling price) and analysis/bandar/accumulation/
-    {ticker} (accumulation status/confidence/target — already built for
-    /executiongate, reused here as-is via
-    get_cached_or_fetch_rapidapi_bandar_accumulation). Returns None if the
-    broker-summary fetch fails or no broker shows a positive net buy; the
-    accumulation piece is optional — shown if available, omitted otherwise.
+    /check's "💹 BROKER INFO" block — MBSS v2 (user request, quota
+    conservation, RapidAPI production burn far faster than projected: ~30%
+    of the 500/month plan gone in the first 2 days live). Previously this
+    live-fetched market-detector/broker-summary/{ticker} +
+    analysis/bandar/accumulation/{ticker} PER TICKER on every /check for a
+    ticker not yet checked that day — same-day cached, but still a fresh
+    spend for every new ticker, and that on-demand volume turned out to be
+    the single biggest quota driver in practice. Now reads PURELY from
+    `broksum_data` (nightly_engine.load_broksum_250() — Index Alpha top-100
+    + the RapidAPI whitelist-sweep's 13 brokers, already fetched once
+    during /eodscan) — ZERO live calls from /check itself, ever.
+
+    Consequences the user explicitly accepted:
+    - Returns None (no BROKER INFO shown) for any ticker outside tonight's
+      cache coverage — no live fallback anymore. Checked elsewhere (other
+      apps) if needed for those tickers.
+    - `dominance_pct` (net-buy as % of ticker's TOTAL market transaction
+      value) is dropped — that total-market figure only ever came from the
+      live broker-summary response's bandar_detector block, with no
+      equivalent in the reshaped nightly rows. `dominance_trend` (history
+      of past dominance_pct readings) still works off history already
+      recorded before this change, it just stops accruing new points.
+    - `accumulation` (bandar/accumulation status/confidence/target) is
+      dropped entirely — its only populator was /executiongate's own
+      on-demand fallback, which has ALSO been cut (same reason: single
+      biggest per-call-volume spend in production, ~42 calls in the first
+      2 days live). Nothing fetches this endpoint anywhere anymore. The
+      whitelist-sweep accumulation signal (whitelist_accumulation_net_pct,
+      already computed nightly at zero extra cost) covers the same
+      "who's accumulating this" question — see /hc's "AKUMULASI /
+      PRA-BREAKOUT" section.
+    - Tickers covered ONLY by the whitelist sweep (not in Index Alpha's
+      top-100 that night) show net positions from just the 13
+      SMART_MONEY_BROKER_WHITELIST codes, not the full "everyone who
+      transacted" breakdown the live endpoint gave — same limitation
+      /consensus's multi-broker section already lives with.
 
     IMPORTANT (user-facing text convention, decided this session): nothing
     in this function's OUTPUT should ever be rendered as "RapidAPI ___" in
     Telegram text — the caller (commands/check.py) must phrase this as a
-    natural extension of the bot's existing broker/bandar vocabulary. This
-    function itself is free to say "RapidAPI" in comments/docstrings.
+    natural extension of the bot's existing broker/bandar vocabulary.
     """
-    raw = get_cached_or_fetch_rapidapi_broker_summary(ticker, lookback_days=lookback_days)
-    if not raw:
+    rows = broksum_data.get(ticker, [])
+    if not rows:
         return None
 
-    rows = rapidapi_broker_activity_to_broksum_rows(raw).get(ticker, [])
     net_by_code: dict = {}
     for row in rows:
         code = row.get("code")
@@ -1638,26 +1664,20 @@ def compute_check_broker_info(ticker: str, lookback_days: int = 10) -> dict | No
     for e in top3:
         e["tag"] = "smart money" if e["code"] in SMART_MONEY_BROKER_WHITELIST else "broker"
 
-    total_market_value = (raw.get("bandar_detector") or {}).get("value") or 0
     net_buy_top3_value = sum(e["net_value"] for e in top3)
     net_buy_top3_volume = sum(e["net_volume"] for e in top3)
-    dominance_pct = round((net_buy_top3_value / total_market_value) * 100, 1) if total_market_value > 0 else None
     priced = [e for e in top3 if e["buy_avg"]]
     ceiling = max(priced, key=lambda e: e["buy_avg"]) if priced else None
-
-    if dominance_pct is not None:
-        append_dominance_history(ticker, dominance_pct)
 
     return {
         "top_brokers": top3,  # [{code, net_value, net_volume, buy_avg, tag}, ...] up to 3
         "lookback_days": lookback_days,
         "net_buy_top3_value": net_buy_top3_value,
         "net_buy_top3_volume": net_buy_top3_volume,
-        "dominance_pct": dominance_pct,
+        "dominance_pct": None,  # no longer derivable without the live broker-summary call — see docstring
         "dominance_trend": compute_dominance_trend(ticker),
         "ceiling_price": ceiling["buy_avg"] if ceiling else None,
         "ceiling_code": ceiling["code"] if ceiling else None,
-        "accumulation": get_cached_or_fetch_rapidapi_bandar_accumulation(ticker),
     }
 
 
