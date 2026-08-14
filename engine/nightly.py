@@ -377,6 +377,20 @@ async def run_nightly_full_scan(context):
         if trading_night_index % 2 == 0 or index_alpha_failed:
             try:
                 rapidapi_whitelist_data = await asyncio.to_thread(build_rapidapi_broker_whitelist_sweep)
+                # BUGFIX (user report, /consensus multi-broker menampilkan
+                # BBCA/BBRI/BMRI dkk — saham non-syariah): broker-activity
+                # endpoint per broker mencakup SELURUH ticker di bursa, bukan
+                # cuma universe syariah kita. build_broksum_250 (Index Alpha)
+                # otomatis aman karena hanya query ticker dari `results`
+                # (sudah scoped ke universe_tickers), tapi sweep ini query
+                # per broker code jadi tidak otomatis ter-filter. Saring di
+                # sini SEBELUM merge, supaya broksum_250 dan SEMUA
+                # konsumennya (smart money tag, /consensus multi-broker,
+                # Bias Bandar, /check) tetap murni syariah.
+                rapidapi_whitelist_data = {
+                    ticker: rows for ticker, rows in rapidapi_whitelist_data.items()
+                    if ticker in universe_tickers
+                }
             except Exception as e:
                 print(f"⚠️ Gagal membangun RapidAPI broker whitelist sweep: {e}")
 

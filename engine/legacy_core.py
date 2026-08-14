@@ -4084,8 +4084,10 @@ OUTPUT FORMAT WAJIB, plain text only, no Markdown:
 (mis. apakah konsensusnya kuat/genuine, atau banyak yang cuma pas-pasan
 2 tool dengan sinyal campuran).
 
-Untuk SETIAP saham (urut dari yang paling banyak tool setuju):
-TICKER (N tool: nama-nama tool) — Final X.X
+Untuk SETIAP saham (urut dari yang paling banyak tool setuju), GANTI
+[KODE_TICKER] dengan kode ticker ASLI dari data (mis. BBCA, TLKM) — JANGAN
+tulis literal "[KODE_TICKER]" atau "TICKER", itu cuma placeholder format:
+[KODE_TICKER] (N tool: nama-nama tool) — Final X.X
 Kenapa setuju: 1 kalimat kenapa beberapa lensa berbeda ini kompak.
 Yang perlu diwaspadai: 1 kalimat risiko dari data mentah, JUJUR walau
 kelihatannya bertentangan dengan "konsensus positif" di atas — kalau memang

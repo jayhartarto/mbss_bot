@@ -1646,6 +1646,19 @@ async def consensus_command(update, context):
     broksum_data = nightly_engine.load_broksum_250()  # MBSS v2 (user request): smart-money jadi dimensi ke-5
 
     qualifying = []
+    # MBSS v2 (user request — irisan lintas-tool buat filter section
+    # akumulasi & multi-broker di bawah): ticker yang kena tag dari SALAH
+    # SATU tool non-bandarmology (HC/STRONG_BUY/SCREENDAYTRADE/GPTPICK/
+    # MULTIBAGGER) — dipakai supaya sinyal broker/akumulasi yang tampil
+    # bukan yang berdiri sendiri tanpa validasi tool lain sama sekali.
+    other_tool_tickers = set()
+    # Dibaca SEKALI di luar loop (cache_manager baca disk tiap get() —
+    # jangan panggil per-ticker di loop ~389 ticker di bawah).
+    multibagger_by_ticker = {
+        c["symbol"]: c
+        for c in (nightly_engine.load_rapidapi_market_intelligence().get("multibagger") or {}).get("candidates", [])
+        if c.get("symbol")
+    }
     for r in scored.values():
         tools = []
 
@@ -1670,6 +1683,17 @@ async def consensus_command(update, context):
         except Exception:
             pass
 
+        # MBSS v2 (user request — longer-horizon intersection): ticker yang
+        # JUGA lolos multibagger scan RapidAPI dihitung sebagai 1 dimensi
+        # tool tambahan — sinyal "akumulasi + potensi hold panjang" yang
+        # kompak dengan pick day-trade lain (contoh kasus user: SLIS).
+        multibagger = multibagger_by_ticker.get(r["ticker"])
+        if multibagger:
+            tools.append(f"MULTIBAGGER ({multibagger.get('multibagger_score', '-')}/100)")
+
+        if tools:
+            other_tool_tickers.add(r["ticker"])
+
         # MBSS v2 (user request — smart money sebagai dimensi konsensus):
         # kalau ADA broker whitelist yang net buy ticker ini (dari
         # broksum_250), hitung sebagai 1 "tool" tambahan — bandarmology
@@ -1681,7 +1705,7 @@ async def consensus_command(update, context):
             tools.append(f"SMART MONEY ({codes})")
 
         if len(tools) >= 2:
-            qualifying.append({**r, "_consensus_tools": tools})
+            qualifying.append({**r, "_consensus_tools": tools, "_multibagger": multibagger})
 
     # MBSS v2 (user request — section terpisah, bandarmology paling kuat):
     # ticker yang di-net-buy LEBIH DARI 1 broker whitelist SEKALIGUS —
@@ -1690,21 +1714,32 @@ async def consensus_command(update, context):
     # ke-block kalau qualifying (5-tool) kosong — makanya dihitung di sini,
     # SEBELUM early-return di bawah (pola sama seperti fix BSJP-ARA
     # sebelumnya: 2 hal independen, jangan saling menghentikan).
+    #
+    # BUGFIX (user report — saham non-syariah seperti BBCA/BBRI/BMRI
+    # muncul di sini): broksum_250 sekarang berisi hasil sweep RapidAPI
+    # per broker yang mencakup SELURUH bursa (sudah difilter ke universe
+    # syariah di sumbernya, engine/nightly.py). Sebagai lapis kedua DAN
+    # supaya sinyal yang tampil di sini genuinely "diiriskan dengan tools
+    # lain" (bukan cuma berdiri sendiri) seperti diminta user, saring juga
+    # ke other_tool_tickers — ticker harus muncul di scored (otomatis
+    # syariah) DAN kena tag dari minimal 1 tool lain.
     multi_broker_lines = []
     for ticker, rows in broksum_data.items():
+        if ticker not in other_tool_tickers:
+            continue
         accum = broker_engine.get_smart_money_accumulation(ticker, broksum_data)
         if len(accum) >= 2:
             parts = ", ".join(f"{a['code']} @ avg {a['buy_avg_price']:.0f}" for a in accum)
             multi_broker_lines.append((sum(a["net_value_idr"] for a in accum), f"{ticker}: {parts}"))
     multi_broker_lines.sort(key=lambda x: x[0], reverse=True)
     multi_broker_block = (
-        "\n\n🏦 Multi-broker net-buy (bandarmology terkuat — >1 broker whitelist kompak):\n"
-        + "\n".join(line for _, line in multi_broker_lines[:10])
+        "\n\n🏦 Multi-broker net-buy (bandarmology terkuat — >1 broker whitelist kompak, irisan tool lain):\n"
+        + "\n".join(line for _, line in multi_broker_lines[:5])
     ) if multi_broker_lines else ""
 
     if not qualifying:
         msg = "📋 Tidak ada saham yang muncul di >=2 tool sekaligus hari ini."
-        early_buttons = core.build_check_buttons([line.split(":")[0] for _, line in multi_broker_lines[:10]])
+        early_buttons = core.build_check_buttons([line.split(":")[0] for _, line in multi_broker_lines[:5]])
         await core.safe_reply(update.message, msg + multi_broker_block, reply_markup=early_buttons)
         return
 
@@ -1745,28 +1780,45 @@ async def consensus_command(update, context):
     streak_lines = [f"🔁 {t}x — {tk}" for tk, t in streaks.items() if t > 1]
     streak_block = ("\n\nStreak kemunculan berturut-turut (lintas semua tool, bukan cuma /consensus):\n" + "\n".join(streak_lines)) if streak_lines else ""
 
-    sector_lines = [f"{r['ticker']}{market_engine.format_sector_tag(r.get('sector'), prefix=' — ')}" for r in qualifying[:15] if market_engine.get_sector_rank_info(r.get("sector"))]
+    # MBSS v2 (user request — "terlalu rumit", top 5 saja): sector/smart-
+    # money display dipangkas ke qualifying[:5] (sudah terurut jumlah tool
+    # terbanyak dulu, jadi top 5 = yang paling kompak lintas-tool).
+    sector_lines = [f"{r['ticker']}{market_engine.format_sector_tag(r.get('sector'), prefix=' — ')}" for r in qualifying[:5] if market_engine.get_sector_rank_info(r.get("sector"))]
     sector_block = ("\n\nKekuatan sektor:\n" + "\n".join(sector_lines)) if sector_lines else ""
 
-    smart_money_lines = [f"{r['ticker']}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data, prefix=' — ')}" for r in qualifying[:15] if broker_engine.get_smart_money_accumulation(r['ticker'], broksum_data)]
+    # MBSS v2 (user request — akumulasi cukup yang irisan tool lain saja):
+    # karena qualifying sudah mensyaratkan >=2 tool DAN smart_money jadi
+    # salah satu "tool" itu sendiri, setiap entry di sini otomatis sudah
+    # ke-konfirmasi minimal 1 tool lain — cukup pangkas ke top 5, tidak
+    # perlu filter tambahan.
+    smart_money_lines = [f"{r['ticker']}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data, prefix=' — ')}" for r in qualifying[:5] if broker_engine.get_smart_money_accumulation(r['ticker'], broksum_data)]
     smart_money_block = ("\n\nAkumulasi smart money:\n" + "\n".join(smart_money_lines)) if smart_money_lines else ""
+
+    # MBSS v2 (user request — tag intuitif hold panjang, contoh kasus SLIS):
+    # ticker consensus yang JUGA lolos multibagger scan — irisan
+    # akumulasi/day-trade dengan sinyal potensi hold lebih panjang.
+    multibagger_lines = [
+        f"{r['ticker']} — 🎯 Multibagger {r['_multibagger'].get('potential_return', '-')} ({r['_multibagger'].get('timeframe', '-')})"
+        for r in qualifying[:5] if r.get("_multibagger")
+    ]
+    multibagger_block = ("\n\nPotensi hold lebih panjang (irisan multibagger):\n" + "\n".join(multibagger_lines)) if multibagger_lines else ""
 
     # MBSS v2 (user request — tombol cek di semua tools): gabungkan ticker
     # dari qualifying (5-tool consensus) + multi-broker (independen), dedup
     # otomatis oleh build_check_buttons.
-    consensus_tickers = [r["ticker"] for r in qualifying[:15]] + [line.split(":")[0] for _, line in multi_broker_lines[:10]]
+    consensus_tickers = [r["ticker"] for r in qualifying[:15]] + [line.split(":")[0] for _, line in multi_broker_lines[:5]]
     buttons = core.build_check_buttons(consensus_tickers)
 
     try:
         summary_text = await asyncio.to_thread(core.ask_gemini_to_analyze, gemini_input, core.CONSENSUS_BRIEF_INSTRUCTION)
-        await core.safe_reply(update.message, summary_text + streak_block + sector_block + smart_money_block + multi_broker_block, reply_markup=buttons)
+        await core.safe_reply(update.message, summary_text + streak_block + sector_block + smart_money_block + multibagger_block + multi_broker_block, reply_markup=buttons)
     except Exception as e:
         print(f"⚠️ Gemini consensus brief gagal: {e}")
         # Gagal-lunak — tetap kasih daftar mentah kalau Gemini error, jangan diam saja
         lines = [f"🔗 CONSENSUS (Gemini gagal, tampilan mentah) — {len(qualifying)} saham lolos >=2 tool\n"]
         for r in qualifying[:15]:
             lines.append(f"{r['ticker']} ({len(r['_consensus_tools'])} tool: {', '.join(r['_consensus_tools'])})")
-        await core.safe_reply(update.message, "\n".join(lines) + multi_broker_block, reply_markup=buttons)
+        await core.safe_reply(update.message, "\n".join(lines) + multibagger_block + multi_broker_block, reply_markup=buttons)
 
 
 async def broksum_command(update, context):
