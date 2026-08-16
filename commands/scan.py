@@ -1775,125 +1775,214 @@ def compute_consensus_candidates(scored: dict, broksum_data: dict) -> tuple[list
     return qualifying, multi_broker_lines
 
 
+EXPLOSIVE_MIN_SCORE_BY_REGIME = {
+    "R1_BULL_STABLE": 50, "R2_BULL_HIGH_VOL": 55, "R3_SIDEWAYS": 60,
+    "R4_RISK_OFF": 65, "R5_STRESS": 75, "R0_UNKNOWN": 60,
+}  # doc section 15.4/748: R1=50 baseline, others stricter pending forward validation — same "conservative until proven" posture as DANGER_GATE_QUANTILE_BY_REGIME.
+EXPLOSIVE_MAX_NAMES = 3
+SMART_MONEY_NET_SELL_THRESHOLD = -15.0  # mirrors the +15 threshold /hc's AKUMULASI section already uses for the buy side
+
+
+def _consensus_sdt_hc_selected(pool: list) -> tuple[set, set]:
+    """
+    EOD-only "selected by /screendaytrade" / "selected by /hc" per AB-RC1
+    doc section 6.1 — reuses compute_screendaytrade_positive_bias's lane
+    classification (same GOOD_SDT_LANES the old consensus tagging used)
+    and is_high_conviction, BOTH already EOD-computable from cache (no live
+    intraday re-enrichment needed) — deliberate simplification from the
+    doc's literal "selected by the live /screendaytrade command", since
+    that would mean re-running live intraday enrichment a second time
+    inside /consensus for the same candidates. The lane/HC-criteria
+    classification IS the substantive selection signal; live enrichment in
+    the /screendaytrade command itself is for precision entry timing
+    display, not the core categorization used here.
+    """
+    GOOD_SDT_LANES = {"PRIORITY FRESH", "PRIORITY CONT"}
+    sdt_selected, hc_selected = set(), set()
+    for r in pool:
+        try:
+            if core.compute_screendaytrade_positive_bias(r).get("lane") in GOOD_SDT_LANES:
+                sdt_selected.add(r["ticker"])
+        except Exception:
+            pass
+        if r.get("high_conviction", {}).get("is_high_conviction"):
+            hc_selected.add(r["ticker"])
+    return sdt_selected, hc_selected
+
+
+def _explosive_score(r: dict, pool: list) -> tuple[float, bool, str]:
+    """
+    AB-RC1 doc section 15.4: 32% Room + 30% RR (percentile, at CURRENT
+    price — see backbone_engine.compute_rr_at_current_price) + 23% Activity
+    + 15% Controlled Volatility (peaks at the pool's OWN median day-range
+    percentile, penalized toward either extreme — "controlled", not
+    "high"). Returns (score, hard_rejected, reject_reason).
+    """
+    v5 = core.compute_daytrade_v5_summary(r)
+    room, activity = v5["room"]["score"], v5["activity"]["score"]
+
+    rr_now = backbone_engine.compute_rr_at_current_price(r)
+    rr_values = [backbone_engine.compute_rr_at_current_price(x) for x in pool]
+    rr_percentile = backbone_engine.percentile_rank_list(rr_values, rr_now) * 100
+
+    drp = r.get("day_range_pct_10d")
+    drp_values = [x.get("day_range_pct_10d") for x in pool if x.get("day_range_pct_10d") is not None]
+    drp_percentile = (backbone_engine.percentile_rank_list(drp_values, drp) * 100) if drp is not None and drp_values else 50.0
+    controlled_vol = max(0.0, 100.0 - abs(drp_percentile - 50.0) * 2.0)
+
+    score = room * 0.32 + rr_percentile * 0.30 + activity * 0.23 + controlled_vol * 0.15
+
+    if r.get("is_near_price_floor"):
+        return score, True, "dekat batas bawah harga IDX"
+    if rr_now < 0.30:
+        return score, True, "RR di harga sekarang sangat tipis"
+    if r.get("obv_divergence") == "bearish_divergence":
+        return score, True, "bearish OBV divergence"
+    if r.get("macd_bearish_cross") and r.get("is_below_sma50"):
+        return score, True, "MACD bearish cross + di bawah SMA50"
+    if drp_percentile >= 95:
+        return score, True, "volatilitas di ekor ekstrem (persentil >=95)"
+    return score, False, ""
+
+
 async def consensus_command(update, context):
     """
-    /consensus — saham yang muncul sebagai kandidat POSITIF di >=2 dari 5
-    lensa screening independen kita (MBSS v2, user request, tindak lanjut
-    diskusi positioning /hc vs /screendaytrade + integrasi smart money):
-    HIGH CONVICTION (pola chart), STRONG_BUY (verdict inti value/momentum/
-    sentimen), SCREENDAYTRADE (lane timing entry), GPTPICK (shortlist
-    momentum/likuiditas/RR), SMART MONEY (broker whitelist net-buy dari
-    broksum_250).
+    /consensus — ringkasan brief AB-RC1 (MBSS v2, user backtest — lihat
+    backtest/MBSS_v317_AB_RC1_Final_Implementation_and_Research-1.md,
+    source of truth). Menggantikan sistem tagging ">=2 dari 5 tool" lama
+    dengan struktur backbone-first sesuai dokumen §6-7:
 
-    SEMUA murni dari cache /eodscan (TIDAK fetch live apa pun) — lane
-    screendaytrade & skor gptpick dihitung ulang di sini dari data cache
-    (keduanya EOD-computable, tidak butuh data live, sudah dikonfirmasi
-    sebelumnya), jadi instan.
+    - CONSENSUS PRIME: irisan PERSIS Backbone Top-8 ∩ SDT-lane-positif ∩
+      HC-high-conviction pada hari yang sama. Tidak dilonggarkan biar
+      dipaksa ada output — bisa 0.
+    - EXPLOSIVE LANE: 1-3 nama dari kandidat lolos Danger Gate (boleh di
+      luar Consensus Prime), formula §15.4, gate keras + ambang minimum
+      per regime.
+    - SMART-MONEY OVERLAY: bonus tag dari whitelist_accumulation_net_pct
+      (sudah dihitung gratis saat /eodscan) — netral kalau data kosong.
+    - LONG-HORIZON WATCH: multibagger RapidAPI, horizon terpisah, tidak
+      dicampur ke skor Day 1-5.
 
-    Kandidat yang lolos dikirim ke Gemini untuk ringkasan naratif KENAPA
-    beberapa lensa berbeda ini kompak, plus risiko dari data mentah —
-    bukan Gemini yang menentukan lolos/tidak, itu murni deterministik
-    Python duluan.
+    Murni deterministik Python — TIDAK ada narasi Gemini lagi (beda dari
+    versi lama), karena format §7 dokumen sudah eksplisit/terstruktur,
+    tidak butuh interpretasi bahasa natural.
     """
-    # MBSS v2 (user request): tampilkan data LAMA dengan keterangan jelas,
-    # bukan tolak total — sama seperti /hc.
     scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
     if not scored:
         await core.safe_reply(update.message, "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
         return
 
-    status_msg = f"🔗 Mencari konsensus lintas-tool dari {len(scored)} kandidat cache..."
-    if staleness_note:
-        status_msg = f"{staleness_note}\n{status_msg}"
-    await core.safe_reply(update.message, status_msg)
-
-    broksum_data = nightly_engine.load_broksum_250()  # MBSS v2 (user request): smart-money jadi dimensi ke-5
-    qualifying, multi_broker_lines = compute_consensus_candidates(scored, broksum_data)
-    multi_broker_block = (
-        "\n\n🏦 Multi-broker net-buy (bandarmology terkuat — >1 broker whitelist kompak, irisan tool lain):\n"
-        + "\n".join(line for _, line in multi_broker_lines[:5])
-    ) if multi_broker_lines else ""
-
-    if not qualifying:
-        msg = "📋 Tidak ada saham yang muncul di >=2 tool sekaligus hari ini."
-        early_buttons = core.build_check_buttons([line.split(":")[0] for _, line in multi_broker_lines[:5]])
-        await core.safe_reply(update.message, msg + multi_broker_block, reply_markup=early_buttons)
+    backbone_result, backbone_staleness = nightly_engine.load_backbone_daily_allow_stale()
+    if not backbone_result:
+        await core.safe_reply(update.message, "⚠️ Backbone belum pernah dihitung — jalankan /eodscan dulu (versi terbaru).")
         return
+    if backbone_staleness:
+        await core.safe_reply(update.message, backbone_staleness)
 
-    # Kunci ke winrate juga — source="consensus", supaya bisa diukur apakah
-    # "beberapa tool setuju" genuinely lebih akurat dari 1 tool sendirian.
-    try:
-        await asyncio.to_thread(core.lock_daily_daytrade_picks, qualifying[:15], "consensus")
-    except Exception as e:
-        print(f"⚠️ Gagal mengunci picks /consensus untuk /winrate: {e}")
+    pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
+    pool_by_ticker = {r["ticker"]: r for r in pool}
+    top8_tickers = [r["ticker"] for r in backbone_result.get("top8", [])]
+    sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool)
 
-    # MBSS v2 (user request — gap yang sama seperti /hc: streak tersimpan
-    # tapi tidak pernah ditampilkan real-time). Dihitung di sini, dikirim
-    # ke Gemini SEBAGAI KONTEKS (boleh disebut di narasi), TAPI juga
-    # ditambahkan sebagai baris deterministik terpisah setelahnya — supaya
-    # tetap kelihatan pasti walau Gemini kebetulan tidak menyebutnya.
-    history_for_streak = core.load_daytrade_picks_history()
-    pick_date_today = core.get_current_trading_day_close_marker()
-    streaks = {
-        r["ticker"]: core.compute_consecutive_appearance_streak_any_source(r["ticker"], pick_date_today, history_for_streak)
-        for r in qualifying[:15]
-    }
-
-    # Susun data ringkas buat Gemini (bukan seluruh field mentah scoring, biar fokus)
-    gemini_input = [{
-        "ticker": r["ticker"], "tools": r["_consensus_tools"],
-        "final_score": r.get("scores", {}).get("final"),
-        "action_id": r.get("action_id"), "rsi": r.get("rsi"), "adx": r.get("adx"), "cmf": r.get("cmf"),
-        "risk_reward_at_max": r.get("targets", {}).get("risk_reward_at_max"),
-        "is_overbought_caution": r.get("is_overbought_caution"), "obv_divergence": r.get("obv_divergence"),
-        "is_financial_distress_flag": r.get("is_financial_distress_flag"),
-        "entry": r.get("targets", {}).get("buy_range"),
-        "consecutive_appearance_streak": streaks[r["ticker"]],
-        "sector_strength": market_engine.get_sector_rank_info(r.get("sector")),
-    } for r in qualifying[:15]]
-
-    streak_lines = [f"🔁 {t}x — {tk}" for tk, t in streaks.items() if t > 1]
-    streak_block = ("\n\nStreak kemunculan berturut-turut (lintas semua tool, bukan cuma /consensus):\n" + "\n".join(streak_lines)) if streak_lines else ""
-
-    # MBSS v2 (user request — "terlalu rumit", top 5 saja): sector/smart-
-    # money display dipangkas ke qualifying[:5] (sudah terurut jumlah tool
-    # terbanyak dulu, jadi top 5 = yang paling kompak lintas-tool).
-    sector_lines = [f"{r['ticker']}{market_engine.format_sector_tag(r.get('sector'), prefix=' — ')}" for r in qualifying[:5] if market_engine.get_sector_rank_info(r.get("sector"))]
-    sector_block = ("\n\nKekuatan sektor:\n" + "\n".join(sector_lines)) if sector_lines else ""
-
-    # MBSS v2 (user request — akumulasi cukup yang irisan tool lain saja):
-    # karena qualifying sudah mensyaratkan >=2 tool DAN smart_money jadi
-    # salah satu "tool" itu sendiri, setiap entry di sini otomatis sudah
-    # ke-konfirmasi minimal 1 tool lain — cukup pangkas ke top 5, tidak
-    # perlu filter tambahan.
-    smart_money_lines = [f"{r['ticker']}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data, prefix=' — ')}" for r in qualifying[:5] if broker_engine.get_smart_money_accumulation(r['ticker'], broksum_data)]
-    smart_money_block = ("\n\nAkumulasi smart money:\n" + "\n".join(smart_money_lines)) if smart_money_lines else ""
-
-    # MBSS v2 (user request — tag intuitif hold panjang, contoh kasus SLIS):
-    # ticker consensus yang JUGA lolos multibagger scan — irisan
-    # akumulasi/day-trade dengan sinyal potensi hold lebih panjang.
-    multibagger_lines = [
-        f"{r['ticker']} — 🎯 Multibagger {r['_multibagger'].get('potential_return', '-')} ({r['_multibagger'].get('timeframe', '-')})"
-        for r in qualifying[:5] if r.get("_multibagger")
+    market_regime = backbone_result.get("market_regime", "R0_UNKNOWN")
+    lines = [
+        "📊 MARKET REGIME",
+        market_regime,
+        "",
     ]
-    multibagger_block = ("\n\nPotensi hold lebih panjang (irisan multibagger):\n" + "\n".join(multibagger_lines)) if multibagger_lines else ""
 
-    # MBSS v2 (user request — tombol cek di semua tools): gabungkan ticker
-    # dari qualifying (5-tool consensus) + multi-broker (independen), dedup
-    # otomatis oleh build_check_buttons.
-    consensus_tickers = [r["ticker"] for r in qualifying[:15]] + [line.split(":")[0] for _, line in multi_broker_lines[:5]]
-    buttons = core.build_check_buttons(consensus_tickers)
+    # === CONSENSUS PRIME ===
+    prime_tickers = [t for t in top8_tickers if t in sdt_selected and t in hc_selected]
+    lines.append(f"🏆 CONSENSUS PRIME — {len(prime_tickers)} saham")
+    if not prime_tickers:
+        lines.append("Tidak ada irisan Backbone Top-8 ∩ SDT ∩ HC hari ini. Kualitas terbatas, bukan dipaksakan.")
+    for i, t in enumerate(prime_tickers, 1):
+        r = pool_by_ticker[t]
+        info = backbone_result["all_scored"].get(t, {})
+        hc = r.get("high_conviction", {})
+        sm_pct = r.get("whitelist_accumulation_net_pct")
+        sm_tag = ""
+        if isinstance(sm_pct, (int, float)):
+            if sm_pct >= 15 and (r.get("whitelist_num_brokers") or 0) >= 2:
+                sm_tag = f"  |  💎 TRIPLE CONFIRMATION (smart money net-buy {sm_pct:+.0f}%, {r.get('whitelist_num_brokers')} broker)"
+            elif sm_pct <= SMART_MONEY_NET_SELL_THRESHOLD:
+                sm_tag = f"  |  ⚠️ SMART-MONEY DIVERGENCE (net-sell {sm_pct:+.0f}%)"
+        lines.append(
+            f"{i}. {t}\n"
+            f"   Backbone: {info.get('probability_score', '-')} (danger {info.get('predicted_danger', '-')})\n"
+            f"   HC: {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)}{sm_tag}"
+        )
 
-    try:
-        summary_text = await asyncio.to_thread(core.ask_gemini_to_analyze, gemini_input, core.CONSENSUS_BRIEF_INSTRUCTION)
-        await core.safe_reply(update.message, summary_text + streak_block + sector_block + smart_money_block + multibagger_block + multi_broker_block, reply_markup=buttons)
-    except Exception as e:
-        print(f"⚠️ Gemini consensus brief gagal: {e}")
-        # Gagal-lunak — tetap kasih daftar mentah kalau Gemini error, jangan diam saja
-        lines = [f"🔗 CONSENSUS (Gemini gagal, tampilan mentah) — {len(qualifying)} saham lolos >=2 tool\n"]
-        for r in qualifying[:15]:
-            lines.append(f"{r['ticker']} ({len(r['_consensus_tools'])} tool: {', '.join(r['_consensus_tools'])})")
-        await core.safe_reply(update.message, "\n".join(lines) + multibagger_block + multi_broker_block, reply_markup=buttons)
+    # === EXPLOSIVE LANE ===
+    explosive_pool = [r for r in pool if r["ticker"] not in prime_tickers]
+    min_score = EXPLOSIVE_MIN_SCORE_BY_REGIME.get(market_regime, EXPLOSIVE_MIN_SCORE_BY_REGIME["R0_UNKNOWN"])
+    explosive_scored = []
+    for r in explosive_pool:
+        score, rejected, _reason = _explosive_score(r, pool)
+        if not rejected and score >= min_score:
+            explosive_scored.append((score, r))
+    explosive_scored.sort(key=lambda pair: pair[0], reverse=True)
+    explosive_picks = explosive_scored[:EXPLOSIVE_MAX_NAMES]
+
+    lines.append(f"\n🚀 EXPLOSIVE LANE — {len(explosive_picks)} saham (min score {min_score}, regime {market_regime})")
+    if not explosive_picks:
+        lines.append("Tidak ada kandidat lolos ambang explosive hari ini.")
+    for i, (score, r) in enumerate(explosive_picks, 1):
+        v5 = core.compute_daytrade_v5_summary(r)
+        rr_now = backbone_engine.compute_rr_at_current_price(r)
+        label = "TRUE EXPLOSIVE" if rr_now >= 2.0 or v5["room"]["score"] >= 80 else "FAST MOMENTUM"
+        lines.append(
+            f"{i}. {r['ticker']} — Explosive {score:.0f} [{label}]\n"
+            f"   Room {v5['room']['score']} | RR@now {rr_now} | Activity {v5['activity']['score']}\n"
+            f"   Action: /check {r['ticker']} sebelum entry"
+        )
+
+    # === SMART-MONEY WATCH (akumulasi kuat, belum ke-konfirmasi SDT/HC) ===
+    watch_only = [
+        r for r in pool
+        if r["ticker"] not in prime_tickers and r["ticker"] not in {rr["ticker"] for _, rr in explosive_picks}
+        and isinstance(r.get("whitelist_accumulation_net_pct"), (int, float))
+        and r["whitelist_accumulation_net_pct"] >= 15
+        and (r.get("whitelist_num_brokers") or 0) >= 2
+    ]
+    watch_only.sort(key=lambda r: r["whitelist_accumulation_net_pct"], reverse=True)
+    watch_only = watch_only[:3]
+    if watch_only:
+        lines.append(f"\n💰 SMART-MONEY WATCH — {len(watch_only)} saham (akumulasi kuat, belum terkonfirmasi teknikal)")
+        for r in watch_only:
+            lines.append(f"• {r['ticker']} — net-buy whitelist {r['whitelist_accumulation_net_pct']:+.0f}% ({r.get('whitelist_num_brokers')} broker) — status: pantau, bukan entry call")
+
+    # === LONG-HORIZON WATCH (multibagger, horizon terpisah) ===
+    multibagger_candidates = (nightly_engine.load_rapidapi_market_intelligence().get("multibagger") or {}).get("candidates", [])
+    multibagger_candidates = sorted(multibagger_candidates, key=lambda c: c.get("multibagger_score", 0), reverse=True)[:2]
+    if multibagger_candidates:
+        lines.append(f"\n🔭 LONG-HORIZON WATCH — {len(multibagger_candidates)} saham (horizon bulan, TIDAK dicampur ke skor Day 1-5)")
+        for c in multibagger_candidates:
+            sym = c.get("symbol", "?")
+            also_in = []
+            if sym in prime_tickers: also_in.append("Consensus Prime")
+            if sym in {r["ticker"] for _, r in explosive_picks}: also_in.append("Explosive")
+            if sym in hc_selected: also_in.append("HC")
+            also_str = f" | Juga di: {', '.join(also_in)}" if also_in else ""
+            lines.append(f"• {sym} — Multibagger {c.get('multibagger_score', '-')}/100, {c.get('potential_return', '-')} ({c.get('timeframe', '-')}){also_str}")
+
+    lines.append("\nDetail lengkap & konfirmasi live: /check TICKER")
+    if staleness_note:
+        lines.insert(0, staleness_note)
+
+    # Kunci ke winrate — source="consensus" — Prime + Explosive, sama
+    # semangat dengan versi lama (uji apakah backbone-filtered picks
+    # genuinely lebih akurat).
+    lock_candidates = [pool_by_ticker[t] for t in prime_tickers] + [r for _, r in explosive_picks]
+    if lock_candidates:
+        try:
+            await asyncio.to_thread(core.lock_daily_daytrade_picks, lock_candidates, "consensus")
+        except Exception as e:
+            print(f"⚠️ Gagal mengunci picks /consensus untuk /winrate: {e}")
+
+    all_tickers = prime_tickers + [r["ticker"] for _, r in explosive_picks] + [r["ticker"] for r in watch_only]
+    buttons = core.build_check_buttons(all_tickers)
+    await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
 
 
 async def broksum_command(update, context):

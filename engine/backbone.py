@@ -62,6 +62,17 @@ BACKBONE_TOP_N = 8
 BACKBONE_MIN_ACCEPTABLE = 5  # below this, doc says show fewer + state "market quality is limited" rather than force-fill
 
 
+def percentile_rank_list(values: list, value: float) -> float:
+    """
+    Thin wrapper over core.percentile_rank for plain Python lists —
+    percentile_rank expects a pd.Series (calls .dropna() internally), and
+    callers outside this module (e.g. commands/scan.py's Explosive Lane
+    scoring) don't otherwise need a pandas import just for this. Returns
+    0.0-1.0.
+    """
+    return core.percentile_rank(pd.Series(values), value) if values else 0.5
+
+
 def _f(scoring: dict, key: str, default: float = 0.0) -> float:
     try:
         v = scoring.get(key)
