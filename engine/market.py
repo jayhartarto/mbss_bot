@@ -86,6 +86,36 @@ def get_ihsg_return_today():
         return None
 
 
+def get_ihsg_volatility_percentile(lookback_days: int = 120, window: int = 20) -> float | None:
+    """
+    MBSS v2 (AB-RC1 backbone, user request): where does TODAY's IHSG
+    volatility (stdev of daily returns over the trailing `window` days)
+    rank against its OWN trailing history — same adaptive-percentile
+    convention already used everywhere else in this codebase (RSI, volume
+    ratio, ADX) instead of a fixed magic-number vol threshold, which would
+    need re-tuning every time IDX's baseline volatility regime shifts.
+
+    Returns 0-100 (higher = more volatile than usual), or None if not
+    enough history. Not cached per-day like get_ihsg_return_today() since
+    this is only called once per nightly regime classification, not once
+    per ticker.
+    """
+    try:
+        hist = core.get_yf_ticker("^JKSE").history(period=f"{lookback_days + window}d", timeout=15)
+        if len(hist) < window + 20:
+            return None
+        daily_returns = hist["Close"].pct_change().dropna()
+        rolling_vol = daily_returns.rolling(window).std().dropna()
+        if len(rolling_vol) < 20:
+            return None
+        current_vol = rolling_vol.iloc[-1]
+        pct_rank = core.percentile_rank(rolling_vol.iloc[:-1], current_vol)
+        return round(pct_rank * 100, 1)
+    except Exception as e:
+        print(f"⚠️ Gagal hitung IHSG volatility percentile: {e}")
+        return None
+
+
 def fetch_macro_context():
     """
     Pulls broad market context known to meaningfully influence IDX day-to-day:
@@ -189,7 +219,8 @@ def compute_market_breadth(results: list) -> dict:
     )
 
     ihsg_return_today = get_ihsg_return_today()
-    regime = classify_market_regime(breadth_pct_advancing, ihsg_return_today)
+    ihsg_vol_percentile = get_ihsg_volatility_percentile()
+    regime = classify_market_regime(breadth_pct_advancing, ihsg_return_today, ihsg_vol_percentile)
 
     return {
         "universe": "nightly scan universe (lihat NightlyEngine untuk cakupan persisnya)",
@@ -200,30 +231,53 @@ def compute_market_breadth(results: list) -> dict:
         "breadth_pct_advancing": breadth_pct_advancing,
         "sector_avg_returns_pct": sector_avg_returns_pct,
         "ihsg_return_today_pct": round(ihsg_return_today, 2) if ihsg_return_today is not None else None,
+        "ihsg_volatility_percentile": ihsg_vol_percentile,
         "regime": regime,
     }
 
 
-def classify_market_regime(breadth_pct_advancing, ihsg_return_today_pct) -> str:
+def classify_market_regime(breadth_pct_advancing, ihsg_return_today_pct, ihsg_vol_percentile=None) -> str:
     """
-    Lightweight, SAME-DAY snapshot heuristic — combines today's breadth (%
-    of the scanned universe that closed up) with today's IHSG return into
-    one of five labels. This is NOT a proper multi-day trend/volatility
-    regime model (no breadth history is persisted to detect that yet); it's
-    a rough same-day read, cheap and transparent enough to sanity-check by
-    eye. Thresholds are deliberately simple round numbers, not backtested.
+    MBSS v2 (AB-RC1 backbone, user request): same-day breadth+return
+    snapshot, now split into R1-R5 (matching the AB-RC1 research doc's
+    regime framework) by adding IHSG volatility percentile as a second
+    dimension — distinguishes R1 Bull Stable from R2 Bull High Vol, which
+    a return+breadth-only read can't do (previous version conflated the two
+    into one "STRONG_UPTREND"/"MILD_UPTREND" label).
+
+    Still a SAME-DAY snapshot heuristic, not a proper multi-day trend model
+    — no regime history/persistence/hysteresis yet (a stock market can flip
+    R1<->R3 day to day on borderline breadth numbers). Thresholds are
+    deliberately simple round numbers for R4/R5 (not backtested — mirrors
+    the old function's honesty about this), EXCEPT the volatility split,
+    which uses the same adaptive-percentile convention as the rest of the
+    scoring engine (see get_ihsg_volatility_percentile) rather than a fixed
+    magic number.
+
+    R1 Bull Stable / R2 Bull High Vol / R3 Sideways / R4 Risk Off /
+    R5 Stress / R0 Unknown (insufficient data) — per AB-RC1 doc section 4.
     """
     if breadth_pct_advancing is None or ihsg_return_today_pct is None:
-        return "UNKNOWN"
+        return "R0_UNKNOWN"
+
+    # R5 Stress — most severe risk-off, checked first (takes priority over R4).
+    if ihsg_return_today_pct <= -2.0 and breadth_pct_advancing < 30:
+        return "R5_STRESS"
+    # R4 Risk Off — same threshold the old RISK_OFF label used.
     if ihsg_return_today_pct <= -1.0 and breadth_pct_advancing < 35:
-        return "RISK_OFF"
-    if ihsg_return_today_pct >= 1.0 and breadth_pct_advancing > 65:
-        return "STRONG_UPTREND"
-    if breadth_pct_advancing > 55:
-        return "MILD_UPTREND"
-    if breadth_pct_advancing < 45:
-        return "MILD_DOWNTREND"
-    return "RANGING"
+        return "R4_RISK_OFF"
+
+    is_bull = ihsg_return_today_pct > 0 and breadth_pct_advancing > 55
+    if is_bull:
+        # Volatility percentile missing (network hiccup, insufficient history)
+        # -> default to the MORE CAUTIOUS label (High Vol) rather than assume
+        # calm conditions without evidence.
+        vol_high = ihsg_vol_percentile is None or ihsg_vol_percentile >= 70
+        return "R2_BULL_HIGH_VOL" if vol_high else "R1_BULL_STABLE"
+
+    # Everything else (ranging, or a down day that doesn't clear R4's bar) —
+    # R3 Sideways per AB-RC1's posture ("use the validated moderate gate").
+    return "R3_SIDEWAYS"
 
 
 def save_market_context(breadth_data: dict):
