@@ -2090,6 +2090,16 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
             "high_conviction_checkable": r.get("high_conviction", {}).get("criteria_checkable"),
             "risk_character": r.get("risk_character"), "action_id": r.get("action_id"),
             "value_traded": r.get("value_traded"),
+            # MBSS v2 (user request — bahan riset "apakah squeeze genuinely
+            # prediktif, bukan cuma klaim dari thread orang lain"): snapshot
+            # Bollinger di saat pick dikunci. TIDAK dipakai buat apa pun
+            # otomatis sekarang — murni data buat dianalisis setelah cukup
+            # sampel forward terkumpul (sama disiplin dengan seluruh
+            # tracking backbone AB-RC1: forward-validate dulu, baru
+            # pertimbangkan naikkan bobot).
+            "bollinger_squeeze": r.get("bollinger_squeeze"),
+            "bollinger_bandwidth_percentile": r.get("bollinger_bandwidth_percentile"),
+            "bb_signal_note": r.get("bb_signal_note"),
         }
 
         # MBSS v2 (user request — evaluasi winrate PER BROKER smart money):
