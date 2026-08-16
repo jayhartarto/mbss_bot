@@ -38,11 +38,15 @@ never `from module import name`, never touch `core.xxx` at module level.
 """
 from __future__ import annotations
 
+import os
+import json
+import datetime
+
 import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.4"  # AB-RC1 (doc 24) + RR-at-current-price (1.1) + post-ARA penalty (1.2) + entry_rank (1.3) + whitelist broker net-buy/net-sell bonus/penalty (1.4, user request) -- reuses whitelist_accumulation_net_pct (already established Bias Bandar signal since v3.16.0, zero new RapidAPI cost): net-sell <=-15% w/ >=2 brokers = +10 danger; net-buy >=+15% w/ >=2 brokers = +5 probability. Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.5"  # AB-RC1 (doc 24) + RR-at-current-price (1.1) + post-ARA penalty (1.2) + entry_rank (1.3) + whitelist net-buy/sell (1.4) + danger RR consistency fix (1.5, user request): danger's reused v4 base still penalized RR via risk_reward_at_max internally while probability_score used compute_rr_at_current_price -- added a direct current-price RR penalty to danger so both dimensions judge the same ticker's RR the same way. Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
@@ -97,6 +101,24 @@ def compute_danger_score(scoring: dict, market_regime: str, day_range_percentile
         danger += 12
     elif room_score < 55:
         danger += 6
+
+    # RR-at-current-price consistency fix (MBSS v2, user request — found
+    # while writing the finance skill doc): the reused v4 base above still
+    # penalizes RR internally using risk_reward_at_max (RR at the TOP of
+    # the suggested entry range), the SAME stale measure probability_score
+    # was fixed to stop using (compute_rr_at_current_price, RR at last
+    # close) — meaning danger and probability were judging the SAME
+    # ticker's RR by two different definitions. Add a direct penalty on
+    # the CORRECT current-price RR so danger stays sensitive to real risk
+    # regardless of what the embedded v4 measure assumed. Deliberately
+    # additive (not a replacement of the v4 base) — some overlap with
+    # probability_score's own rr_component is fine, they answer different
+    # questions ("how dangerous" vs "how attractive").
+    rr_now = compute_rr_at_current_price(scoring)
+    if rr_now < 0.5:
+        danger += 10
+    elif rr_now < 1.0:
+        danger += 5
 
     # Volatility position (day_range_pct_10d), cross-sectional percentile
     # within TONIGHT's universe — doc's "continuous volatility position,
@@ -371,3 +393,119 @@ def _quantile(values: list, q: float) -> float | None:
     lo, hi = int(pos), min(int(pos) + 1, len(s) - 1)
     frac = pos - lo
     return s[lo] + (s[hi] - s[lo]) * frac
+
+
+# ==========================================
+# Consensus Prime position-state + cooldown (AB-RC1 doc section 16-17,
+# MBSS v2, user request). Simplified from the doc's literal NEW/ACTIVE/
+# UPGRADED three-state model to NEW/ACTIVE — UPGRADED (a single-lane pick
+# later confirmed by the other lane) needs tracking EVERY single-lane SDT-
+# only/HC-only pick too, not just Prime intersections, which is a bigger
+# state-tracking surface than this pass covers. Flagged here rather than
+# silently doing less than the doc describes.
+#
+# The core risk-control pieces ARE implemented: no duplicate entry signal
+# while a tracked position is still active, and a cooldown after a tracked
+# position resolves via stop-loss (doc section 17: "2-3 trading days
+# unless /check confirms a valid reclaim" — the reclaim override is NOT
+# automated here, a human still decides that via /check).
+# ==========================================
+CONSENSUS_STATE_FILE = os.path.join(core.PROJECT_ROOT, "consensus_position_state.json")
+COOLDOWN_TRADING_DAYS_AFTER_SL = 3
+MAX_HOLD_TRADING_DAYS = 5  # doc section 11: default holding period for Consensus/Explosive short-horizon picks
+
+
+def load_consensus_position_state() -> dict:
+    if not os.path.exists(CONSENSUS_STATE_FILE):
+        return {}
+    try:
+        with open(CONSENSUS_STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Gagal baca consensus_position_state.json: {e}")
+        return {}
+
+
+def save_consensus_position_state(state: dict):
+    try:
+        with open(CONSENSUS_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Gagal simpan consensus_position_state.json: {e}")
+
+
+def _add_trading_days(date_str: str, n: int) -> str:
+    d = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+    added = 0
+    while added < n:
+        d += datetime.timedelta(days=1)
+        if d.weekday() < 5:
+            added += 1
+    return str(d)
+
+
+def resolve_consensus_positions(state: dict, scored: dict) -> dict:
+    """
+    Called EVERY /consensus run, BEFORE classifying today's fresh picks —
+    checks every tracked ACTIVE position against tonight's close: hit TP,
+    hit SL (starts cooldown), or timed out (MAX_HOLD_TRADING_DAYS, doc
+    section 11). Ticker missing from tonight's scored cache (delisted,
+    suspended, dropped out of the eligible universe) is left untouched
+    rather than guessed at. Mutates and returns `state`.
+    """
+    today = core.get_current_trading_day_close_marker()
+    for ticker, info in state.items():
+        if info.get("position_status") != "ACTIVE":
+            continue
+        r = scored.get(ticker)
+        price = r.get("price") if r else None
+        if not price:
+            continue
+        tp, sl = info.get("planned_tp"), info.get("planned_sl")
+        days_held = core.compute_trading_days_held(info.get("entry_date")) or 0
+        if tp and price >= tp:
+            info["position_status"] = "RESOLVED_TP"
+            info["resolved_date"] = today
+        elif sl and price <= sl:
+            info["position_status"] = "RESOLVED_SL"
+            info["resolved_date"] = today
+            info["cooldown_until"] = _add_trading_days(today, COOLDOWN_TRADING_DAYS_AFTER_SL)
+        elif days_held >= MAX_HOLD_TRADING_DAYS:
+            info["position_status"] = "RESOLVED_TIME"
+            info["resolved_date"] = today
+    return state
+
+
+def classify_and_update_consensus_entry(ticker: str, r: dict, state: dict) -> str:
+    """
+    Call ONLY for tickers that qualify as Consensus Prime TODAY (Backbone
+    Top-8 ∩ SDT ∩ HC). Returns one of:
+      "NEW"              — fresh signal, state entry created (entry_date=today).
+      "ACTIVE"           — already an open tracked position; last_confirmation_date
+                            bumped, entry_date/planned_tp/planned_sl UNCHANGED
+                            (doc section 16: no new entry, just reconfirmed).
+      "COOLDOWN_BLOCKED" — resolved via SL recently, still inside cooldown;
+                            caller should NOT display this as an entry signal.
+    Mutates `state` in place (caller is responsible for saving it).
+    """
+    today = core.get_current_trading_day_close_marker()
+    info = state.get(ticker)
+
+    if info and info.get("position_status") == "ACTIVE":
+        info["last_confirmation_date"] = today
+        return "ACTIVE"
+
+    if info and info.get("cooldown_until") and today < info["cooldown_until"]:
+        return "COOLDOWN_BLOCKED"
+
+    targets = r.get("targets") or {}
+    state[ticker] = {
+        "position_status": "ACTIVE",
+        "first_signal_date": today,
+        "last_confirmation_date": today,
+        "entry_date": today,
+        "planned_tp": targets.get("tp_1"),
+        "planned_sl": targets.get("cut_loss"),
+        "cooldown_until": None,
+    }
+    return "NEW"

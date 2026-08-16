@@ -1922,7 +1922,12 @@ async def consensus_command(update, context):
 
     - CONSENSUS PRIME: irisan PERSIS Backbone Top-8 ∩ SDT-lane-positif ∩
       HC-high-conviction pada hari yang sama. Tidak dilonggarkan biar
-      dipaksa ada output — bisa 0.
+      dipaksa ada output — bisa 0. STATE-AWARE (doc §16-17, disederhanakan
+      dari NEW/ACTIVE/UPGRADED jadi NEW/ACTIVE — lihat catatan di
+      engine/backbone.py soal UPGRADED yang belum dikerjakan): ticker yang
+      SUDAH punya posisi aktif tertandai tidak dianggap sinyal beli baru
+      lagi (cukup "konfirmasi ulang"), dan ticker yang BARU kena SL masuk
+      cooldown 3 hari bursa sebelum bisa direkomendasikan ulang.
     - EXPLOSIVE LANE: 1-3 nama dari kandidat lolos Danger Gate (boleh di
       luar Consensus Prime), formula §15.4, gate keras + ambang minimum
       per regime.
@@ -1977,12 +1982,30 @@ async def consensus_command(update, context):
         lines.append(f"{r['backbone_rank']}. {r['ticker']} — prob {r['probability_score']:.0f}, danger {r['predicted_danger']:.0f}{also_str}")
     lines.append("⚠️ Ranking murni, BUKAN sinyal entry siap pakai — cek /check sebelum ambil keputusan.")
 
-    # === CONSENSUS PRIME ===
-    prime_tickers = [t for t in top8_tickers if t in sdt_selected and t in hc_selected]
-    lines.append(f"🏆 CONSENSUS PRIME — {len(prime_tickers)} saham")
-    if not prime_tickers:
+    # === CONSENSUS PRIME (state-aware NEW/ACTIVE/COOLDOWN — doc §16-17) ===
+    # Resolve tracked positions dulu (TP/SL/time-exit) terhadap harga
+    # PENUTUPAN TERBARU (scored, bukan cuma pool yang sudah difilter gate —
+    # ticker yang sudah dipegang tetap perlu dicek walau malam ini tidak
+    # lolos gate lagi), BARU klasifikasi kandidat Prime hari ini.
+    position_state = backbone_engine.load_consensus_position_state()
+    backbone_engine.resolve_consensus_positions(position_state, scored)
+
+    prime_tickers_today = [t for t in top8_tickers if t in sdt_selected and t in hc_selected]
+    prime_display = []  # (ticker, status) buat ditampilkan sebagai entry beneran
+    cooldown_blocked = []
+    for t in prime_tickers_today:
+        status = backbone_engine.classify_and_update_consensus_entry(t, pool_by_ticker[t], position_state)
+        if status == "COOLDOWN_BLOCKED":
+            cooldown_blocked.append(t)
+        else:
+            prime_display.append((t, status))
+    backbone_engine.save_consensus_position_state(position_state)
+    prime_tickers = [t for t, _ in prime_display]  # dipakai section EXPLOSIVE/tombol di bawah, exclude cooldown-blocked
+
+    lines.append(f"🏆 CONSENSUS PRIME — {len(prime_display)} saham")
+    if not prime_display:
         lines.append("Tidak ada irisan Backbone Top-8 ∩ SDT ∩ HC hari ini. Kualitas terbatas, bukan dipaksakan.")
-    for i, t in enumerate(prime_tickers, 1):
+    for i, (t, status) in enumerate(prime_display, 1):
         r = pool_by_ticker[t]
         info = backbone_result["all_scored"].get(t, {})
         hc = r.get("high_conviction", {})
@@ -1993,10 +2016,20 @@ async def consensus_command(update, context):
                 sm_tag = f"  |  💎 TRIPLE CONFIRMATION (smart money net-buy {sm_pct:+.0f}%, {r.get('whitelist_num_brokers')} broker)"
             elif sm_pct <= SMART_MONEY_NET_SELL_THRESHOLD:
                 sm_tag = f"  |  ⚠️ SMART-MONEY DIVERGENCE (net-sell {sm_pct:+.0f}%)"
+        st_info = position_state.get(t, {})
+        if status == "NEW":
+            status_line = "🆕 NEW CONSENSUS — sinyal baru"
+        else:  # ACTIVE
+            status_line = f"📌 ACTIVE CONSENSUS — sudah dipegang sejak {st_info.get('entry_date', '?')}, ini KONFIRMASI ULANG bukan sinyal beli baru"
         lines.append(
-            f"{i}. {t}\n"
+            f"{i}. {t} — {status_line}\n"
             f"   Entry Rank #{info.get('entry_rank', '-')}/{info.get('entry_rank_total', '-')} (prob {info.get('probability_score', '-')}, danger {info.get('predicted_danger', '-')})\n"
             f"   HC: {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)}{sm_tag}"
+        )
+    if cooldown_blocked:
+        lines.append(
+            f"🕐 {len(cooldown_blocked)} ticker lolos Backbone∩SDT∩HC TAPI baru kena SL beberapa hari lalu, "
+            f"masih cooldown ({', '.join(cooldown_blocked)}) — tidak direkomendasikan ulang, kecuali /check konfirmasi reclaim genuine."
         )
 
     # === EXPLOSIVE LANE ===
