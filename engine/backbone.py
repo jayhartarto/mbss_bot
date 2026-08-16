@@ -42,7 +42,7 @@ import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.3"  # AB-RC1 (doc section 24) + RR-at-current-price fix (1.1) + post-ARA chase-risk danger penalty (1.2) + entry_rank/entry_rank_total added to every gate-survivor entry (user request: a single universal rank number shown consistently in /hc, /screendaytrade, /consensus, not just raw danger/probability figures). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.4"  # AB-RC1 (doc 24) + RR-at-current-price (1.1) + post-ARA penalty (1.2) + entry_rank (1.3) + whitelist broker net-buy/net-sell bonus/penalty (1.4, user request) -- reuses whitelist_accumulation_net_pct (already established Bias Bandar signal since v3.16.0, zero new RapidAPI cost): net-sell <=-15% w/ >=2 brokers = +10 danger; net-buy >=+15% w/ >=2 brokers = +5 probability. Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
@@ -135,6 +135,22 @@ def compute_danger_score(scoring: dict, market_regime: str, day_range_percentile
         danger += 12
     if scoring.get("is_financial_distress_flag"):
         danger += 15
+
+    # Whitelist broker net-sell (MBSS v2, user request — "masukkan broksum
+    # RapidAPI sebagai bonus/penalti"). whitelist_accumulation_net_pct sudah
+    # dihitung GRATIS tiap /eodscan (whitelist sweep RapidAPI yang sudah
+    # jalan, lihat apply_whitelist_accumulation_adjustment) — TIDAK ada call
+    # RapidAPI tambahan di sini, cuma baca field yang sudah ada. Beda dari
+    # endpoint RapidAPI lain yang baru online minggu ini, sinyal broker
+    # whitelist ini SUDAH established (Bias Bandar sudah jadi penalti skor
+    # inti sejak v3.16.0) — bukan sinyal belum-teruji, jadi aman masuk
+    # Danger Gate langsung, tidak perlu fase forward-validation terpisah.
+    # None kalau ticker di luar cakupan whitelist sweep -> 0 penalti (netral,
+    # sesuai aturan "RapidAPI unavailable = netral" doc section 6.3).
+    whitelist_net_pct = scoring.get("whitelist_accumulation_net_pct")
+    whitelist_brokers = scoring.get("whitelist_num_brokers") or 0
+    if whitelist_net_pct is not None and whitelist_net_pct <= -15 and whitelist_brokers >= 2:
+        danger += 10  # smart-money net-sell kompak walau teknikal kelihatan oke -- pola distribusi
 
     # Regime routing — same danger inputs read differently depending on
     # whether the whole market is calm or stressed.
@@ -232,6 +248,14 @@ def compute_probability_score(scoring: dict, market_regime: str) -> float:
         probability += (v5["risk"]["score"] - 50.0) * 0.05  # sideways rewards safety a bit more
     elif market_regime in ("R4_RISK_OFF", "R5_STRESS", "R0_UNKNOWN"):
         probability -= 5.0  # doc: "lower confidence and reduced output" in risk-off/stress
+
+    # Whitelist broker net-buy (MBSS v2, user request — see compute_danger_score
+    # for why this is safe to use directly: established Bias Bandar signal,
+    # zero extra RapidAPI cost, already reads None/neutral when unavailable).
+    whitelist_net_pct = scoring.get("whitelist_accumulation_net_pct")
+    whitelist_brokers = scoring.get("whitelist_num_brokers") or 0
+    if whitelist_net_pct is not None and whitelist_net_pct >= 15 and whitelist_brokers >= 2:
+        probability += 5.0  # bounded confirmation bonus — smart money net-buy, doesn't rescue a fundamentally poor setup on its own
 
     return round(max(0.0, min(100.0, probability)), 1)
 

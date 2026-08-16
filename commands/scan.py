@@ -1959,6 +1959,24 @@ async def consensus_command(update, context):
         "",
     ]
 
+    # === BACKBONE TOP-5 (murni ranking, user request) ===
+    # Entry Rank #1-8 seringkali TIDAK muncul di CONSENSUS PRIME/EXPLOSIVE
+    # sama sekali kalau tickernya belum penuhi kriteria structural HC atau
+    # lane SDT — jadi sinyal paling "murni" (probability tertinggi di
+    # antara SEMUA yang lolos Danger Gate) bisa hilang tak kelihatan.
+    # Section ini tampilkan langsung, TIDAK difilter tool lain sama sekali.
+    top5 = backbone_result.get("top8", [])[:5]
+    lines.append(f"🧱 BACKBONE TOP-5 (murni ranking, TANPA filter SDT/HC — {len(top5)} saham)")
+    if not top5:
+        lines.append("Tidak ada kandidat lolos Danger Gate malam ini.")
+    for r in top5:
+        also = []
+        if r["ticker"] in sdt_selected: also.append("SDT")
+        if r["ticker"] in hc_selected: also.append("HC")
+        also_str = f" | Juga di: {', '.join(also)}" if also else " | Belum lolos kriteria SDT/HC manapun"
+        lines.append(f"{r['backbone_rank']}. {r['ticker']} — prob {r['probability_score']:.0f}, danger {r['predicted_danger']:.0f}{also_str}")
+    lines.append("⚠️ Ranking murni, BUKAN sinyal entry siap pakai — cek /check sebelum ambil keputusan.")
+
     # === CONSENSUS PRIME ===
     prime_tickers = [t for t in top8_tickers if t in sdt_selected and t in hc_selected]
     lines.append(f"🏆 CONSENSUS PRIME — {len(prime_tickers)} saham")
