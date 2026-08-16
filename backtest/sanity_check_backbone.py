@@ -61,10 +61,12 @@ def main():
         distress = r.get("is_financial_distress_flag")
         floor = r.get("is_near_price_floor")
         flag_str = " ⚠️ DISTRESS" if distress else (" ⚠️ NEAR_FLOOR" if floor else "")
+        rr_now = backbone_engine.compute_rr_at_current_price(r)
+        rr_max = (r.get('targets') or {}).get('risk_reward_at_max', '-')
         print(
             f"{r['backbone_rank']}. {r['ticker']:6s} danger={r['predicted_danger']:5.1f} "
             f"prob={r['probability_score']:5.1f}  RSI={r.get('rsi', '-')}  ADX={r.get('adx', '-')}  "
-            f"RR={ (r.get('targets') or {}).get('risk_reward_at_max', '-') }{flag_str}"
+            f"RR@now={rr_now}  RR@entry_max={rr_max}{flag_str}"
         )
         if distress:
             distress_leak.append(r["ticker"])

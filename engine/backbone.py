@@ -42,7 +42,7 @@ import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.0"  # MBSS Adaptive Backbone Research Candidate 1 — freeze per doc section 24. Bump (and log the reason) on any threshold/weight change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.1"  # AB-RC1 (doc section 24) + user fix: RR component now uses compute_rr_at_current_price (RR at last close) instead of risk_reward_at_max (RR at the top of the suggested entry range, which understates real risk once price has run past entry_max), weight 5%->15%. Bump (and log the reason) on any threshold/weight change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
@@ -115,6 +115,32 @@ def compute_danger_score(scoring: dict, market_regime: str, day_range_percentile
     return round(max(0.0, min(100.0, danger)), 1)
 
 
+def compute_rr_at_current_price(scoring: dict) -> float:
+    """
+    RR di HARGA TERAKHIR (close), bukan risk_reward_at_max (RR di batas ATAS
+    range entry yang disarankan) — koreksi user (real case: range entry
+    biasanya area pullback DI BAWAH harga sekarang, jadi kalau harga sudah
+    lewat entry_max, risk_reward_at_max under-estimate risiko beli di harga
+    sekarang; RR asli kalau masuk SEKARANG bisa lebih jelek dari yang
+    ditampilkan). Dihitung lokal di backbone.py, TIDAK mengubah
+    risk_reward_at_max di scoring['targets'] (field itu dipakai fitur lain
+    di luar backbone — /check, /myportfolio, dll — scoped di sini saja).
+
+    Returns 0 kalau harga sudah >= TP1 (tidak ada ruang naik lagi) atau
+    harga sudah <= cut_loss (SL sudah kebobol secara definisi) — dua-duanya
+    genuinely RR=0/negatif, bukan data hilang.
+    """
+    price = _f(scoring, "price")
+    targets = scoring.get("targets") or {}
+    tp_1 = _f(targets, "tp_1")
+    cut_loss = _f(targets, "cut_loss")
+    if not price or not tp_1 or not cut_loss or price <= cut_loss or price >= tp_1:
+        return 0.0
+    risk = price - cut_loss
+    reward = tp_1 - price
+    return round(reward / risk, 2) if risk > 0 else 0.0
+
+
 def compute_probability_score(scoring: dict, market_regime: str) -> float:
     """
     0-100, HIGHER = BETTER. Blend of continuation quality, money-flow
@@ -129,7 +155,7 @@ def compute_probability_score(scoring: dict, market_regime: str) -> float:
     cmf = _f(scoring, "cmf")
     adx = _f(scoring, "adx")
     rs_vs_ihsg = _f(scoring, "relative_strength_vs_ihsg")
-    rr_max = _f(scoring.get("targets") or {}, "risk_reward_at_max", 0)
+    rr_now = compute_rr_at_current_price(scoring)
 
     # ADX reliability: a trend signal is only as trustworthy as the trend
     # strength behind it (see calculate_adx's own docstring/convention —
@@ -143,7 +169,7 @@ def compute_probability_score(scoring: dict, market_regime: str) -> float:
     # Relative strength vs IHSG, capped +-15% mapped to 0-100.
     rs_component = max(0.0, min(100.0, 50.0 + (max(-15.0, min(15.0, rs_vs_ihsg)) / 15.0) * 50.0))
 
-    rr_component = max(0.0, min(100.0, rr_max * 40.0))  # RR 2.5:1 -> 100
+    rr_component = max(0.0, min(100.0, rr_now * 40.0))  # RR 2.5:1 -> 100, dihitung di harga sekarang (lihat compute_rr_at_current_price)
 
     bollinger_component = 50.0
     if scoring.get("bollinger_squeeze"):
@@ -155,16 +181,20 @@ def compute_probability_score(scoring: dict, market_regime: str) -> float:
         bollinger_component -= 8.0
     bollinger_component = max(0.0, min(100.0, bollinger_component))
 
+    # rr_component dinaikkan dari 5% -> 15% (user request, real observation:
+    # Top-8 sanity-check pertama SEMUANYA punya RR<1 tanpa ini menekan
+    # urutan) -- ditrim dari continuation (20->15) dan CMF (15->10) supaya
+    # bobot total tetap ~1.0.
     probability = (
-        v5["continuation"]["score"] * 0.20
-        + cmf_component * 0.15
+        v5["continuation"]["score"] * 0.15
+        + cmf_component * 0.10
         + adx_reliability * 0.10
         + rs_component * 0.15
         + bollinger_component * 0.05
         + v5["risk"]["score"] * 0.15   # Safety
         + v5["volq"]["score"] * 0.10
         + v5["room"]["score"] * 0.05
-        + rr_component * 0.05
+        + rr_component * 0.15
     )
 
     # Regime compatibility — small posture nudge, per doc section 4/15.
