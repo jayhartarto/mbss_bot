@@ -164,9 +164,21 @@ async def screen_daytrade(update, context):
     perburuan "saham mana yang lagi aktif/dikejar buyer saat ini" — HANYA
     berguna saat jam bursa (di luar jam bursa, tidak ada kandidat live untuk
     ditampilkan, karena memang tidak ada apa pun yang "aktif sekarang").
+
+    Opsi "/screendaytrade rank" | "prob" | "danger" (AB-RC1 backbone, user
+    request) — kandidat yang ditampilkan TETAP sama (lane/seleksi V5 tidak
+    berubah), cuma urutan tampilannya diurutkan ulang berdasarkan angka
+    backbone, buat cepat lihat mana yang paling bagus/aman di antara
+    pilihan yang cukup banyak.
     """
     use_issi = len(context.args) > 0 and context.args[0].lower() == "issi"
     use_live = len(context.args) > 0 and context.args[0].lower() == "live"
+    # AB-RC1 backbone (MBSS v2, user request — "sort by rank, probability,
+    # danger"): "/screendaytrade rank|prob|danger" re-urutkan TAMPILAN
+    # kandidat yang SAMA (tidak mengubah lane/seleksi V5 yang sudah ada)
+    # berdasarkan angka backbone, biar cepat lihat mana yang paling
+    # aman/mungkin di antara pilihan yang sudah banyak.
+    sort_mode = context.args[0].lower() if len(context.args) > 0 and context.args[0].lower() in ("rank", "prob", "danger") else None
     # MBSS v2 (user request — tag smart money di semua tools): ini BACA CACHE
     # saja (broksum_250, sudah di-fetch tiap malam), TIDAK fetch Index Alpha
     # baru — jadi tetap konsisten dengan aturan lama "screendaytrade tidak
@@ -260,6 +272,17 @@ async def screen_daytrade(update, context):
             filter_tier_note = filter_tier_note + " + Positive Bias lane refactor + live active breakout context"
         else:
             filter_tier_note = filter_tier_note + " + Positive Bias lane refactor (fallback karena kandidat READY terbatas)"
+
+    if sort_mode:
+        def _bb(r):
+            return (backbone_result or {}).get("all_scored", {}).get(r["ticker"], {})
+        if sort_mode == "rank":
+            top_candidates.sort(key=lambda r: (_bb(r).get("entry_rank") is None, _bb(r).get("entry_rank") or 0))
+        elif sort_mode == "prob":
+            top_candidates.sort(key=lambda r: (_bb(r).get("probability_score") is not None, _bb(r).get("probability_score") or -1), reverse=True)
+        else:  # danger
+            top_candidates.sort(key=lambda r: (_bb(r).get("predicted_danger") is None, _bb(r).get("predicted_danger") or 0))
+        filter_tier_note = filter_tier_note + f" — diurutkan ulang backbone: {sort_mode}"
 
     if use_live and not top_candidates:
         await core.safe_reply(
@@ -1014,12 +1037,17 @@ async def high_conviction_command(update, context):
     ditaruh paling belakang, TIDAK di-exclude (tetap HIGH CONVICTION,
     cuma datanya belum lengkap untuk dibandingkan RR-nya).
 
+    /hc rank | /hc prob | /hc danger — urutkan berdasarkan angka backbone
+    AB-RC1 (entry_rank/probability_score/predicted_danger, sama yang
+    ditampilkan di tiap baris) — user request, buat cepat lihat mana yang
+    paling bagus/aman di antara kandidat HIGH CONVICTION yang cukup banyak.
+
     Murni baca cache (nightly_engine.load_daily_scan_cache) — TIDAK fetch
     apa pun, jadi instan. is_high_conviction sudah dihitung penuh saat
     /eodscan (7-kriteria Minervini/IBD-style breakout check), tinggal
     filter+urutkan di sini.
     """
-    sort_by_rr = len(context.args) > 0 and context.args[0].lower() == "rr"
+    sort_mode = context.args[0].lower() if len(context.args) > 0 else None  # None (default), "rr", "rank", "prob", "danger"
 
     # MBSS v2 (user request): tampilkan data LAMA (dari scan malam
     # sebelumnya, atau formula versi lama) dengan keterangan jelas,
@@ -1048,7 +1076,7 @@ async def high_conviction_command(update, context):
         await core.safe_reply(update.message, "📋 Tidak ada saham HIGH CONVICTION di cache hari ini.")
         return
 
-    if sort_by_rr:
+    if sort_mode == "rr":
         # None-safe: ticker tanpa RR terhitung ditaruh PALING BELAKANG (bukan
         # dibuang) — pakai (punya_rr, nilai_rr) sebagai key gabungan supaya
         # yang punya RR selalu menang dibanding yang tidak, baru di antara
@@ -1061,6 +1089,23 @@ async def high_conviction_command(update, context):
             reverse=True,
         )
         sort_label = "RR tertinggi"
+    elif sort_mode in ("rank", "prob", "danger"):
+        # AB-RC1 backbone (MBSS v2, user request — "sort by rank, probability,
+        # danger"): urut ulang kandidat HC berdasarkan angka backbone yang
+        # SAMA dipakai di /screendaytrade/consensus/check, bukan cuma pakai
+        # compute_daytrade_score. Ticker tanpa data backbone (di luar cakupan
+        # /eodscan malam ini) ditaruh PALING BELAKANG, bukan dibuang.
+        def _bb(r):
+            return (backbone_result or {}).get("all_scored", {}).get(r["ticker"], {})
+        if sort_mode == "rank":
+            candidates.sort(key=lambda r: (_bb(r).get("entry_rank") is None, _bb(r).get("entry_rank") or 0))
+            sort_label = "Entry Rank backbone (terbaik dulu)"
+        elif sort_mode == "prob":
+            candidates.sort(key=lambda r: (_bb(r).get("probability_score") is not None, _bb(r).get("probability_score") or -1), reverse=True)
+            sort_label = "probability backbone tertinggi"
+        else:  # danger
+            candidates.sort(key=lambda r: (_bb(r).get("predicted_danger") is None, _bb(r).get("predicted_danger") or 0))
+            sort_label = "danger backbone terendah (paling aman dulu)"
     else:
         # MBSS v2 (user request — /hc positioning vs /screendaytrade): urutan
         # DEFAULT diubah dari "Skor Final" (Value/Momentum/Sentimen 25/45/30%,
