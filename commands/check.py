@@ -32,6 +32,7 @@ import engine.broker as broker_engine
 import engine.scoring as scoring_engine
 import engine.market as market_engine
 import engine.nightly as nightly_engine
+import engine.backbone as backbone_engine
 
 
 async def check_stock(update, context):
@@ -274,6 +275,32 @@ async def check_stock(update, context):
     if result.get("bollinger_squeeze"):
         bb_line += f"\n🎯 Bollinger squeeze (bandwidth persentil {result.get('bollinger_bandwidth_percentile', '-')}) — volatilitas terkompresi, potensi pra-breakout (arah belum pasti)"
 
+    # AB-RC1 backbone (MBSS v2, user request — "bisa dibandingkan posisi
+    # dengan entry lainnya"): angka rank yang SAMA dipakai konsisten di
+    # /hc, /screendaytrade, /consensus, sekarang juga di /check — supaya
+    # 1 ticker bisa langsung dibandingkan posisinya di antara SEMUA
+    # kandidat yang lolos Danger Gate malam ini, bukan cuma dilihat sendiri.
+    # Diam saja (bukan error) kalau ticker ini di luar cakupan /eodscan
+    # malam ini (backbone belum pernah dihitung, atau ticker tidak masuk
+    # universe syariah eligible) — /check tetap jalan seperti biasa.
+    backbone_line = ""
+    try:
+        backbone_result, _ = nightly_engine.load_backbone_daily_allow_stale()
+        bb_info = (backbone_result or {}).get("all_scored", {}).get(ticker) if backbone_result else None
+        if bb_info and "predicted_danger" in bb_info:
+            if "entry_rank" in bb_info:
+                backbone_line = (
+                    f"\n🧱 Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} "
+                    f"(prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f}, lolos Danger Gate)"
+                )
+            else:
+                backbone_line = (
+                    f"\n🧱 TIDAK lolos Danger Gate malam ini "
+                    f"(prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f}) — tidak ikut ranking"
+                )
+    except Exception as e:
+        print(f"⚠️ /check: gagal ambil backbone entry rank untuk {ticker}: {e}")
+
     # MBSS v2 (RapidAPI integration, user request) — replaces the old
     # "💹 BROKER RIIL" block (which mixed Index Alpha/Zapi/screenshot sources,
     # each with a different calc basis, making day-to-day numbers
@@ -317,6 +344,7 @@ async def check_stock(update, context):
         f"{_icon_score(sm)} Momentum {sm}  |  "
         f"{_icon_score(ss)} Sentimen {ss}"
         f"{bb_line}"
+        f"{backbone_line}"
     )
 
     # ── Target intraday ────────────────────────────────────────────
