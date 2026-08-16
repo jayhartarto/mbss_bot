@@ -42,7 +42,7 @@ import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.1"  # AB-RC1 (doc section 24) + user fix: RR component now uses compute_rr_at_current_price (RR at last close) instead of risk_reward_at_max (RR at the top of the suggested entry range, which understates real risk once price has run past entry_max), weight 5%->15%. Bump (and log the reason) on any threshold/weight change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.2"  # AB-RC1 (doc section 24) + RR-at-current-price fix (1.1) + post-ARA chase-risk danger penalty (real case: TEBE ranked #1 the day after limit-up on continuation/CMF/volq strength alone). Bump (and log the reason) on any threshold/weight change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
@@ -95,6 +95,23 @@ def compute_danger_score(scoring: dict, market_regime: str, day_range_percentile
             danger += 15
         elif day_range_percentile >= 75:
             danger += 7
+
+    # Post-ARA chase risk (user real case: TEBE ranked #1 probability the
+    # day after limit-up — continuation/CMF/volq all read very strong right
+    # after an ARA, but that's precisely the classic gap-down/fade-next-day
+    # setup, not genuine quality). RSI-overbought (already in the v4 base)
+    # and RR (below) weren't enough alone to catch this — explicit penalty
+    # on the single-day return itself. IDX auto-reject bands are price-tier
+    # dependent (roughly 20-35%), so this is a deliberately blunt proxy
+    # (same spirit as is_volume_spike_anomaly's vol_ratio>3.0 threshold
+    # elsewhere in this codebase), not an exact ARA-band calculation.
+    ret_1d = _f(scoring, "ret_1d_pct")
+    if ret_1d >= 20:
+        danger += 20
+    elif ret_1d >= 12:
+        danger += 10
+    if scoring.get("is_volume_spike_anomaly"):
+        danger += 6
 
     # Explicit flags the v4 risk score doesn't check directly.
     if scoring.get("obv_divergence") == "bearish_divergence":
