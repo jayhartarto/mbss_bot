@@ -50,6 +50,7 @@ import engine.nightly as nightly_engine
 import engine.broker as broker_engine
 import engine.scoring as scoring_engine
 import engine.market as market_engine
+import engine.backbone as backbone_engine
 
 
 # ---------------------------------------------------------------------
@@ -218,6 +219,22 @@ async def screen_daytrade(update, context):
         await core.safe_reply(update.message, "⚠️ Tidak ada data yang berhasil diambil. Coba lagi nanti.")
         return
 
+    # AB-RC1 backbone (MBSS v2, user backtest — lihat
+    # backtest/MBSS_v317_AB_RC1_Final_Implementation_and_Research-1.md):
+    # saring ke kandidat yang lolos Danger Gate malam ini SEBELUM V5
+    # pre-select — Danger Gate menyaring risiko, logika lane/scoring V5 di
+    # bawah TIDAK berubah. Fallback ke `results` mentah kalau backbone
+    # belum pernah dihitung (misal /eodscan belum jalan lagi sejak fitur
+    # ini di-deploy) — tidak pernah hard-block.
+    backbone_result, backbone_staleness = nightly_engine.load_backbone_daily_allow_stale()
+    results_before_gate = len(results)
+    results = backbone_engine.filter_to_gate_survivors(results, backbone_result)
+    if backbone_result:
+        print(f"🧱 /screendaytrade: {len(results)}/{results_before_gate} lolos Danger Gate ({(backbone_result or {}).get('market_regime', '?')}).")
+    if not results:
+        await core.safe_reply(update.message, "⚠️ Tidak ada kandidat yang lolos Danger Gate malam ini. Coba lagi setelah /eodscan berikutnya.")
+        return
+
     # Stage 1 V5: setup lane + active closing momentum lane. Stage 2: live intraday breakout on shortlist only.
     # In "live" mode, widen BOTH the pre-candidate pool and the live-enrichment
     # pool — the default pool (top-20 by EOD V5 score) can miss a ticker
@@ -268,6 +285,8 @@ async def screen_daytrade(update, context):
         await asyncio.to_thread(broker_engine.get_or_refresh_intraday_market_snapshot)
 
         lines = ["⚡ SCREENING DAY TRADE — AKTIF SEKARANG (live VWAP + vol pace)\n"]
+        if backbone_staleness:
+            lines.insert(0, backbone_staleness)
         lines.append(f"{filter_tier_note}\n")
         lines.append("Catatan: Diurutkan MURNI dari sinyal live (bukan lane EOD) — proxy terdekat ke \"orderbook condong ke buyer\" dari data yang tersedia (bot ini TIDAK punya akses order-book bid/ask asli). Ini RADAR, bukan entry final.\n")
         for i, r in enumerate(top_candidates, 1):
@@ -301,6 +320,8 @@ async def screen_daytrade(update, context):
         return
 
     lines = ["⚡ SCREENING DAY TRADE - RADAR BREAKOUT V5 ACTIVITY\n"]
+    if backbone_staleness:
+        lines.insert(0, backbone_staleness)
     lines.append(f"Kriteria: {filter_tier_note}\n")
     lines.append("Catatan: Ini RADAR, bukan entry final. Entry live wajib lewat /executiongate atau /check.\n")
     lines.append("Legend: B=Breakout, C=Continuation, Act=Activity/Liquidity, VolQ=Volume Breakout Quality, Room=Entry Room, Risk=risiko teknikal.\n")
@@ -999,6 +1020,15 @@ async def high_conviction_command(update, context):
             "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu."
         )
         return
+
+    # AB-RC1 backbone (MBSS v2, user backtest) — saring ke kandidat yang
+    # lolos Danger Gate malam ini SEBELUM kriteria HIGH CONVICTION di bawah.
+    # Fallback ke `scored` mentah kalau backbone belum pernah dihitung.
+    backbone_result, backbone_staleness = nightly_engine.load_backbone_daily_allow_stale()
+    if backbone_staleness:
+        staleness_note = f"{staleness_note}\n{backbone_staleness}" if staleness_note else backbone_staleness
+    pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
+    scored = {r["ticker"]: r for r in pool}
 
     candidates = [r for r in scored.values() if r.get("high_conviction", {}).get("is_high_conviction")]
     if not candidates:

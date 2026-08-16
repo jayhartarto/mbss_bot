@@ -294,6 +294,27 @@ def compute_backbone(results: list, market_regime: str) -> dict:
     }
 
 
+def filter_to_gate_survivors(candidates: list, backbone_result: dict | None) -> list:
+    """
+    MBSS v2 (AB-RC1 doc section 5): SDT/HC "receive the backbone candidate
+    pool" before applying their own tool-specific ranking — filters a list
+    of scoring dicts down to tonight's Danger-Gate survivors (NOT just the
+    narrow Top-8; the doc's Top-8 is used for Consensus Prime/Explosive
+    Lane specifically, see doc section 6.1, while SDT/HC each need a wider
+    pool to keep finding DIFFERENT candidates via their own existing lane
+    logic rather than nearly duplicating each other's output).
+
+    If `backbone_result` is missing (e.g. /eodscan hasn't run yet since
+    this shipped), returns `candidates` UNCHANGED — same "degrade
+    gracefully, never hard-block" convention as RapidAPI-missing/cache-stale
+    handling elsewhere in this codebase.
+    """
+    if not backbone_result:
+        return candidates
+    all_scored = backbone_result.get("all_scored", {})
+    return [r for r in candidates if all_scored.get(r.get("ticker"), {}).get("passed_danger_gate")]
+
+
 def _quantile(values: list, q: float) -> float | None:
     """Simple linear-interpolation quantile, no numpy dependency needed for this list size."""
     if not values:
