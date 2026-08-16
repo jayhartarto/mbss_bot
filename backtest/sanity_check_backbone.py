@@ -12,7 +12,14 @@ financial-distress ticker slipping through the gate) can be caught by eye
 before wiring this into production commands. Genuine forward validation
 starts once this is live and picks are tracked day over day.
 """
+import os
 import sys
+
+# Script lives in backtest/, but `engine` is a package at the project root —
+# add the root to sys.path so this works regardless of the working directory
+# it's invoked from (python backtest/sanity_check_backbone.py from ~/mbss
+# would otherwise fail with ModuleNotFoundError: No module named 'engine').
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import engine.nightly as nightly_engine
 import engine.market as market_engine

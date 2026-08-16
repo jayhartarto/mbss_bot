@@ -58,6 +58,7 @@ from engine import legacy_core as core
 import engine.market as market_engine
 import engine.scoring as scoring_engine
 import engine.broker as broker_engine
+import engine.backbone as backbone_engine
 
 
 # ---------------------------------------------------------------------
@@ -180,6 +181,52 @@ def migrate_legacy_daily_scan_cache():
     ok = cache_manager.set("eod", {"scored": old_cache.get("scored", {})}, meta=meta)
     if ok:
         print(f"🔁 Migrasi cache lama ({core.DAILY_SCAN_CACHE_FILE}) → cache/eod.pkl berhasil.")
+
+
+def save_backbone_daily(backbone_result: dict):
+    """
+    Persist tonight's AB-RC1 backbone result (cache partition
+    "backbone_daily") — /screendaytrade, /hc, /gptpick, /consensus all read
+    this instead of independently re-selecting from the full "eod" cache
+    (AB-RC1 doc section 5/9 Phase 3). Same trading_day_marker + formula_version
+    staleness convention as save_daily_scan_cache, so a stale/missing
+    backbone is detectable the same way.
+    """
+    meta = {
+        "trading_day_marker": core.get_current_trading_day_close_marker(),
+        "formula_version": backbone_result.get("formula_version"),
+    }
+    ok = cache_manager.set("backbone_daily", backbone_result, meta=meta)
+    if ok:
+        print(f"💾 Backbone daily tersimpan (cache/backbone_daily.pkl): {len(backbone_result.get('top8', []))} Top-8")
+    else:
+        print("⚠️ Gagal menyimpan backbone daily cache.")
+
+
+def load_backbone_daily_allow_stale() -> tuple[dict | None, str | None]:
+    """
+    Return (backbone_result, staleness_note) — mirrors
+    load_daily_scan_cache_allow_stale's "show stale data with a clear note
+    instead of refusing outright" convention (MBSS v2, user request,
+    applied consistently across /hc, /consensus, etc.). backbone_result is
+    None only if the cache has genuinely never been built.
+    """
+    meta = cache_manager.get_meta("backbone_daily")
+    if not meta:
+        return None, None
+
+    payload = cache_manager.get("backbone_daily", default=None)
+    if not isinstance(payload, dict):
+        return None, None
+
+    current_marker = core.get_current_trading_day_close_marker()
+    staleness_note = None
+    if meta.get("trading_day_marker") != current_marker:
+        staleness_note = f"⚠️ Backbone dari scan {meta.get('trading_day_marker') or '?'}, BELUM update untuk hari ini — jalankan /eodscan untuk data terbaru."
+    elif meta.get("formula_version") != backbone_engine.BACKBONE_FORMULA_VERSION:
+        staleness_note = f"⚠️ Backbone dari formula versi lama ({meta.get('formula_version')}), belum dihitung ulang dengan formula terbaru — jalankan /eodscan."
+
+    return payload, staleness_note
 
 
 # ---------------------------------------------------------------------
@@ -537,6 +584,26 @@ async def run_nightly_full_scan(context):
         except Exception as e:
             print(f"⚠️ Gagal menghitung market breadth: {e}")
             breadth = None
+
+        # AB-RC1 Backbone (MBSS v2, user backtest — lihat
+        # backtest/MBSS_v317_AB_RC1_Final_Implementation_and_Research-1.md):
+        # Danger Gate + Probability Rank dihitung SEKALI di sini atas SELURUH
+        # universe yang baru discan (results), SEBELUM /screendaytrade, /hc,
+        # /gptpick melakukan ranking khas masing-masing tool. Regime dari
+        # breadth di atas (fallback R0_UNKNOWN kalau breadth gagal — backbone
+        # sendiri sudah punya gate quantile konservatif untuk regime itu).
+        try:
+            market_regime = (breadth or {}).get("regime", "R0_UNKNOWN")
+            backbone_result = backbone_engine.compute_backbone(results, market_regime)
+            save_backbone_daily(backbone_result)
+            print(
+                f"🧱 Backbone: regime={market_regime}, "
+                f"{len(backbone_result['top8'])}/{backbone_engine.BACKBONE_TOP_N} Top-8 "
+                f"(gate quantile {backbone_result['danger_gate_quantile']}, "
+                f"cutoff danger<={backbone_result['danger_cutoff_value']})"
+            )
+        except Exception as e:
+            print(f"⚠️ Gagal menghitung AB-RC1 backbone: {e}")
 
         # BUGFIX (ditemukan lewat pengamatan user — SOHO "Top" berturut-turut
         # dengan skor cuma 4.0, tidak istimewa): results TIDAK PERNAH di-sort
