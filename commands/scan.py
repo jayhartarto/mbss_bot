@@ -294,8 +294,13 @@ async def screen_daytrade(update, context):
             label = ab.get("label", "-")
             wr = core.get_winrate_for_label(label)
             label_str = f"{label} (WR {wr})" if wr else label
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            backbone_note = (
+    f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
+    if bb_info and "entry_rank" in bb_info else ""
+)
             lines.append(
-                f"{i}. {r['ticker']} — {label_str} ({ab.get('score', 0)}/100)\n"
+                f"{i}. {r['ticker']} — {label_str} ({ab.get('score', 0)}/100){backbone_note}\n"
                 f"   Harga {r.get('price')} | VWAP {ab.get('vwap', '-')} (jarak {ab.get('vwap_distance_pct', '-')}%) | Vol pace {ab.get('volume_pace_ratio', '-')}x\n"
                 f"   Trigger {ab.get('trigger_price', '-')} | Invalid <{ab.get('invalidation_level', '-')}\n"
                 f"   {ab.get('notes', '') or '-'}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}{broker_engine.format_market_mover_tag(r['ticker'])}{nightly_engine.format_breakout_alert_tag(r['ticker'])}"
@@ -346,9 +351,17 @@ async def screen_daytrade(update, context):
         wr = core.get_winrate_for_label(lane)
         lane_str = f"{lane} (WR {wr})" if wr else lane
 
+        # AB-RC1 backbone (MBSS v2, user backtest) — angka UNIVERSAL yang
+        # sama tampil di /hc & /consensus juga, biar konsisten lintas-tool.
+        bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+        backbone_note = (
+    f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
+    if bb_info and "entry_rank" in bb_info else ""
+)
+
         lines.append(
             f"{i}. {r['ticker']} — {v5['label']}\n"
-            f"   Total {v5['total']}/100 | Bias {r.get('_positive_bias', '-')}/100 | Lane {lane_str} | B {br['score']} | C {cont['score']} | Act {v5['activity']['score']} | VolQ {volq['score']} | Room {room['score']} | Safety {risk['score']}{src_live}\n"
+            f"   Total {v5['total']}/100 | Bias {r.get('_positive_bias', '-')}/100 | Lane {lane_str} | B {br['score']} | C {cont['score']} | Act {v5['activity']['score']} | VolQ {volq['score']} | Room {room['score']} | Safety {risk['score']}{src_live}{backbone_note}\n"
             f"   Harga {r.get('price')} | Valid >{v5['valid_level']} | Ideal {v5['ideal']} | Invalid <{v5['invalid']}\n"
             f"   Room: {room['label']} ({room['dist_high_pct']}% ke high, upside TP1 {room['upside_tp1_pct']}%) | VolQ: {volq['label']} | Continuation: {cont['label']}\n"
             f"   Note: {v5['note']}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}{nightly_engine.format_breakout_alert_tag(r['ticker'])}"
@@ -1111,6 +1124,16 @@ async def high_conviction_command(update, context):
 
         daytrade_note = f" | DT {r['_daytrade_score_hc']:.1f}" if "_daytrade_score_hc" in r else ""
 
+        # AB-RC1 backbone (MBSS v2, user backtest) — rank/skor UNIVERSAL yang
+        # sama dipakai buat filter gate DAN ditampilkan di /screendaytrade,
+        # /consensus — supaya angkanya konsisten dilihat di semua tool, bukan
+        # cuma dipakai diam-diam buat filter (user request eksplisit).
+        bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+        backbone_note = (
+    f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
+    if bb_info and "entry_rank" in bb_info else ""
+)
+
         sector_note = ""
         sector_info = market_engine.get_sector_rank_info(r.get("sector"))
         if sector_info:
@@ -1129,7 +1152,7 @@ async def high_conviction_command(update, context):
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f}{daytrade_note}{streak_str} "
             f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
             f"   {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)} kriteria | "
-            f"RR {rr_str} | {label_str}\n"
+            f"RR {rr_str} | {label_str}{backbone_note}\n"
             f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}{breakout_alert_note}"
         )
 
@@ -1909,7 +1932,7 @@ async def consensus_command(update, context):
                 sm_tag = f"  |  ⚠️ SMART-MONEY DIVERGENCE (net-sell {sm_pct:+.0f}%)"
         lines.append(
             f"{i}. {t}\n"
-            f"   Backbone: {info.get('probability_score', '-')} (danger {info.get('predicted_danger', '-')})\n"
+            f"   Entry Rank #{info.get('entry_rank', '-')}/{info.get('entry_rank_total', '-')} (prob {info.get('probability_score', '-')}, danger {info.get('predicted_danger', '-')})\n"
             f"   HC: {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)}{sm_tag}"
         )
 

@@ -42,7 +42,7 @@ import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.2"  # AB-RC1 (doc section 24) + RR-at-current-price fix (1.1) + post-ARA chase-risk danger penalty (real case: TEBE ranked #1 the day after limit-up on continuation/CMF/volq strength alone). Bump (and log the reason) on any threshold/weight change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.3"  # AB-RC1 (doc section 24) + RR-at-current-price fix (1.1) + post-ARA chase-risk danger penalty (1.2) + entry_rank/entry_rank_total added to every gate-survivor entry (user request: a single universal rank number shown consistently in /hc, /screendaytrade, /consensus, not just raw danger/probability figures). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
@@ -282,6 +282,16 @@ def compute_backbone(results: list, market_regime: str) -> dict:
 
     survivors = [r for r in candidates if scored[r["ticker"]]["passed_danger_gate"]]
     survivors.sort(key=lambda r: scored[r["ticker"]]["probability_score"], reverse=True)
+
+    # Entry Rank (MBSS v2, user request): peringkat di antara SEMUA gate
+    # survivor malam ini (bukan cuma di antara 8 nama Top-8) — angka
+    # UNIVERSAL yang ditampilkan konsisten di /hc, /screendaytrade,
+    # /consensus untuk ticker manapun yang lolos gate, bukan cuma yang
+    # kebetulan masuk Top-8. #1 = probability_score tertinggi malam ini.
+    entry_rank_total = len(survivors)
+    for rank, r in enumerate(survivors, 1):
+        scored[r["ticker"]]["entry_rank"] = rank
+        scored[r["ticker"]]["entry_rank_total"] = entry_rank_total
 
     top8 = []
     for rank, r in enumerate(survivors[:BACKBONE_TOP_N], 1):
