@@ -914,7 +914,10 @@ def save_tactical_shadow_snapshot(ticker: str, validity: dict, tactical_rank: di
         print(f"⚠️ Gagal simpan tactical shadow snapshot buat {ticker}: {e}")
 
 
-def load_todays_notable_offradar_checks(exclude_tickers: set, live_rank_threshold: float = 60.0) -> list:
+OFFRADAR_MAX_NAMES = 3  # sama pola dengan EXPLOSIVE_MAX_NAMES -- cap keras, terlepas berapa banyak yang lolos filter di bawah
+
+
+def load_todays_notable_offradar_checks(exclude_tickers: set, live_rank_threshold: float = 60.0, max_names: int = OFFRADAR_MAX_NAMES) -> list:
     """
     MBSS v2 (user request — "/consensus live" section 2, "nampung temuan di
     luar tools"): scan tactical_shadow_log.json (log yang SUDAH ditulis
@@ -934,6 +937,12 @@ def load_todays_notable_offradar_checks(exclude_tickers: set, live_rank_threshol
     buat kombinasi live yang KUAT tapi tidak sempurna (mis. cuma 3 dari 4
     bonus live kena, atau kena penalti RR tipis -8), bukan cuma yang
     stacking sempurna.
+
+    Selain filter di atas, DIBATASI keras ke `max_names` (default 3, sama
+    pola dengan EXPLOSIVE_MAX_NAMES) — kalau lebih dari itu yang lolos
+    filter dalam satu hari, cuma live_rank TERTINGGI yang tampil. Ini
+    jaring pengaman kedua di luar threshold, buat hari-hari volatil dimana
+    banyak /check manual sekaligus lolos filter ketat di atas.
 
     Ambil entri TERAKHIR per ticker hari ini saja (satu ticker bisa
     ke-/check berkali-kali, state bisa berubah — kita mau yang terbaru).
@@ -969,4 +978,4 @@ def load_todays_notable_offradar_checks(exclude_tickers: set, live_rank_threshol
             notable.append(entry)
 
     notable.sort(key=lambda e: e.get("live_rank") or 0, reverse=True)
-    return notable
+    return notable[:max_names]
