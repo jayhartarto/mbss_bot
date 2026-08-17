@@ -509,3 +509,252 @@ def classify_and_update_consensus_entry(ticker: str, r: dict, state: dict) -> st
         "cooldown_until": None,
     }
     return "NEW"
+
+
+# ==========================================
+# AB-RC3 Tactical Live Rank (MBSS v2, user request — /check jadi lebih
+# tactical: konfirmasi cepat apakah sinyal EOD masih valid di harga live
+# sekarang, plus keputusan taktis kalau ticker itu dipegang di portofolio).
+# Source of truth: backtest/Tactical_Check_Decision_Engine_Claude.md
+# (AB-RC3), TAPI scope dipangkas signifikan dari dokumen aslinya setelah
+# review Section 53 bersama user — lihat catatan per fungsi kenapa.
+#
+# PHASE 1 — SHADOW MODE: fungsi-fungsi ini dipanggil dari /check dan
+# HASILNYA DISIMPAN (lihat commands/check.py), TAPI belum mengubah pesan
+# /check yang terlihat user. Tujuannya observasi dulu (apakah state
+# VALID/RETEST/INVALID dan keputusannya masuk akal di data nyata) sebelum
+# jadi output utama — sama disiplin forward-validate-dulu yang sudah
+# dipegang di seluruh AB-RC1/RC2 backbone.
+#
+# Simplifikasi disengaja vs dokumen AB-RC3 asli:
+# - TIDAK reuse "PortfolioRankService" (belum pernah dibangun/AB-RC2 belum
+#   ada) — Base Opportunity di sini langsung reuse probability_score/
+#   predicted_danger dari compute_backbone (AB-RC1) yang SUDAH ada.
+# - Setup classifier dipangkas dari 7 tipe (Pullback/VWAP Reclaim/
+#   Breakout/Squeeze/Momentum/Mean Reversion/Failed) jadi 3 STATE
+#   (VALID/RETEST/INVALID) — pullback-to-support dan retest-breakout
+#   sengaja DIGABUNG ke RETEST (makna praktisnya sama: "mundur ke level
+#   kunci tanpa breakdown, belum gagal belum konfirmasi").
+# - Smart-Money Support TIDAK dapat skor numerik dari data same-session
+#   (kita tidak fetch broker live per desain kuota) — reuse
+#   classify_bias_bandar (SUDAH ADA, trend net-buy hari-ke-hari dari
+#   whitelist sweep semalam) sebagai gantinya, dilabeli jelas "posisi
+#   kemarin malam".
+# - TIDAK ada Rotation Engine, TIDAK ada Live Opportunity Cache — itu
+#   scope AB-RC3 Phase 2+, ditunda per kesepakatan.
+# ==========================================
+
+TACTICAL_FORMULA_VERSION = "AB-RC3-shadow.1"
+
+
+def classify_signal_validity(scoring: dict) -> dict:
+    """
+    3-state simplifikasi dari setup classifier AB-RC3 (lihat catatan modul
+    di atas): apakah struktur LIVE hari ini masih mendukung premis sinyal
+    EOD semalam. Butuh `active_breakout`/`intraday_momentum` sudah
+    ter-enrich di `scoring` (persis field yang sudah dipakai /check,
+    /screendaytrade live).
+
+    Returns {"state": "VALID"|"RETEST"|"INVALID"|"UNKNOWN", "reasons": [...]}
+    """
+    ab = scoring.get("active_breakout") or {}
+    im = scoring.get("intraday_momentum") or {}
+    price = _f(scoring, "price")
+    cut_loss = _f((scoring.get("targets") or {}), "cut_loss")
+
+    # Data live tidak tersedia sama sekali (di luar jam bursa / gagal fetch)
+    # -- jangan menebak, transparan "belum bisa dinilai".
+    if not ab.get("available") and not im.get("available"):
+        return {"state": "UNKNOWN", "reasons": ["Data live tidak tersedia (di luar jam bursa atau gagal fetch)."]}
+
+    # INVALID paling kuat: harga sudah tembus cut_loss EOD -- premis
+    # sinyal semalam sudah terbantahkan telak, ini beda dari Hard SL
+    # portofolio (itu dicek terpisah di compute_tactical_decision).
+    if cut_loss and price and price <= cut_loss:
+        return {"state": "INVALID", "reasons": [f"Harga ({price:.0f}) sudah di bawah cut_loss EOD ({cut_loss:.0f})."]}
+
+    vwap_dist = ab.get("vwap_distance_pct")
+    vol_pace = ab.get("volume_pace_ratio")
+    momentum_change = im.get("change_pct") if im.get("available") else None
+    momentum_bearish = momentum_change is not None and momentum_change < -1.0
+    weak_volume = vol_pace is None or vol_pace < 0.8
+
+    below_vwap_material = vwap_dist is not None and vwap_dist < -1.0
+
+    if below_vwap_material and weak_volume and momentum_bearish:
+        return {"state": "INVALID", "reasons": [
+            f"Breakdown VWAP ({vwap_dist:+.1f}%) dengan volume lemah (pace {vol_pace}) DAN momentum sesi negatif ({momentum_change:+.1f}%)."
+        ]}
+
+    if below_vwap_material or (vwap_dist is not None and -1.0 <= vwap_dist < 0):
+        return {"state": "RETEST", "reasons": [f"Harga di bawah/dekat VWAP ({vwap_dist:+.1f}%), belum breakdown tegas."]}
+
+    return {"state": "VALID", "reasons": ["Struktur live (VWAP/momentum) masih mendukung premis EOD."]}
+
+
+def compute_tactical_live_rank(scoring: dict, backbone_info: dict | None, daily_broksum_history: dict) -> dict:
+    """
+    Base Opportunity (EOD, reuse langsung dari compute_backbone — TIDAK
+    reimplementasi) + lapisan penyesuaian live (VWAP, volume pace,
+    momentum sesi, trend broker whitelist hari-ke-hari via
+    classify_bias_bandar, RR di harga sekarang). Bounded 0-100.
+
+    `backbone_info` = backbone_result["all_scored"].get(ticker) dari
+    caller — None kalau ticker di luar cakupan /eodscan malam ini (base
+    default netral 50, bukan 0, supaya tidak menghukum ticker yang cuma
+    kebetulan di luar radar EOD).
+    """
+    base = backbone_info.get("probability_score", 50.0) if backbone_info else 50.0
+    adjustment = 0.0
+    components = {}
+
+    ab = scoring.get("active_breakout") or {}
+    im = scoring.get("intraday_momentum") or {}
+
+    if ab.get("available"):
+        vwap_dist = ab.get("vwap_distance_pct")
+        if vwap_dist is not None:
+            if vwap_dist > 0:
+                adjustment += 8
+                components["vwap"] = f"+8 (di atas VWAP, {vwap_dist:+.1f}%)"
+            elif vwap_dist < -1.0:
+                adjustment -= 10
+                components["vwap"] = f"-10 (di bawah VWAP, {vwap_dist:+.1f}%)"
+
+        vol_pace = ab.get("volume_pace_ratio")
+        if vol_pace is not None:
+            if vol_pace >= 1.5:
+                adjustment += 5
+                components["volume_pace"] = f"+5 (pace {vol_pace}x)"
+            elif vol_pace < 0.7:
+                adjustment -= 5
+                components["volume_pace"] = f"-5 (pace {vol_pace}x, lemah)"
+
+    if im.get("available") and im.get("change_pct") is not None:
+        change = im["change_pct"]
+        if change >= 1.0:
+            adjustment += 5
+            components["momentum"] = f"+5 (momentum sesi {change:+.1f}%)"
+        elif change <= -1.0:
+            adjustment -= 5
+            components["momentum"] = f"-5 (momentum sesi {change:+.1f}%)"
+
+    bias = broker_engine_classify_bias_bandar_safe(scoring.get("ticker"), daily_broksum_history)
+    if bias:
+        label = bias.get("label")
+        if label in ("AKUMULASI SEGAR", "PULLBACK DIDUKUNG"):
+            adjustment += 5
+            components["bias_bandar"] = f"+5 ({label}, data semalam)"
+        elif label == "DISTRIBUSI":
+            adjustment -= 8
+            components["bias_bandar"] = f"-8 ({label}, data semalam)"
+        elif label == "AKUMULASI BASI":
+            adjustment -= 3
+            components["bias_bandar"] = f"-3 ({label}, data semalam)"
+
+    rr_now = compute_rr_at_current_price(scoring)
+    if rr_now < 0.5:
+        adjustment -= 8
+        components["live_rr"] = f"-8 (RR@sekarang {rr_now}, tipis)"
+
+    live_rank = round(max(0.0, min(100.0, base + adjustment)), 1)
+    eod_rank = backbone_info.get("entry_rank") if backbone_info else None
+    eod_rank_total = backbone_info.get("entry_rank_total") if backbone_info else None
+
+    return {
+        "eod_probability": base,
+        "live_rank": live_rank,
+        "delta": round(live_rank - base, 1),
+        "eod_entry_rank": eod_rank,
+        "eod_entry_rank_total": eod_rank_total,
+        "components": components,
+        "bias_bandar": bias,
+        "formula_version": TACTICAL_FORMULA_VERSION,
+    }
+
+
+def broker_engine_classify_bias_bandar_safe(ticker: str | None, daily_broksum_history: dict):
+    """Local import (see lock_daily_daytrade_picks in legacy_core.py for why: avoids a module-level circular import with engine/broker.py)."""
+    if not ticker:
+        return None
+    try:
+        import engine.broker as broker_engine
+        return broker_engine.classify_bias_bandar(ticker, daily_broksum_history)
+    except Exception as e:
+        print(f"⚠️ Gagal classify_bias_bandar buat {ticker}: {e}")
+        return None
+
+
+def compute_tactical_decision(scoring: dict, validity: dict, is_held: bool) -> dict:
+    """
+    Terjemahkan validity state (+ konteks portofolio) jadi 1 keputusan
+    taktis. TIDAK OTOMATIS EKSEKUSI apa pun — ini murni label buat
+    dibaca manusia, disimpan buat shadow-mode review.
+    """
+    state = validity["state"]
+    price = _f(scoring, "price")
+    tp1 = _f((scoring.get("targets") or {}), "tp_1")
+
+    if state == "UNKNOWN":
+        return {"decision": "DATA_UNAVAILABLE", "note": "Data live tidak cukup untuk keputusan taktis."}
+
+    if is_held:
+        if state == "INVALID":
+            return {"decision": "EARLY_EXIT_WATCH", "note": "Premis sinyal sudah terbantahkan live — pertimbangkan keluar lebih awal, ini BUKAN Hard SL struktural."}
+        if tp1 and price and price >= tp1:
+            return {"decision": "PREPARE_TP", "note": "Harga sudah di area TP1 — siap-siap ambil profit."}
+        if state == "RETEST":
+            return {"decision": "HOLD_MONITOR", "note": "Mundur ke level kunci tanpa breakdown — tahan, pantau ketat."}
+        return {"decision": "HOLD", "note": "Struktur live masih mendukung, tidak ada aksi mendesak."}
+
+    # Ticker belum dipegang (kandidat entry baru / live discovery manual)
+    if state == "INVALID":
+        return {"decision": "SKIP", "note": "Sinyal EOD sudah tidak didukung struktur live."}
+    if state == "RETEST":
+        return {"decision": "WAIT_RETEST", "note": "Tunggu konfirmasi — jangan entry di tengah retest."}
+    rr_now = compute_rr_at_current_price(scoring)
+    if rr_now < 0.5:
+        return {"decision": "NO_CHASE", "note": f"RR di harga sekarang cuma {rr_now} — reward tersisa terlalu tipis."}
+    return {"decision": "WATCH_VALID", "note": "Sinyal EOD masih valid live — bukan auto 'beli sekarang', tetap perlu penilaian entry sendiri."}
+
+
+TACTICAL_SHADOW_LOG_FILE = os.path.join(core.PROJECT_ROOT, "tactical_shadow_log.json")
+TACTICAL_SHADOW_LOG_MAX_ENTRIES = 3000  # cap pertumbuhan file -- ini log observasi Phase 1, bukan arsip permanen
+
+
+def save_tactical_shadow_snapshot(ticker: str, validity: dict, tactical_rank: dict, decision: dict, is_held: bool):
+    """
+    Phase 1 shadow-mode logging (AB-RC3) — append-only, dipanggil dari
+    /check TIAP kali (tidak idempotent per hari seperti lock_daily_
+    daytrade_picks, sengaja: tactical state bisa berubah beberapa kali
+    sehari, kita justru mau lihat perubahannya). Dibaca manual/ad-hoc
+    nanti buat evaluasi apakah state VALID/RETEST/INVALID dan keputusan
+    yang dihasilkan masuk akal dibanding apa yang BENERAN terjadi —
+    belum ada command/script pembaca otomatis di Phase 1 ini.
+    """
+    try:
+        log = []
+        if os.path.exists(TACTICAL_SHADOW_LOG_FILE):
+            with open(TACTICAL_SHADOW_LOG_FILE, encoding="utf-8") as f:
+                log = json.load(f)
+        log.append({
+            "ticker": ticker,
+            "timestamp": datetime.datetime.now(core.WIB).isoformat(),
+            "is_held": is_held,
+            "validity_state": validity.get("state"),
+            "validity_reasons": validity.get("reasons"),
+            "live_rank": tactical_rank.get("live_rank"),
+            "eod_probability": tactical_rank.get("eod_probability"),
+            "delta": tactical_rank.get("delta"),
+            "eod_entry_rank": tactical_rank.get("eod_entry_rank"),
+            "eod_entry_rank_total": tactical_rank.get("eod_entry_rank_total"),
+            "components": tactical_rank.get("components"),
+            "decision": decision.get("decision"),
+            "decision_note": decision.get("note"),
+            "formula_version": TACTICAL_FORMULA_VERSION,
+        })
+        log = log[-TACTICAL_SHADOW_LOG_MAX_ENTRIES:]
+        with open(TACTICAL_SHADOW_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(log, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Gagal simpan tactical shadow snapshot buat {ticker}: {e}")

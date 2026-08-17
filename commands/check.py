@@ -284,6 +284,7 @@ async def check_stock(update, context):
     # malam ini (backbone belum pernah dihitung, atau ticker tidak masuk
     # universe syariah eligible) — /check tetap jalan seperti biasa.
     backbone_line = ""
+    bb_info = None
     try:
         backbone_result, _ = nightly_engine.load_backbone_daily_allow_stale()
         bb_info = (backbone_result or {}).get("all_scored", {}).get(ticker) if backbone_result else None
@@ -300,6 +301,23 @@ async def check_stock(update, context):
                 )
     except Exception as e:
         print(f"⚠️ /check: gagal ambil backbone entry rank untuk {ticker}: {e}")
+
+    # AB-RC3 Tactical Live Rank — PHASE 1 SHADOW MODE (MBSS v2, user
+    # request: "/check jadi lebih tactical"). Dihitung & DISIMPAN
+    # (tactical_shadow_log.json) tiap /check, TAPI SENGAJA belum
+    # mengubah pesan yang user lihat sama sekali — lihat catatan modul
+    # di engine/backbone.py buat kenapa (observasi dulu sebelum jadi
+    # output utama, kesepakatan eksplisit sebelum coding ini dimulai).
+    try:
+        validity = backbone_engine.classify_signal_validity(result)
+        daily_broksum_history = nightly_engine.load_broksum_daily_history()
+        tactical_rank = backbone_engine.compute_tactical_live_rank(result, bb_info, daily_broksum_history)
+        tactical_decision = backbone_engine.compute_tactical_decision(result, validity, result.get("is_held_position", False))
+        backbone_engine.save_tactical_shadow_snapshot(
+            ticker, validity, tactical_rank, tactical_decision, result.get("is_held_position", False)
+        )
+    except Exception as e:
+        print(f"⚠️ /check: gagal hitung tactical shadow snapshot untuk {ticker}: {e}")
 
     # MBSS v2 (RapidAPI integration, user request) — replaces the old
     # "💹 BROKER RIIL" block (which mixed Index Alpha/Zapi/screenshot sources,
