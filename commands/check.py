@@ -329,17 +329,28 @@ async def check_stock(update, context):
         delta_str = f" ({delta:+.1f} dari EOD)" if delta else ""
         decision_label = tactical_decision["decision"].replace("_", " ")
 
-        rr_now, rr_eod, rr_delta = tactical_rank.get("rr_now"), tactical_rank.get("rr_eod"), tactical_rank.get("rr_delta")
-        rr_line = ""
-        if rr_now is not None:
-            rr_delta_str = f" ({rr_delta:+.2f} dari EOD 1:{rr_eod:.2f})" if rr_delta is not None else ""
-            rr_line = f"RR LIVE: 1:{rr_now:.2f}{rr_delta_str}\n"
+        # BUGFIX (user report — MDKA real case: state UNKNOWN "data live
+        # tidak tersedia" TAPI Live Rank/RR LIVE tetap tampil dengan delta
+        # vs EOD, seolah ada info live): bias_bandar (data KEMARIN) dan
+        # RR-at-current-price (fallback ke harga EOD basi kalau fetch live
+        # gagal) TIDAK bergantung pada ab/im tersedia atau tidak, jadi tetap
+        # menghasilkan angka walau state sudah bilang "tidak bisa dinilai".
+        # Suppress baris-baris itu sama sekali kalau UNKNOWN -- jangan kasih
+        # angka "live" yang sebetulnya bukan live.
+        rr_line = support_line = ""
+        rank_line = ""
+        if state != "UNKNOWN":
+            rr_now, rr_eod, rr_delta = tactical_rank.get("rr_now"), tactical_rank.get("rr_eod"), tactical_rank.get("rr_delta")
+            if rr_now is not None:
+                rr_delta_str = f" ({rr_delta:+.2f} dari EOD 1:{rr_eod:.2f})" if rr_delta is not None else ""
+                rr_line = f"RR LIVE: 1:{rr_now:.2f}{rr_delta_str}\n"
 
-        support_line = ""
-        if state in ("EXTENDED_CHASE", "EXTENDED_NO_CHASE"):
-            support = backbone_engine.compute_tactical_support_zone(result)
-            if support:
-                support_line = f"Tactical Support (VWAP): {support['support']}  |  Tactical Cut: {support['tactical_cut']}\n"
+            if state in ("EXTENDED_CHASE", "EXTENDED_NO_CHASE"):
+                support = backbone_engine.compute_tactical_support_zone(result)
+                if support:
+                    support_line = f"Tactical Support (VWAP): {support['support']}  |  Tactical Cut: {support['tactical_cut']}\n"
+
+            rank_line = f"Live Rank: {tactical_rank['live_rank']:.0f}/100{delta_str}\n"
 
         # MBSS v2 (user request — "terlalu panjang, ringkas"): dulu ada baris
         # "Status sinyal" (mengulang reason kalimat panjang) + baris note
@@ -353,7 +364,7 @@ async def check_stock(update, context):
         tactical_line = (
             f"🎯 TACTICAL: {state_icon} {state}{wr_str} — {decision_label}\n"
             f"\n"
-            f"Live Rank: {tactical_rank['live_rank']:.0f}/100{delta_str}\n"
+            f"{rank_line}"
             f"{rr_line}"
             f"{support_line}"
         )

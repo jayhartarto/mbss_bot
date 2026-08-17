@@ -1172,6 +1172,12 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     macd_bullish_cross = bool(current_macd_hist > 0 and prev_macd_hist <= 0)
     macd_bearish_cross = bool(current_macd_hist < 0 and prev_macd_hist >= 0)
     macd_state = "bullish" if current_macd_hist > 0 else "bearish"
+    # MBSS v2 (user request — Explosive Lane "TRUE EXPLOSIVE" review): MACD
+    # line di ATAS garis nol menandakan regime bullish yang lebih established
+    # (bukan cuma histogram baru saja positif tipis di dekat nol, yang bisa
+    # jadi cross lemah/masih dalam fase pemulihan dari downtrend). Beda dari
+    # macd_state yang cuma baca TANDA histogram (macd_line - signal_line).
+    macd_line_above_zero = bool(macd_line.iloc[-1] > 0)
 
     # Berapa hari sejak cross terakhir (mundur cari kapan tanda histogram
     # terakhir berubah) — dipakai untuk formula PELURUHAN (decay) pengaruh
@@ -1567,6 +1573,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "macd_hist": round(float(current_macd_hist), 4),
         "macd_bullish_cross": macd_bullish_cross,
         "macd_bearish_cross": macd_bearish_cross,
+        "macd_line_above_zero": macd_line_above_zero,
         "is_below_sma50": is_below_sma50,
         "is_below_ema21": is_below_ema21,
         "adx": round(current_adx, 1),

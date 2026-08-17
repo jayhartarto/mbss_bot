@@ -841,9 +841,21 @@ def _gptpick_format_item(scoring: dict) -> str:
     rr_warning = ""
     if isinstance(rr, (int, float)) and rr < 1.0:
         rr_warning = f"\n  ⚠️ RR@max {rr_text} — risiko lebih besar dari potensi untung kalau entry di harga sekarang"
-    lane = scoring.get("_positive_lane")
+    # BUGFIX (user report — "selaraskan format SDT", ditemukan saat menelusuri
+    # kenapa /hc & /gptpick bisa menampilkan WR beda dari /screendaytrade):
+    # scoring.get("_positive_lane") SELALU None di sini -- field itu cuma
+    # diisi rank_screendaytrade_refactor() (khusus /screendaytrade), TIDAK
+    # PERNAH lewat pipeline GPTPICK (fetch_tickers_scored_with_cache). Baris
+    # ini jadi dead code sejak ditulis -- wr_note nyaris selalu kosong.
+    # Dihitung langsung di sini (REUSE compute_screendaytrade_positive_bias,
+    # sama seperti /hc & /consensus), bukan lagi bergantung field yang tidak
+    # pernah terisi.
+    try:
+        lane = core.compute_screendaytrade_positive_bias(scoring).get("lane")
+    except Exception:
+        lane = None
     wr = core.get_winrate_for_label(lane) if lane else ""
-    wr_note = f"\n  📊 Lane {lane} (WR {wr})" if wr else ""
+    wr_note = f"\n  📊 Lane {lane} (WR {wr})" if wr else (f"\n  📊 Lane {lane}" if lane else "")
 
     return (
         f"{scoring.get('ticker', '-')}: {g.get('bucket', '-') } {g.get('final', 0):.1f}/100 | {g.get('confidence', '-')}\n"
@@ -1193,11 +1205,28 @@ async def high_conviction_command(update, context):
         wr = core.get_winrate_for_label(label)
         label_str = f"{label} (winrate {wr})" if wr else label
 
+        # MBSS v2 (user request — "selaraskan, ikuti format SDT": EXCL nyata
+        # menampilkan "SINYAL CAMPURAN (winrate 55%)" di /hc TAPI "EXTENDED /
+        # CHASE WATCH (WR 74%)" di /screendaytrade untuk ticker yang SAMA,
+        # user bingung ini kontradiksi atau bukan). action_label_id (di atas)
+        # dan lane SDT adalah DUA LENSA BEDA (skor blend Value/Momentum/
+        # Sentimen vs klasifikasi momentum day-trade) — bukan bug, tapi
+        # supaya konsisten & tidak membingungkan, /hc SEKARANG JUGA
+        # menampilkan lane SDT + WR-nya sendiri, format PERSIS sama dengan
+        # /screendaytrade dan /gptpick (lihat _gptpick_format_item), bukan
+        # cuma satu sisi yang kelihatan.
+        try:
+            sdt_lane = core.compute_screendaytrade_positive_bias(r).get("lane")
+        except Exception:
+            sdt_lane = None
+        sdt_wr = core.get_winrate_for_label(sdt_lane) if sdt_lane else ""
+        sdt_lane_note = f"\n   📊 Lane {sdt_lane} (WR {sdt_wr})" if sdt_lane and sdt_wr else (f"\n   📊 Lane {sdt_lane}" if sdt_lane else "")
+
         lines.append(
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f}{daytrade_note}{streak_str} "
             f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
             f"   {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)} kriteria | "
-            f"RR {rr_str} | {label_str}{backbone_note}\n"
+            f"RR {rr_str} | {label_str}{backbone_note}{sdt_lane_note}\n"
             f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}{breakout_alert_note}"
         )
 
@@ -1969,22 +1998,52 @@ async def consensus_command(update, context):
         "",
     ]
 
-    # === BACKBONE TOP-3 (user revisi — /consensus jadi "interest shortlist",
-    # jadi murni ranking probability TANPA konfirmasi tool lain bukan lagi
-    # relevan di sini, itu tugas BACKBONE TOP-5 versi lama / /hc /
-    # /screendaytrade langsung). Sekarang disaring ke irisan dengan
-    # SDT ATAU HC (union, BUKAN AND ketat seperti CONSENSUS PRIME di bawah
-    # yang butuh keduanya) — dan dipangkas ke top-3 dari sisa itu.
-    top3_candidates = [r for r in backbone_result.get("top8", []) if r["ticker"] in sdt_selected or r["ticker"] in hc_selected]
-    top3 = top3_candidates[:3]
-    lines.append(f"🧱 BACKBONE TOP-3 (irisan dgn SDT/HC — {len(top3)} saham)")
+    # === BACKBONE TOP-3 (user revisi lanjutan — bukan lagi dibatasi ke
+    # Backbone Top-8, itu terlalu sempit: irisan Top-8 (cuma 8 nama) ∩
+    # SDT/HC seringkali cuma nyisa 1 nama). Universe SEKARANG: seluruh pool
+    # (semua Danger Gate survivor) yang kena tag SDT (lane bagus) ATAU HC,
+    # DIPERLUAS lagi dengan 2 tag tambahan yang PUNYA bukti /winrate real
+    # (bukan definisi baru dari nol -- REUSE sinyal yang sudah tervalidasi):
+    # - lane SDT "EXTENDED / CHASE WATCH" (74% win real, n=23) -- sebelumnya
+    #   TIDAK masuk GOOD_SDT_LANES (cuma PRIORITY FRESH/CONT), padahal WR-nya
+    #   nyata lebih baik dari beberapa lane yang sudah masuk.
+    # - streak kemunculan berturut-turut lintas-source >=3 hari (breakdown
+    #   /winrate "Streak 3x" -- WR terbaik di antara panjang streak lain).
+    # Baru diurutkan ke probability_score (Entry Rank) tertinggi, ambil 3.
+    history = core.load_daytrade_picks_history()
+    today_marker = core.get_current_trading_day_close_marker()
+    top3_universe = []
+    for r in pool:
+        t = r["ticker"]
+        tags = []
+        if t in sdt_selected: tags.append("SDT")
+        if t in hc_selected: tags.append("HC")
+        try:
+            lane = core.compute_screendaytrade_positive_bias(r).get("lane")
+        except Exception:
+            lane = None
+        if lane == "EXTENDED / CHASE WATCH" and "SDT" not in tags:
+            tags.append("EXTENDED-WR 74%")
+        streak = core.compute_consecutive_appearance_streak_any_source(t, today_marker, history)
+        if streak >= 3:
+            tags.append(f"STREAK {streak}x")
+        if tags:
+            top3_universe.append((r, tags))
+
+    def _probscore(r):
+        return (backbone_result.get("all_scored", {}).get(r["ticker"], {}) or {}).get("probability_score", 0)
+
+    top3_universe.sort(key=lambda pair: _probscore(pair[0]), reverse=True)
+    top3 = top3_universe[:3]
+    lines.append(f"🧱 BACKBONE TOP-3 (universe SDT/HC/WR-tag, {len(top3)} saham)")
     if not top3:
-        lines.append("Tidak ada kandidat Top-8 yang juga lolos SDT atau HC malam ini.")
-    for r in top3:
-        also = []
-        if r["ticker"] in sdt_selected: also.append("SDT")
-        if r["ticker"] in hc_selected: also.append("HC")
-        lines.append(f"{r['backbone_rank']}. {r['ticker']} — prob {r['probability_score']:.0f}, danger {r['predicted_danger']:.0f} | Juga di: {', '.join(also)}")
+        lines.append("Tidak ada kandidat SDT/HC/WR-tag malam ini.")
+    for r, tags in top3:
+        info = backbone_result.get("all_scored", {}).get(r["ticker"], {}) or {}
+        lines.append(
+            f"{r['ticker']} — Entry Rank #{info.get('entry_rank', '-')}/{info.get('entry_rank_total', '-')} "
+            f"(prob {info.get('probability_score', '-')}, danger {info.get('predicted_danger', '-')}) | Tag: {', '.join(tags)}"
+        )
     lines.append("⚠️ Ranking murni, BUKAN sinyal entry siap pakai — cek /check sebelum ambil keputusan.")
 
     # === CONSENSUS PRIME (state-aware NEW/ACTIVE/COOLDOWN — doc §16-17) ===
@@ -2054,10 +2113,21 @@ async def consensus_command(update, context):
     for i, (score, r) in enumerate(explosive_picks, 1):
         v5 = core.compute_daytrade_v5_summary(r)
         rr_now = backbone_engine.compute_rr_at_current_price(r)
-        label = "TRUE EXPLOSIVE" if rr_now >= 2.0 or v5["room"]["score"] >= 80 else "FAST MOMENTUM"
+        # MBSS v2 (user request — review label "TRUE EXPLOSIVE"): sebelumnya
+        # cuma (RR>=2.0 ATAU Room>=80) -- keduanya sama-sama ukuran "besarnya
+        # potensi upside", jadi OR di sini cuma menguji dimensi yang SAMA dua
+        # kali dengan rumus beda, bukan dua bukti independen. Sekarang wajib
+        # ADA partisipasi volume nyata (Activity>=65, placeholder pending
+        # forward data) DAN regime MACD bullish established (bukan cuma
+        # histogram baru positif tipis) -- macd_state bullish DAN MACD line
+        # di atas 0.
+        activity_score = v5["activity"]["score"]
+        size_signal = rr_now >= 2.0 or v5["room"]["score"] >= 80
+        macd_confirmed = r.get("macd_state") == "bullish" and r.get("macd_line_above_zero")
+        label = "TRUE EXPLOSIVE" if (size_signal and activity_score >= 65 and macd_confirmed) else "FAST MOMENTUM"
         lines.append(
             f"{i}. {r['ticker']} — Explosive {score:.0f} [{label}]\n"
-            f"   Room {v5['room']['score']} | RR@now {rr_now} | Activity {v5['activity']['score']}\n"
+            f"   Room {v5['room']['score']} | RR@now {rr_now} | Activity {activity_score}\n"
             f"   Action: /check {r['ticker']} sebelum entry"
         )
 
