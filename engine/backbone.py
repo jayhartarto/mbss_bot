@@ -519,12 +519,13 @@ def classify_and_update_consensus_entry(ticker: str, r: dict, state: dict) -> st
 # (AB-RC3), TAPI scope dipangkas signifikan dari dokumen aslinya setelah
 # review Section 53 bersama user — lihat catatan per fungsi kenapa.
 #
-# PHASE 1 — SHADOW MODE: fungsi-fungsi ini dipanggil dari /check dan
-# HASILNYA DISIMPAN (lihat commands/check.py), TAPI belum mengubah pesan
-# /check yang terlihat user. Tujuannya observasi dulu (apakah state
-# VALID/RETEST/INVALID dan keputusannya masuk akal di data nyata) sebelum
-# jadi output utama — sama disiplin forward-validate-dulu yang sudah
-# dipegang di seluruh AB-RC1/RC2 backbone.
+# LIVE dari awal (bukan shadow-mode) — MBSS v2, keputusan user: logic ini
+# disusun dari data yang SUDAH tampil di /check (VWAP, active_breakout,
+# momentum), cuma bobot agregasinya yang baru — sama seperti backbone
+# (Danger/Probability) yang juga langsung tampil lalu diperbaiki dari
+# observasi nyata, bukan didiamkan dulu di belakang layar. Tetap disimpan
+# ke tactical_shadow_log.json (save_tactical_shadow_snapshot) sebagai
+# bahan riset/evaluasi ke depan.
 #
 # Simplifikasi disengaja vs dokumen AB-RC3 asli:
 # - TIDAK reuse "PortfolioRankService" (belum pernah dibangun/AB-RC2 belum

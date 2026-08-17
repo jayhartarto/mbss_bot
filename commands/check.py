@@ -302,12 +302,15 @@ async def check_stock(update, context):
     except Exception as e:
         print(f"⚠️ /check: gagal ambil backbone entry rank untuk {ticker}: {e}")
 
-    # AB-RC3 Tactical Live Rank — PHASE 1 SHADOW MODE (MBSS v2, user
-    # request: "/check jadi lebih tactical"). Dihitung & DISIMPAN
-    # (tactical_shadow_log.json) tiap /check, TAPI SENGAJA belum
-    # mengubah pesan yang user lihat sama sekali — lihat catatan modul
-    # di engine/backbone.py buat kenapa (observasi dulu sebelum jadi
-    # output utama, kesepakatan eksplisit sebelum coding ini dimulai).
+    # AB-RC3 Tactical Live Rank (MBSS v2, user request: "/check jadi lebih
+    # tactical"). MBSS v2 revisi (user request lanjutan): awalnya
+    # direncanakan shadow-mode dulu, tapi user benar — logic ini disusun
+    # dari data yang SUDAH ditampilkan /check (VWAP, active_breakout,
+    # momentum), cuma bobotnya yang baru, sama seperti backbone
+    # (Danger/Probability) yang juga langsung tampil lalu diperbaiki dari
+    # observasi nyata (bukan shadow-mode). Tetap disimpan ke
+    # tactical_shadow_log.json buat bahan riset nanti.
+    tactical_line = ""
     try:
         validity = backbone_engine.classify_signal_validity(result)
         daily_broksum_history = nightly_engine.load_broksum_daily_history()
@@ -316,8 +319,20 @@ async def check_stock(update, context):
         backbone_engine.save_tactical_shadow_snapshot(
             ticker, validity, tactical_rank, tactical_decision, result.get("is_held_position", False)
         )
+
+        state = validity["state"]
+        state_icon = {"VALID": "✅", "RETEST": "🔁", "INVALID": "❌", "UNKNOWN": "❔"}.get(state, "❔")
+        delta = tactical_rank["delta"]
+        delta_str = f" ({delta:+.1f} dari EOD)" if delta else ""
+        decision_label = tactical_decision["decision"].replace("_", " ")
+        tactical_line = (
+            f"🎯 TACTICAL: {decision_label}\n"
+            f"Status sinyal: {state_icon} {state} — {validity['reasons'][0]}\n"
+            f"Live Rank: {tactical_rank['live_rank']:.0f}/100{delta_str}\n"
+            f"{tactical_decision['note']}\n"
+        )
     except Exception as e:
-        print(f"⚠️ /check: gagal hitung tactical shadow snapshot untuk {ticker}: {e}")
+        print(f"⚠️ /check: gagal hitung tactical live rank untuk {ticker}: {e}")
 
     # MBSS v2 (RapidAPI integration, user request) — replaces the old
     # "💹 BROKER RIIL" block (which mixed Index Alpha/Zapi/screenshot sources,
@@ -575,6 +590,7 @@ async def check_stock(update, context):
         f"{result.get('name', ticker)} ({ticker})",
         f"📅 {date_str}  |  {jam_str}",
         "",
+        tactical_line,
         freshness_line,
         f"🎯 {result['action_label_id']}",
         meta_line,
