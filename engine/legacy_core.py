@@ -2684,7 +2684,7 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
 # new factors, etc). This makes it visible when a score difference between two runs is
 # due to a real formula change vs. genuine day-to-day market movement — comparing scores
 # across different versions isn't apples-to-apples.
-SCORING_FORMULA_VERSION = "3.17.0"  # v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
+SCORING_FORMULA_VERSION = "3.17.1"  # v3.17.1: tambah field macd_line_above_zero (dipakai TRUE EXPLOSIVE /consensus) di compute_factor_scoring; v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
 
 
 # NOTE (MBSS v2 refactor, Sprint 2 Tier 1.1): compute_factor_scoring moved to
