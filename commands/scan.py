@@ -1940,6 +1940,10 @@ async def consensus_command(update, context):
     versi lama), karena format §7 dokumen sudah eksplisit/terstruktur,
     tidak butuh interpretasi bahasa natural.
     """
+    if context.args and context.args[0].lower() == "live":
+        await consensus_live_command(update, context)
+        return
+
     scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
     if not scored:
         await core.safe_reply(update.message, "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
@@ -1952,6 +1956,7 @@ async def consensus_command(update, context):
     if backbone_staleness:
         await core.safe_reply(update.message, backbone_staleness)
 
+    broksum_data = nightly_engine.load_broksum_250()  # dibaca sekali di sini, cache read-only, dipakai buat sort net value SMART-MONEY WATCH di bawah
     pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
     pool_by_ticker = {r["ticker"]: r for r in pool}
     top8_tickers = [r["ticker"] for r in backbone_result.get("top8", [])]
@@ -1964,22 +1969,22 @@ async def consensus_command(update, context):
         "",
     ]
 
-    # === BACKBONE TOP-5 (murni ranking, user request) ===
-    # Entry Rank #1-8 seringkali TIDAK muncul di CONSENSUS PRIME/EXPLOSIVE
-    # sama sekali kalau tickernya belum penuhi kriteria structural HC atau
-    # lane SDT — jadi sinyal paling "murni" (probability tertinggi di
-    # antara SEMUA yang lolos Danger Gate) bisa hilang tak kelihatan.
-    # Section ini tampilkan langsung, TIDAK difilter tool lain sama sekali.
-    top5 = backbone_result.get("top8", [])[:5]
-    lines.append(f"🧱 BACKBONE TOP-5 (murni ranking, TANPA filter SDT/HC — {len(top5)} saham)")
-    if not top5:
-        lines.append("Tidak ada kandidat lolos Danger Gate malam ini.")
-    for r in top5:
+    # === BACKBONE TOP-3 (user revisi — /consensus jadi "interest shortlist",
+    # jadi murni ranking probability TANPA konfirmasi tool lain bukan lagi
+    # relevan di sini, itu tugas BACKBONE TOP-5 versi lama / /hc /
+    # /screendaytrade langsung). Sekarang disaring ke irisan dengan
+    # SDT ATAU HC (union, BUKAN AND ketat seperti CONSENSUS PRIME di bawah
+    # yang butuh keduanya) — dan dipangkas ke top-3 dari sisa itu.
+    top3_candidates = [r for r in backbone_result.get("top8", []) if r["ticker"] in sdt_selected or r["ticker"] in hc_selected]
+    top3 = top3_candidates[:3]
+    lines.append(f"🧱 BACKBONE TOP-3 (irisan dgn SDT/HC — {len(top3)} saham)")
+    if not top3:
+        lines.append("Tidak ada kandidat Top-8 yang juga lolos SDT atau HC malam ini.")
+    for r in top3:
         also = []
         if r["ticker"] in sdt_selected: also.append("SDT")
         if r["ticker"] in hc_selected: also.append("HC")
-        also_str = f" | Juga di: {', '.join(also)}" if also else " | Belum lolos kriteria SDT/HC manapun"
-        lines.append(f"{r['backbone_rank']}. {r['ticker']} — prob {r['probability_score']:.0f}, danger {r['predicted_danger']:.0f}{also_str}")
+        lines.append(f"{r['backbone_rank']}. {r['ticker']} — prob {r['probability_score']:.0f}, danger {r['predicted_danger']:.0f} | Juga di: {', '.join(also)}")
     lines.append("⚠️ Ranking murni, BUKAN sinyal entry siap pakai — cek /check sebelum ambil keputusan.")
 
     # === CONSENSUS PRIME (state-aware NEW/ACTIVE/COOLDOWN — doc §16-17) ===
@@ -2057,15 +2062,28 @@ async def consensus_command(update, context):
         )
 
     # === SMART-MONEY WATCH (akumulasi kuat, belum ke-konfirmasi SDT/HC) ===
-    watch_only = [
-        r for r in pool
-        if r["ticker"] not in prime_tickers and r["ticker"] not in {rr["ticker"] for _, rr in explosive_picks}
-        and isinstance(r.get("whitelist_accumulation_net_pct"), (int, float))
-        and r["whitelist_accumulation_net_pct"] >= 15
-        and (r.get("whitelist_num_brokers") or 0) >= 2
-    ]
-    watch_only.sort(key=lambda r: r["whitelist_accumulation_net_pct"], reverse=True)
-    watch_only = watch_only[:3]
+    # MBSS v2 (user request — "diurutkan dari top value net buy smartmoney
+    # saja?"): threshold kualitas TETAP net_pct>=15% + >=2 broker (sama
+    # seperti sebelumnya, sudah divalidasi), tapi URUTANnYA sekarang net
+    # value IDR, bukan net_pct — net_pct bisa menyesatkan untuk ticker
+    # likuiditas tipis (net-buy 20% dari transaksi Rp50jt ≠ net-buy 20%
+    # dari Rp5M), sementara net value IDR langsung mencerminkan besaran
+    # uang riil yang dikomit whitelist broker. TIDAK dipakai "menguat
+    # tajam"/price momentum -- itu justru bertentangan sama tujuan lane
+    # ini ("belum terkonfirmasi teknikal"), kalau harga sudah menguat tajam
+    # harusnya sudah lolos SDT/HC dan tidak nyampe ke sini.
+    watch_only = []
+    for r in pool:
+        if r["ticker"] in prime_tickers or r["ticker"] in {rr["ticker"] for _, rr in explosive_picks}:
+            continue
+        net_pct = r.get("whitelist_accumulation_net_pct")
+        if not isinstance(net_pct, (int, float)) or net_pct < 15 or (r.get("whitelist_num_brokers") or 0) < 2:
+            continue
+        signal = broker_engine.compute_whitelist_accumulation_signal(r["ticker"], broksum_data.get(r["ticker"], []))
+        net_value = signal.get("net_value") if signal else None
+        watch_only.append((net_value if net_value is not None else 0, r))
+    watch_only.sort(key=lambda pair: pair[0], reverse=True)
+    watch_only = [r for _, r in watch_only[:3]]
     if watch_only:
         lines.append(f"\n💰 SMART-MONEY WATCH — {len(watch_only)} saham (akumulasi kuat, belum terkonfirmasi teknikal)")
         for r in watch_only:
@@ -2101,6 +2119,124 @@ async def consensus_command(update, context):
 
     all_tickers = prime_tickers + [r["ticker"] for _, r in explosive_picks] + [r["ticker"] for r in watch_only]
     buttons = core.build_check_buttons(all_tickers)
+    await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
+
+
+async def consensus_live_command(update, context):
+    """
+    /consensus live — AB-RC3 tactical check-up ATAS pilihan EOD /consensus
+    malam ini (MBSS v2, user request). Dua bagian:
+
+    1. STATUS LIVE Consensus Prime + Explosive Lane: reuse PERSIS pipeline
+       /check (classify_signal_validity -> compute_tactical_live_rank ->
+       compute_tactical_decision) per ticker, fetch intraday live sekali per
+       ticker (yfinance saja, TIDAK ada panggilan RapidAPI — aman dari sisi
+       kuota walau dipanggil berkali-kali sehari). Sengaja TIDAK menyentuh/
+       memutasi consensus position_state (cooldown dsb) — itu urusan
+       /consensus versi EOD, di sini murni observasi read-only.
+    2. TEMUAN DI LUAR TOOL: ticker yang di-/check MANUAL hari ini tapi TIDAK
+       ada di Prime/Explosive malam ini — filter KETAT (user confirmed):
+       cuma EXTENDED_CHASE dengan winrate_tag real, atau live_rank tinggi
+       (>=60, placeholder pending forward data). Lihat
+       backbone_engine.load_todays_notable_offradar_checks.
+    """
+    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
+    if not scored:
+        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
+        return
+    backbone_result, backbone_staleness = nightly_engine.load_backbone_daily_allow_stale()
+    if not backbone_result:
+        await core.safe_reply(update.message, "⚠️ Backbone belum pernah dihitung — jalankan /eodscan dulu (versi terbaru).")
+        return
+
+    pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
+    pool_by_ticker = {r["ticker"]: r for r in pool}
+    top8_tickers = [r["ticker"] for r in backbone_result.get("top8", [])]
+    sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool)
+    market_regime = backbone_result.get("market_regime", "R0_UNKNOWN")
+
+    prime_tickers = [t for t in top8_tickers if t in sdt_selected and t in hc_selected]
+
+    explosive_pool = [r for r in pool if r["ticker"] not in prime_tickers]
+    min_score = EXPLOSIVE_MIN_SCORE_BY_REGIME.get(market_regime, EXPLOSIVE_MIN_SCORE_BY_REGIME["R0_UNKNOWN"])
+    explosive_scored = []
+    for r in explosive_pool:
+        score, rejected, _reason = _explosive_score(r, pool)
+        if not rejected and score >= min_score:
+            explosive_scored.append((score, r))
+    explosive_scored.sort(key=lambda pair: pair[0], reverse=True)
+    explosive_tickers = [r["ticker"] for _, r in explosive_scored[:EXPLOSIVE_MAX_NAMES]]
+
+    watchlist = list(dict.fromkeys(prime_tickers + explosive_tickers))  # dedup, preserve order
+
+    await core.safe_reply(update.message, f"🔄 Cek tactical live untuk {len(watchlist)} pilihan EOD Consensus, mohon tunggu...")
+
+    portfolio = core.load_portfolio()
+    held_positions = set(portfolio.get("positions", {}).keys())
+    daily_broksum_history = nightly_engine.load_broksum_daily_history()
+
+    state_icon = {
+        "VALID": "✅", "RETEST": "🔁", "INVALID": "❌", "UNKNOWN": "❔",
+        "EXTENDED_CHASE": "🔥", "EXTENDED_NO_CHASE": "⚠️",
+    }
+
+    lines = [f"🎯 CONSENSUS LIVE — {market_regime}", ""]
+    lines.append(f"📌 STATUS LIVE — {len(watchlist)} pilihan EOD (Prime+Explosive)")
+    if not watchlist:
+        lines.append("Tidak ada Consensus Prime/Explosive malam ini untuk dicek live.")
+
+    for t in watchlist:
+        base = pool_by_ticker[t]
+        try:
+            intraday_ctx = await asyncio.to_thread(core.fetch_intraday_market_context, t)
+            r = dict(base)
+            r["active_breakout"] = intraday_ctx.get("active_breakout", {"available": False})
+            r["intraday_momentum"] = intraday_ctx.get("momentum", {"available": False})
+            r["vwap_movement"] = intraday_ctx.get("vwap_movement", {"available": False, "overall_signal": "N/A"})
+            if intraday_ctx.get("price") is not None:
+                r["price"] = intraday_ctx["price"]
+            hist = core.get_ohlcv_smart(t, limit=60)
+            r["intraday_targets"] = await asyncio.to_thread(core.compute_intraday_targets, t, r, hist if not hist.empty else None)
+
+            validity = backbone_engine.classify_signal_validity(r)
+            bb_info = backbone_result.get("all_scored", {}).get(t)
+            tactical_rank = backbone_engine.compute_tactical_live_rank(r, bb_info, daily_broksum_history)
+            is_held = t in held_positions
+            tactical_decision = backbone_engine.compute_tactical_decision(r, validity, is_held)
+            backbone_engine.save_tactical_shadow_snapshot(t, validity, tactical_rank, tactical_decision, is_held)
+
+            state = validity["state"]
+            icon = state_icon.get(state, "❔")
+            wr_str = f" [{validity.get('winrate_tag')}]" if validity.get("winrate_tag") else ""
+            decision_label = tactical_decision["decision"].replace("_", " ")
+            delta = tactical_rank["delta"]
+            delta_str = f" ({delta:+.1f})" if delta else ""
+            tag = " [Prime]" if t in prime_tickers else " [Explosive]"
+            held_tag = " 💼" if is_held else ""
+            lines.append(
+                f"{icon} {t}{tag}{held_tag} — {state}{wr_str} — {decision_label} | "
+                f"Live Rank {tactical_rank['live_rank']:.0f}/100{delta_str}"
+            )
+        except Exception as e:
+            print(f"⚠️ /consensus live: gagal cek tactical {t}: {e}")
+            lines.append(f"❔ {t} — gagal ambil data live ({e})")
+
+    offradar = backbone_engine.load_todays_notable_offradar_checks(exclude_tickers=set(watchlist))
+    if offradar:
+        lines.append(f"\n🔎 TEMUAN DI LUAR TOOL — {len(offradar)} ticker (dari /check manual hari ini, di luar Prime/Explosive)")
+        for entry in offradar:
+            icon = state_icon.get(entry.get("validity_state"), "❔")
+            wr_str = f" [{entry['winrate_tag']}]" if entry.get("winrate_tag") else ""
+            decision_label = str(entry.get("decision", "")).replace("_", " ")
+            lr = entry.get("live_rank")
+            lr_str = f"{lr:.0f}/100" if lr is not None else "-"
+            lines.append(f"{icon} {entry['ticker']} — {entry.get('validity_state')}{wr_str} — {decision_label} | Live Rank {lr_str}")
+
+    lines.append("\nDetail lengkap: /check TICKER")
+    if staleness_note:
+        lines.insert(0, staleness_note)
+
+    buttons = core.build_check_buttons(watchlist + [e["ticker"] for e in offradar])
     await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
 
 

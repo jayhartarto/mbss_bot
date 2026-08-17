@@ -341,13 +341,21 @@ async def check_stock(update, context):
             if support:
                 support_line = f"Tactical Support (VWAP): {support['support']}  |  Tactical Cut: {support['tactical_cut']}\n"
 
+        # MBSS v2 (user request — "terlalu panjang, ringkas"): dulu ada baris
+        # "Status sinyal" (mengulang reason kalimat panjang) + baris note
+        # tactical_decision (kalimat panjang lagi) — dua-duanya dibuang.
+        # decision_label TETAP disatukan ke header (bukan dibuang total,
+        # beda perlakuan held vs belum held cukup signifikan — misal
+        # EXTENDED_CHASE = TRAIL PROFIT kalau dipegang, tapi CHASE
+        # OPPORTUNITY kalau belum — hilang kalau cuma tampilkan state).
+        winrate_tag = validity.get("winrate_tag")
+        wr_str = f" [{winrate_tag}]" if winrate_tag else ""
         tactical_line = (
-            f"🎯 TACTICAL: {decision_label}\n"
-            f"Status sinyal: {state_icon} {state} — {validity['reasons'][0]}\n"
+            f"🎯 TACTICAL: {state_icon} {state}{wr_str} — {decision_label}\n"
+            f"\n"
             f"Live Rank: {tactical_rank['live_rank']:.0f}/100{delta_str}\n"
             f"{rr_line}"
             f"{support_line}"
-            f"{tactical_decision['note']}\n"
         )
     except Exception as e:
         print(f"⚠️ /check: gagal hitung tactical live rank untuk {ticker}: {e}")
@@ -457,18 +465,25 @@ async def check_stock(update, context):
         )
 
     # ── Intraday status ────────────────────────────────────────────
+    # MBSS v2 (user request — "terlalu panjang, ringkas"): Vol pace
+    # digabung ke baris High/Low (dulu ada 2 sumber vol pace terpisah —
+    # baris VWAP fallback ini DAN baris kedua di bawah Active Breakout —
+    # sekarang cukup satu). Baris VWAP fallback berdiri sendiri cuma
+    # ditampilkan kalau Active Breakout TIDAK tersedia (kalau tersedia,
+    # VWAP sudah ikut tampil di baris Active Breakout, jadi duplikat).
     intraday_status = ""
     hi = result.get("intraday_high")
     lo = result.get("intraday_low")
-    if hi and lo:
-        intraday_status += f"\n⚡ INTRADAY\nHigh {_fmt(hi)}  |  Low {_fmt(lo)}\n"
+    ab = result.get("active_breakout", {})
     vwap_fb = result.get("intraday_vwap") or {}
-    if vwap_fb.get("available"):
+    if hi and lo:
+        vol_pace_display = ab.get("volume_pace_ratio") if ab.get("available") else vwap_fb.get("volume_pace_ratio")
+        vp_txt = f" | Vol pace {vol_pace_display}x" if vol_pace_display is not None else ""
+        intraday_status += f"\n⚡ INTRADAY\nHigh {_fmt(hi)}  |  Low {_fmt(lo)}{vp_txt}\n"
+    if not ab.get("available") and vwap_fb.get("available"):
         vwap_ref = vwap_fb.get("vwap_raw", vwap_fb.get("vwap", price))
         vwap_sign = "di atas" if price >= vwap_ref else "di bawah"
-        vp = vwap_fb.get("volume_pace_ratio")
-        vp_txt = f" | Vol pace {vp}x" if vp is not None else ""
-        intraday_status += f"VWAP {_fmt(vwap_fb.get('vwap'))} ({vwap_fb.get('vwap_distance_pct'):+.2f}%, {vwap_sign}){vp_txt}\n"
+        intraday_status += f"VWAP {_fmt(vwap_fb.get('vwap'))} ({vwap_fb.get('vwap_distance_pct'):+.2f}%, {vwap_sign})\n"
     if im.get("available"):
         sess = "Sesi 1" if im["session"] == "sesi_1" else "Sesi 2"
         intraday_status += f"Momentum {sess}: {im['reading']} ({im['change_pct']:+.2f}%)\n"
@@ -494,7 +509,6 @@ async def check_stock(update, context):
         br_reason = br.get("reason") or "data belum cukup"
         intraday_status += f"Peluang Breakout: tidak tersedia ({br_reason})"
 
-    ab = result.get("active_breakout", {})
     if ab.get("available"):
         intraday_status += (
             f"\n⚡ Active Breakout: {ab.get('label')} ({ab.get('score')}/100)"
@@ -502,8 +516,6 @@ async def check_stock(update, context):
             f"  VWAP {_fmt(ab.get('vwap'))}"
             f"  Invalid {_fmt(ab.get('invalidation_level'))}"
         )
-        if ab.get("volume_pace_ratio") is not None:
-            intraday_status += f"\nVol pace {ab.get('volume_pace_ratio')}x | {ab.get('notes', '')}"
 
     # ── Conviction + karakter ──────────────────────────────────────
     meta_line = ""
@@ -604,28 +616,37 @@ async def check_stock(update, context):
             news_lines.append(f"• {item['title']}{reaction_str}")
         news_block = f"📰 Berita Terkini\n" + "\n".join(news_lines)
 
+    # MBSS v2 (user request — "pesan 1 fokus pada tactical decision making,
+    # seluruh data EOD menjadi pesan 2"): sebelumnya semua digabung satu
+    # pesan panjang. Sekarang pesan 1 cuma yang butuh keputusan CEPAT SAAT
+    # INI (tactical, posisi yang dipegang, kondisi live intraday), pesan 2
+    # yang lain-lain dari data EOD (skor, target, raw data, broker, berita).
     msg1 = "\n".join(filter(None, [
         f"{result.get('name', ticker)} ({ticker})",
         f"📅 {date_str}  |  {jam_str}",
         "",
         tactical_line,
         freshness_line,
+        posisi_lines,
+        intraday_status,
+    ]))
+    await core.safe_reply(update.message, msg1)
+
+    msg2_eod = "\n".join(filter(None, [
         f"🎯 {result['action_label_id']}",
         meta_line,
         "",
         skor_line,
         "",
         target_lines,
-        posisi_lines,
-        intraday_status,
         "",
         raw_data_block + bias_block,
         brokersum_line,
         news_block,
     ]))
-    await core.safe_reply(update.message, msg1)
+    await core.safe_reply(update.message, msg2_eod)
 
-    # Pesan 2 — sinyal ringkas pada waktu /check dijalankan
+    # Pesan 3 — sinyal ringkas deterministik pada waktu /check dijalankan
     await core.safe_reply(update.message, analysis_text)
 
     # Offer optional Broker Sum screenshot enrichment — SKIP entirely kalau sudah

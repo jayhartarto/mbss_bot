@@ -566,7 +566,7 @@ def classify_and_update_consensus_entry(ticker: str, r: dict, state: dict) -> st
 #   scope AB-RC3 Phase 2+, ditunda per kesepakatan.
 # ==========================================
 
-TACTICAL_FORMULA_VERSION = "AB-RC3-shadow.2"  # .2: EXTENDED (momentum-chase vs no-chase) state + Tactical Support Zone (VWAP-based) + danger-aware rank_score dependency (AB-RC1.6)
+TACTICAL_FORMULA_VERSION = "AB-RC3-shadow.4"  # .4: tambah winrate_tag (WR xx% dari /winrate real) di output classify_extended_beyond_plan buat ditampilkan di /check; .3: classify_extended_beyond_plan diselaraskan dgn lane SDT "EXTENDED / CHASE WATCH" (74% win real, n=23) / "LOW EDGE / CHASE" (28% win real, n=29) sbg sinyal utama, kriteria ala-BSJP jadi sekunder
 
 
 def compute_tactical_support_zone(scoring: dict) -> dict | None:
@@ -599,6 +599,16 @@ def classify_extended_beyond_plan(scoring: dict) -> dict:
     dari commands/scan.py's BSJP thresholds, BUKAN mesin live-fetch
     beratnya — /check sudah punya data live yang setara) buat bedain
     momentum genuinely kuat dari sekadar pop sesaat.
+
+    MBSS v2 (user request, berbasis data /winrate real — 442 pick): SELARASKAN
+    dengan lane SDT "EXTENDED / CHASE WATCH" yang sudah PUNYA track record
+    nyata (74% win, n=23, avg+3.7%/pick) — dipakai sebagai sinyal UTAMA,
+    bukan cuma kriteria ala-BSJP di atas yang belum ada bukti empiris.
+    Kebalikannya, lane "LOW EDGE / CHASE" tercatat jelek (28% win, n=29,
+    avg-2.2%/pick) jadi dipakai buat menolak chase juga. compute_screendaytrade_positive_bias
+    dipanggil langsung dari `scoring` yang sudah ada (active_breakout,
+    whitelist_accumulation_net_pct, dst sudah ke-enrich di /check) — REUSE,
+    bukan fetch/hitung ulang apa pun.
     """
     ret_1d = _f(scoring, "ret_1d_pct")
     rsi = scoring.get("rsi")
@@ -620,16 +630,42 @@ def classify_extended_beyond_plan(scoring: dict) -> dict:
     }
     met = sum(1 for v in checks.values() if v)
 
+    try:
+        sdt_lane = core.compute_screendaytrade_positive_bias(scoring).get("lane")
+    except Exception:
+        sdt_lane = None
+
     support = compute_tactical_support_zone(scoring)
     support_note = f" Tactical Cut (VWAP): {support['tactical_cut']}." if support else " VWAP tidak tersedia, tactical cut tidak bisa dihitung."
 
-    if met >= 4:  # mayoritas (4/5) kriteria BSJP-style terpenuhi
-        return {"state": "EXTENDED_CHASE", "reasons": [
-            f"Harga sudah lewat TP1 EOD, TAPI momentum tervalidasi ({met}/5 kriteria ala-BSJP)."
-            f" Rencana EOD lama SUDAH SELESAI — ini kejar momentum risiko tinggi disadari, bukan entry sesuai plan semalam." + support_note
+    # winrate_tag: HANYA diisi kalau state ini ditentukan oleh lane SDT yang
+    # PUNYA data /winrate real di baliknya (bukan fallback kriteria ala-BSJP,
+    # yang belum ada bukti empiris) — supaya angka WR yang ditampilkan ke
+    # user selalu bisa dipertanggungjawabkan sumbernya.
+    if sdt_lane == "LOW EDGE / CHASE":
+        return {"state": "EXTENDED_NO_CHASE", "winrate_tag": "WR 28% (n=29)", "reasons": [
+            f"Harga sudah lewat TP1 EOD, dan lane SDT membaca ini 'LOW EDGE / CHASE'"
+            f" (track record nyata cuma 28% win, n=29) — {met}/5 kriteria ala-BSJP tidak cukup mengimbangi." + support_note
         ]}
+
+    if sdt_lane == "EXTENDED / CHASE WATCH" or met >= 4:
+        reason_bits = []
+        if sdt_lane == "EXTENDED / CHASE WATCH":
+            reason_bits.append("lane SDT 'EXTENDED / CHASE WATCH' (track record nyata 74% win, avg+3.7%/pick)")
+        if met >= 4:
+            reason_bits.append(f"{met}/5 kriteria ala-BSJP terpenuhi")
+        reason = " dan ".join(reason_bits)
+        return {
+            "state": "EXTENDED_CHASE",
+            "winrate_tag": "WR 74% (n=23)" if sdt_lane == "EXTENDED / CHASE WATCH" else None,
+            "reasons": [
+                f"Harga sudah lewat TP1 EOD, TAPI momentum tervalidasi ({reason})."
+                f" Rencana EOD lama SUDAH SELESAI — ini kejar momentum risiko tinggi disadari, bukan entry sesuai plan semalam." + support_note
+            ],
+        }
+
     return {"state": "EXTENDED_NO_CHASE", "reasons": [
-        f"Harga sudah lewat TP1 EOD TANPA dukungan kuat (cuma {met}/5 kriteria ala-BSJP)."
+        f"Harga sudah lewat TP1 EOD TANPA dukungan kuat (cuma {met}/5 kriteria ala-BSJP, lane SDT: {sdt_lane or 'n/a'})."
         f" Jangan kejar di sini — tunggu /eodscan berikutnya buat plan baru, atau retrace ke VWAP dulu." + support_note
     ]}
 
@@ -860,6 +896,7 @@ def save_tactical_shadow_snapshot(ticker: str, validity: dict, tactical_rank: di
             "is_held": is_held,
             "validity_state": validity.get("state"),
             "validity_reasons": validity.get("reasons"),
+            "winrate_tag": validity.get("winrate_tag"),
             "live_rank": tactical_rank.get("live_rank"),
             "eod_probability": tactical_rank.get("eod_probability"),
             "delta": tactical_rank.get("delta"),
@@ -875,3 +912,61 @@ def save_tactical_shadow_snapshot(ticker: str, validity: dict, tactical_rank: di
             json.dump(log, f, indent=2)
     except Exception as e:
         print(f"⚠️ Gagal simpan tactical shadow snapshot buat {ticker}: {e}")
+
+
+def load_todays_notable_offradar_checks(exclude_tickers: set, live_rank_threshold: float = 60.0) -> list:
+    """
+    MBSS v2 (user request — "/consensus live" section 2, "nampung temuan di
+    luar tools"): scan tactical_shadow_log.json (log yang SUDAH ditulis
+    tiap /check dari Phase 1 shadow-mode) buat ticker yang di-/check MANUAL
+    hari ini TAPI TIDAK ada di Consensus Prime/Explosive Lane malam ini —
+    genuinely "di luar radar" tool otomatis.
+
+    Filter SENGAJA KETAT (user confirmed, hindari jadi daftar panjang tidak
+    fokus): cuma EXTENDED_CHASE dengan winrate_tag REAL (dari lane SDT yang
+    punya bukti /winrate, lihat classify_extended_beyond_plan), ATAU
+    live_rank >= live_rank_threshold (placeholder 60, belum ada forward
+    data — sama posisi "conservative until proven" dengan konstanta AB-RC1
+    lain, sesuaikan setelah cukup observasi). Ceiling live_rank buat ticker
+    yang TIDAK di-scoring /eodscan sama sekali (base default 50) cuma 73
+    (base 50 + maks +23 stacking bonus live) — jadi 60 sengaja diturunkan
+    dari usulan awal 70 (user request) supaya masih ada margin realistis
+    buat kombinasi live yang KUAT tapi tidak sempurna (mis. cuma 3 dari 4
+    bonus live kena, atau kena penalti RR tipis -8), bukan cuma yang
+    stacking sempurna.
+
+    Ambil entri TERAKHIR per ticker hari ini saja (satu ticker bisa
+    ke-/check berkali-kali, state bisa berubah — kita mau yang terbaru).
+    """
+    if not os.path.exists(TACTICAL_SHADOW_LOG_FILE):
+        return []
+    try:
+        with open(TACTICAL_SHADOW_LOG_FILE, encoding="utf-8") as f:
+            log = json.load(f)
+    except Exception:
+        return []
+
+    today = datetime.datetime.now(core.WIB).date()
+    latest_by_ticker = {}
+    for entry in log:
+        ticker = entry.get("ticker")
+        if not ticker or ticker in exclude_tickers:
+            continue
+        try:
+            ts = datetime.datetime.fromisoformat(entry["timestamp"])
+        except Exception:
+            continue
+        if ts.astimezone(core.WIB).date() != today:
+            continue
+        latest_by_ticker[ticker] = entry  # log sudah urut kronologis (append-only) -- yang terakhir menang
+
+    notable = []
+    for entry in latest_by_ticker.values():
+        is_chase_confirmed = entry.get("validity_state") == "EXTENDED_CHASE" and entry.get("winrate_tag")
+        live_rank = entry.get("live_rank")
+        is_high_rank = live_rank is not None and live_rank >= live_rank_threshold
+        if is_chase_confirmed or is_high_rank:
+            notable.append(entry)
+
+    notable.sort(key=lambda e: e.get("live_rank") or 0, reverse=True)
+    return notable

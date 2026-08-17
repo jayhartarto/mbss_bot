@@ -486,12 +486,31 @@ WIB = datetime.timezone(datetime.timedelta(hours=7))  # Asia/Jakarta, no DST
 
 
 
-def fetch_company_news(ticker, company_name, max_items=5):
+# MBSS v2 (user request, real case: "TEBE menjadi top gainer" muncul sebagai
+# "berita" /check — padahal itu cuma roundup harian yang mendeskripsikan
+# ULANG pergerakan harga itu sendiri, sirkular, bukan berita fundamental/
+# sentimen yang MENGGERAKKAN harga). Judul yang match salah satu frasa ini
+# dibuang sebelum ditampilkan.
+NEWS_NOISE_KEYWORDS_ID = [
+    "top gainer", "top gainers", "top loser", "top losers",
+    "penggerak ihsg", "saham penggerak", "saham-saham penggerak",
+    "top laggard", "kamus saham", "rekomendasi saham hari ini",
+    "saham pilihan hari ini", "saham top",
+]
+
+
+def fetch_company_news(ticker, company_name, max_items=3, days_back=30):
     """
     Pulls recent real news scoped to a SPECIFIC company (not general market news) —
     this is what can actually surface corporate actions like buybacks, earnings
     releases, rights issues, or lawsuits, since the general market query is too
     broad to reliably catch single-company stories. Free via Google News RSS.
+
+    MBSS v2 (user request): dibatasi ke `days_back` hari terakhir dan
+    memfilter roundup harian "top gainer/penggerak" (lihat
+    NEWS_NOISE_KEYWORDS_ID) — ambil pool lebih besar dulu dari RSS (15 item
+    mentah), baru difilter tanggal+keyword, supaya filter tidak mengurangi
+    count hasil akhir di bawah max_items kalau berita relevan sebenarnya ada.
     """
     query = f"{company_name} OR {ticker} saham"
     url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=id&gl=ID&ceid=ID:id"
@@ -499,16 +518,30 @@ def fetch_company_news(ticker, company_name, max_items=5):
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         root = ET.fromstring(response.content)
-        items = root.findall(".//item")[:max_items]
+        items = root.findall(".//item")[:15]  # pool mentah sebelum filter
+        cutoff = datetime.datetime.now(WIB) - datetime.timedelta(days=days_back)
         headlines = []
         for item in items:
             title_el = item.find("title")
             pubdate_el = item.find("pubDate")
-            if title_el is not None and title_el.text:
-                headlines.append({
-                    "title": title_el.text,
-                    "published": pubdate_el.text if pubdate_el is not None else "",
-                })
+            if title_el is None or not title_el.text:
+                continue
+            title = title_el.text
+            if any(kw in title.lower() for kw in NEWS_NOISE_KEYWORDS_ID):
+                continue
+            published = pubdate_el.text if pubdate_el is not None else ""
+            if published:
+                try:
+                    pub_dt = email.utils.parsedate_to_datetime(published)
+                    if pub_dt.tzinfo is None:
+                        pub_dt = pub_dt.replace(tzinfo=datetime.timezone.utc)
+                    if pub_dt < cutoff:
+                        continue
+                except Exception:
+                    pass  # tanggal tidak bisa diparse -- tetap ditampilkan, jangan buang cuma karena parsing gagal
+            headlines.append({"title": title, "published": published})
+            if len(headlines) >= max_items:
+                break
         return headlines
     except Exception as e:
         print(f"⚠️ Failed to fetch company news for {ticker}: {e}")
