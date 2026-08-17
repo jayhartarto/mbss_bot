@@ -321,14 +321,32 @@ async def check_stock(update, context):
         )
 
         state = validity["state"]
-        state_icon = {"VALID": "✅", "RETEST": "🔁", "INVALID": "❌", "UNKNOWN": "❔"}.get(state, "❔")
+        state_icon = {
+            "VALID": "✅", "RETEST": "🔁", "INVALID": "❌", "UNKNOWN": "❔",
+            "EXTENDED_CHASE": "🔥", "EXTENDED_NO_CHASE": "⚠️",
+        }.get(state, "❔")
         delta = tactical_rank["delta"]
         delta_str = f" ({delta:+.1f} dari EOD)" if delta else ""
         decision_label = tactical_decision["decision"].replace("_", " ")
+
+        rr_now, rr_eod, rr_delta = tactical_rank.get("rr_now"), tactical_rank.get("rr_eod"), tactical_rank.get("rr_delta")
+        rr_line = ""
+        if rr_now is not None:
+            rr_delta_str = f" ({rr_delta:+.2f} dari EOD 1:{rr_eod:.2f})" if rr_delta is not None else ""
+            rr_line = f"RR LIVE: 1:{rr_now:.2f}{rr_delta_str}\n"
+
+        support_line = ""
+        if state in ("EXTENDED_CHASE", "EXTENDED_NO_CHASE"):
+            support = backbone_engine.compute_tactical_support_zone(result)
+            if support:
+                support_line = f"Tactical Support (VWAP): {support['support']}  |  Tactical Cut: {support['tactical_cut']}\n"
+
         tactical_line = (
             f"🎯 TACTICAL: {decision_label}\n"
             f"Status sinyal: {state_icon} {state} — {validity['reasons'][0]}\n"
             f"Live Rank: {tactical_rank['live_rank']:.0f}/100{delta_str}\n"
+            f"{rr_line}"
+            f"{support_line}"
             f"{tactical_decision['note']}\n"
         )
     except Exception as e:

@@ -46,7 +46,7 @@ import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.5"  # AB-RC1 (doc 24) + RR-at-current-price (1.1) + post-ARA penalty (1.2) + entry_rank (1.3) + whitelist net-buy/sell (1.4) + danger RR consistency fix (1.5, user request): danger's reused v4 base still penalized RR via risk_reward_at_max internally while probability_score used compute_rr_at_current_price -- added a direct current-price RR penalty to danger so both dimensions judge the same ticker's RR the same way. Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.6"  # ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
@@ -327,13 +327,34 @@ def compute_backbone(results: list, market_regime: str) -> dict:
         info["passed_danger_gate"] = danger_cutoff is None or info["predicted_danger"] <= danger_cutoff
 
     survivors = [r for r in candidates if scored[r["ticker"]]["passed_danger_gate"]]
-    survivors.sort(key=lambda r: scored[r["ticker"]]["probability_score"], reverse=True)
+
+    # Entry Rank ranking key (MBSS v2, user request — ditemukan lewat
+    # pertanyaan tajam: dua survivor probability SAMA tapi danger jauh
+    # beda tetap rank SAMA sebelum ini, karena danger cuma dipakai sebagai
+    # gate pass/fail, tidak pernah jadi pengurang rank DI ANTARA sesama
+    # survivor). DANGER_RANK_PENALTY_FLOOR (30) = di bawah ini danger
+    # dianggap genuinely rendah, TIDAK dihukum sama sekali (riset backtest
+    # sudah tunjukkan Danger Gate sendiri sudah menekan dangerous-loss
+    # <=-10% ke ~0%, jadi tidak perlu lapisan rank yang terlalu konservatif
+    # lagi di atasnya — floor dipilih LEBIH LONGGAR, bukan lebih ketat,
+    # atas alasan itu). Danger DI ATAS floor mengurangi rank_score linear
+    # (bobot 0.3/poin). Ini parameter yang HARUS dievaluasi ulang dari
+    # data forward (entry_rank/predicted_danger/probability_score sudah
+    # otomatis ter-track) — bukan angka final.
+    DANGER_RANK_PENALTY_FLOOR = 30.0
+    DANGER_RANK_PENALTY_WEIGHT = 0.3
+    for ticker, info in scored.items():
+        danger_headroom = max(0.0, info["predicted_danger"] - DANGER_RANK_PENALTY_FLOOR)
+        info["rank_score"] = round(info["probability_score"] - danger_headroom * DANGER_RANK_PENALTY_WEIGHT, 1)
+
+    survivors.sort(key=lambda r: scored[r["ticker"]]["rank_score"], reverse=True)
 
     # Entry Rank (MBSS v2, user request): peringkat di antara SEMUA gate
     # survivor malam ini (bukan cuma di antara 8 nama Top-8) — angka
     # UNIVERSAL yang ditampilkan konsisten di /hc, /screendaytrade,
     # /consensus untuk ticker manapun yang lolos gate, bukan cuma yang
-    # kebetulan masuk Top-8. #1 = probability_score tertinggi malam ini.
+    # kebetulan masuk Top-8. #1 = rank_score tertinggi malam ini
+    # (probability didiskon danger di atas floor, lihat catatan di atas).
     entry_rank_total = len(survivors)
     for rank, r in enumerate(survivors, 1):
         scored[r["ticker"]]["entry_rank"] = rank
@@ -545,7 +566,72 @@ def classify_and_update_consensus_entry(ticker: str, r: dict, state: dict) -> st
 #   scope AB-RC3 Phase 2+, ditunda per kesepakatan.
 # ==========================================
 
-TACTICAL_FORMULA_VERSION = "AB-RC3-shadow.1"
+TACTICAL_FORMULA_VERSION = "AB-RC3-shadow.2"  # .2: EXTENDED (momentum-chase vs no-chase) state + Tactical Support Zone (VWAP-based) + danger-aware rank_score dependency (AB-RC1.6)
+
+
+def compute_tactical_support_zone(scoring: dict) -> dict | None:
+    """
+    Referensi support BARU buat state EXTENDED (harga sudah lewat rencana
+    EOD) — VWAP sesi sebagai Tactical Cut, MENGGANTIKAN cut_loss EOD yang
+    sudah tidak relevan (terlalu jauh di bawah harga sekarang). MBSS v2
+    (user request, real case: TMPO high 190 close 158) — VWAP dipilih
+    karena itu level "harga rata-rata tertimbang volume" sesi ini, jauh
+    lebih relevan buat entry yang terjadi setelah harga sudah berlari,
+    daripada level EOD kemarin yang sudah jauh tertinggal.
+
+    Returns None kalau VWAP tidak tersedia (di luar jam bursa/data gagal)
+    -- caller HARUS tampilkan ini sebagai "tidak bisa dihitung", bukan
+    diam-diam pakai angka lain.
+    """
+    ab = scoring.get("active_breakout") or {}
+    vwap = ab.get("vwap")
+    if not ab.get("available") or not vwap:
+        return None
+    return {
+        "support": round(float(vwap)),
+        "tactical_cut": round(float(vwap) * 0.98),  # ~2% buffer di bawah VWAP -- longgar sengaja, VWAP sendiri sudah jadi garis batas utama
+    }
+
+
+def classify_extended_beyond_plan(scoring: dict) -> dict:
+    """
+    Harga sudah >= TP1 EOD — cek kriteria ala-BSJP-ARA (reuse KRITERIA-nya
+    dari commands/scan.py's BSJP thresholds, BUKAN mesin live-fetch
+    beratnya — /check sudah punya data live yang setara) buat bedain
+    momentum genuinely kuat dari sekadar pop sesaat.
+    """
+    ret_1d = _f(scoring, "ret_1d_pct")
+    rsi = scoring.get("rsi")
+    ab = scoring.get("active_breakout") or {}
+    vol_pace = ab.get("volume_pace_ratio")
+    vwap_movement = scoring.get("vwap_movement") or {}
+    vwap_bullish = vwap_movement.get("overall_signal") == "bullish"
+
+    prev_close = scoring.get("price") / (1 + ret_1d / 100) if ret_1d and ret_1d > -100 else None
+    ara_distance = core.compute_ara_distance_pct(scoring.get("price"), prev_close) if prev_close else None
+    ara_has_room = ara_distance is None or ara_distance >= 3.0  # masih ada ruang sebelum limit, bukan sudah mepet
+
+    checks = {
+        "gain_5pct": ret_1d is not None and ret_1d >= 5.0,
+        "volume_2x": vol_pace is not None and vol_pace >= 2.0,
+        "rsi_60_85": rsi is not None and 60 <= rsi <= 85,
+        "vwap_bullish": vwap_bullish,
+        "ara_room": ara_has_room,
+    }
+    met = sum(1 for v in checks.values() if v)
+
+    support = compute_tactical_support_zone(scoring)
+    support_note = f" Tactical Cut (VWAP): {support['tactical_cut']}." if support else " VWAP tidak tersedia, tactical cut tidak bisa dihitung."
+
+    if met >= 4:  # mayoritas (4/5) kriteria BSJP-style terpenuhi
+        return {"state": "EXTENDED_CHASE", "reasons": [
+            f"Harga sudah lewat TP1 EOD, TAPI momentum tervalidasi ({met}/5 kriteria ala-BSJP)."
+            f" Rencana EOD lama SUDAH SELESAI — ini kejar momentum risiko tinggi disadari, bukan entry sesuai plan semalam." + support_note
+        ]}
+    return {"state": "EXTENDED_NO_CHASE", "reasons": [
+        f"Harga sudah lewat TP1 EOD TANPA dukungan kuat (cuma {met}/5 kriteria ala-BSJP)."
+        f" Jangan kejar di sini — tunggu /eodscan berikutnya buat plan baru, atau retrace ke VWAP dulu." + support_note
+    ]}
 
 
 def classify_signal_validity(scoring: dict) -> dict:
@@ -567,6 +653,18 @@ def classify_signal_validity(scoring: dict) -> dict:
     # -- jangan menebak, transparan "belum bisa dinilai".
     if not ab.get("available") and not im.get("available"):
         return {"state": "UNKNOWN", "reasons": ["Data live tidak tersedia (di luar jam bursa atau gagal fetch)."]}
+
+    # EXTENDED (rezim BEDA, dicek DULUAN): harga sudah lewat TP1 EOD --
+    # rencana semalam sudah "selesai"/terlampaui, cut_loss lama sudah
+    # tidak relevan (terlalu jauh di bawah). MBSS v2 (user request, real
+    # case: TMPO high 190 close 158 -- risiko fade besar kalau chase tanpa
+    # referensi baru) -- BUKAN auto-INVALID, tapi juga tidak auto-hijau;
+    # cek kriteria ala-BSJP-ARA (fitur SUDAH ADA, /bsjp) dari data yang
+    # sudah tersedia di /check, buat bedain "momentum kuat tervalidasi"
+    # dari "cuma pop sesaat".
+    tp1 = _f((scoring.get("targets") or {}), "tp_1")
+    if tp1 and price and price >= tp1:
+        return classify_extended_beyond_plan(scoring)
 
     # INVALID paling kuat: harga sudah tembus cut_loss EOD -- premis
     # sinyal semalam sudah terbantahkan telak, ini beda dari Hard SL
@@ -662,12 +760,22 @@ def compute_tactical_live_rank(scoring: dict, backbone_info: dict | None, daily_
     eod_rank = backbone_info.get("entry_rank") if backbone_info else None
     eod_rank_total = backbone_info.get("entry_rank_total") if backbone_info else None
 
+    # RR EOD vs LIVE (MBSS v2, user request — poin 1: "RR live bisa diberi
+    # perubahan +/- juga dibanding EOD"). rr_eod = risk_reward_at_max, angka
+    # yang SAMA sudah ditampilkan di /hc, /screendaytrade, /consensus --
+    # dipakai sebagai baseline biar user bandingkan dengan apa yang sudah
+    # familiar, walau secara teknis dihitung di entry_max bukan close EOD.
+    rr_eod = _f((scoring.get("targets") or {}), "risk_reward_at_max", None)
+
     return {
         "eod_probability": base,
         "live_rank": live_rank,
         "delta": round(live_rank - base, 1),
         "eod_entry_rank": eod_rank,
         "eod_entry_rank_total": eod_rank_total,
+        "rr_eod": rr_eod,
+        "rr_now": rr_now,
+        "rr_delta": round(rr_now - rr_eod, 2) if rr_eod is not None else None,
         "components": components,
         "bias_bandar": bias,
         "formula_version": TACTICAL_FORMULA_VERSION,
@@ -700,6 +808,10 @@ def compute_tactical_decision(scoring: dict, validity: dict, is_held: bool) -> d
         return {"decision": "DATA_UNAVAILABLE", "note": "Data live tidak cukup untuk keputusan taktis."}
 
     if is_held:
+        if state == "EXTENDED_CHASE":
+            return {"decision": "TRAIL_PROFIT", "note": "Sudah lewat TP1 dengan momentum tervalidasi — pertimbangkan trailing (jual sebagian, biarkan sisanya lanjut), bukan full-exit paksa."}
+        if state == "EXTENDED_NO_CHASE":
+            return {"decision": "FULL_TP", "note": "Sudah lewat TP1 TANPA dukungan momentum kuat — ambil profit penuh sekarang, jangan serakah tunggu lebih tinggi."}
         if state == "INVALID":
             return {"decision": "EARLY_EXIT_WATCH", "note": "Premis sinyal sudah terbantahkan live — pertimbangkan keluar lebih awal, ini BUKAN Hard SL struktural."}
         if tp1 and price and price >= tp1:
@@ -709,6 +821,10 @@ def compute_tactical_decision(scoring: dict, validity: dict, is_held: bool) -> d
         return {"decision": "HOLD", "note": "Struktur live masih mendukung, tidak ada aksi mendesak."}
 
     # Ticker belum dipegang (kandidat entry baru / live discovery manual)
+    if state == "EXTENDED_CHASE":
+        return {"decision": "CHASE_OPPORTUNITY", "note": "Rencana EOD terlampaui, TAPI momentum tervalidasi — peluang kejar risiko tinggi disadari, pakai Tactical Cut (VWAP) di atas, BUKAN cut_loss EOD lama."}
+    if state == "EXTENDED_NO_CHASE":
+        return {"decision": "SKIP_EXTENDED", "note": "Rencana EOD terlampaui tanpa dukungan momentum — jangan kejar, tunggu /eodscan berikutnya atau retrace ke VWAP."}
     if state == "INVALID":
         return {"decision": "SKIP", "note": "Sinyal EOD sudah tidak didukung struktur live."}
     if state == "RETEST":
