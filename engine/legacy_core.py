@@ -6892,6 +6892,7 @@ def build_app():
     app.add_handler(CommandHandler(["hc", "highconviction"], commands_scan.high_conviction_command))
     app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.strong_buy_command))
     app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
+    app.add_handler(CommandHandler("fast", commands_scan.fast_candidates_command))
     app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
     app.add_handler(CommandHandler("brokerdiscovery", commands_scan.broker_discovery_command))
     app.add_handler(CommandHandler("bsjp", commands_scan.bsjp_screening_command))

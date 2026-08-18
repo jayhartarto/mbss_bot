@@ -1993,6 +1993,60 @@ def _compute_backbone_top3(pool: list, sdt_selected: set, hc_selected: set, back
     return universe[:3]
 
 
+async def fast_candidates_command(update, context):
+    """
+    /fast — MBSS v2 (user request): daftar BERDIRI SENDIRI kandidat
+    fast_candidate malam ini (lihat compute_fast_candidate_tag, engine/
+    legacy_core.py) — sebelumnya tag ini cuma nempel di /hc/screendaytrade/
+    consensus, tidak ada cara lihat SEMUA kandidat fast sekaligus tanpa
+    scroll command lain. Tetap dibatasi ke Danger Gate survivor (pool) —
+    fast TANPA lolos gate bukan sinyal aman buat prioritas entry di open.
+    """
+    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
+    if not scored:
+        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
+        return
+    backbone_result, backbone_staleness = nightly_engine.load_backbone_daily_allow_stale()
+    if not backbone_result:
+        await core.safe_reply(update.message, "⚠️ Backbone belum pernah dihitung — jalankan /eodscan dulu (versi terbaru).")
+        return
+
+    pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
+    sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool)
+
+    fast_picks = [r for r in pool if core.compute_fast_candidate_tag(r).get("is_fast_candidate")]
+
+    def _probscore(r):
+        return (backbone_result.get("all_scored", {}).get(r["ticker"], {}) or {}).get("probability_score", 0)
+    fast_picks.sort(key=_probscore, reverse=True)
+
+    lines = [f"🚀 FAST CANDIDATES — {len(fast_picks)} saham (vol_ratio>=2.0x & day_range_10d>=20%, lolos Danger Gate)"]
+    if backbone_staleness:
+        lines.insert(0, backbone_staleness)
+    lines.append(
+        "Prioritas entry saat OPEN besok, jangan tunggu konfirmasi tactical 30-40 menit "
+        "(riset speed-to-move: pick FAST resolve <=1 hari menang 95.7% n=92 vs SLOW >=3 hari cuma 40.1% n=349). "
+        "Tag ini MASIH tag-and-track, belum tervalidasi forward secara independen — bukan jaminan.\n"
+    )
+    if not fast_picks:
+        lines.append("Tidak ada kandidat fast malam ini.")
+    for i, r in enumerate(fast_picks, 1):
+        t = r["ticker"]
+        info = backbone_result.get("all_scored", {}).get(t, {}) or {}
+        also = []
+        if t in sdt_selected: also.append("SDT")
+        if t in hc_selected: also.append("HC")
+        also_str = f" | {', '.join(also)}" if also else ""
+        lines.append(
+            f"{i}. {t} — Entry Rank #{info.get('entry_rank', '-')}/{info.get('entry_rank_total', '-')} "
+            f"(prob {info.get('probability_score', '-')}, danger {info.get('predicted_danger', '-')}){also_str}\n"
+            f"   Vol ratio {r.get('vol_ratio')}x | Day range 10D {r.get('day_range_pct_10d')}%"
+        )
+
+    buttons = core.build_check_buttons([r["ticker"] for r in fast_picks])
+    await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
+
+
 async def consensus_command(update, context):
     """
     /consensus — ringkasan brief AB-RC1 (MBSS v2, user backtest — lihat
