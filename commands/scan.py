@@ -1942,6 +1942,49 @@ def _explosive_score(r: dict, pool: list) -> tuple[float, bool, str]:
     return score, False, ""
 
 
+def _compute_backbone_top3(pool: list, sdt_selected: set, hc_selected: set, backbone_result: dict) -> list:
+    """
+    Shared antara /consensus (EOD) dan /consensus live (MBSS v2, user
+    request — "consensus live kok tidak tracking top3 entry backbone" —
+    extracted supaya kedua tempat pakai definisi universe yang SAMA
+    PERSIS, bukan dua salinan yang bisa diam-diam menyimpang seiring waktu).
+
+    Universe: seluruh pool (Danger Gate survivor) yang kena tag SDT (lane
+    bagus) atau HC, DIPERLUAS dengan lane SDT "EXTENDED / CHASE WATCH"
+    (WR 74% real, n=23) dan streak kemunculan berturut-turut lintas-source
+    >=3 hari (breakdown /winrate "Streak 3x", WR terbaik). Diurutkan ke
+    probability_score tertinggi, dipangkas ke 3.
+
+    Returns [(r, tags), ...] — tags = list string ("SDT"/"HC"/"EXTENDED-WR
+    74%"/"STREAK Nx") buat ditampilkan pemanggil.
+    """
+    history = core.load_daytrade_picks_history()
+    today_marker = core.get_current_trading_day_close_marker()
+    universe = []
+    for r in pool:
+        t = r["ticker"]
+        tags = []
+        if t in sdt_selected: tags.append("SDT")
+        if t in hc_selected: tags.append("HC")
+        try:
+            lane = core.compute_screendaytrade_positive_bias(r).get("lane")
+        except Exception:
+            lane = None
+        if lane == "EXTENDED / CHASE WATCH" and "SDT" not in tags:
+            tags.append("EXTENDED-WR 74%")
+        streak = core.compute_consecutive_appearance_streak_any_source(t, today_marker, history)
+        if streak >= 3:
+            tags.append(f"STREAK {streak}x")
+        if tags:
+            universe.append((r, tags))
+
+    def _probscore(r):
+        return (backbone_result.get("all_scored", {}).get(r["ticker"], {}) or {}).get("probability_score", 0)
+
+    universe.sort(key=lambda pair: _probscore(pair[0]), reverse=True)
+    return universe[:3]
+
+
 async def consensus_command(update, context):
     """
     /consensus — ringkasan brief AB-RC1 (MBSS v2, user backtest — lihat
@@ -2010,31 +2053,7 @@ async def consensus_command(update, context):
     # - streak kemunculan berturut-turut lintas-source >=3 hari (breakdown
     #   /winrate "Streak 3x" -- WR terbaik di antara panjang streak lain).
     # Baru diurutkan ke probability_score (Entry Rank) tertinggi, ambil 3.
-    history = core.load_daytrade_picks_history()
-    today_marker = core.get_current_trading_day_close_marker()
-    top3_universe = []
-    for r in pool:
-        t = r["ticker"]
-        tags = []
-        if t in sdt_selected: tags.append("SDT")
-        if t in hc_selected: tags.append("HC")
-        try:
-            lane = core.compute_screendaytrade_positive_bias(r).get("lane")
-        except Exception:
-            lane = None
-        if lane == "EXTENDED / CHASE WATCH" and "SDT" not in tags:
-            tags.append("EXTENDED-WR 74%")
-        streak = core.compute_consecutive_appearance_streak_any_source(t, today_marker, history)
-        if streak >= 3:
-            tags.append(f"STREAK {streak}x")
-        if tags:
-            top3_universe.append((r, tags))
-
-    def _probscore(r):
-        return (backbone_result.get("all_scored", {}).get(r["ticker"], {}) or {}).get("probability_score", 0)
-
-    top3_universe.sort(key=lambda pair: _probscore(pair[0]), reverse=True)
-    top3 = top3_universe[:3]
+    top3 = _compute_backbone_top3(pool, sdt_selected, hc_selected, backbone_result)
     lines.append(f"🧱 BACKBONE TOP-3 (universe SDT/HC/WR-tag, {len(top3)} saham)")
     if not top3:
         lines.append("Tidak ada kandidat SDT/HC/WR-tag malam ini.")
@@ -2237,7 +2256,13 @@ async def consensus_live_command(update, context):
     explosive_scored.sort(key=lambda pair: pair[0], reverse=True)
     explosive_tickers = [r["ticker"] for _, r in explosive_scored[:EXPLOSIVE_MAX_NAMES]]
 
-    watchlist = list(dict.fromkeys(prime_tickers + explosive_tickers))  # dedup, preserve order
+    # MBSS v2 (user request — "consensus live kok tidak tracking top3 entry
+    # backbone"): Backbone Top-3 ikut dicek live juga sekarang, reuse
+    # PERSIS _compute_backbone_top3 yang sama dipakai /consensus EOD, biar
+    # definisi universe-nya tidak menyimpang antar dua command.
+    backbone_top3_tickers = [r["ticker"] for r, _tags in _compute_backbone_top3(pool, sdt_selected, hc_selected, backbone_result)]
+
+    watchlist = list(dict.fromkeys(prime_tickers + explosive_tickers + backbone_top3_tickers))  # dedup, preserve order
 
     await core.safe_reply(update.message, f"🔄 Cek tactical live untuk {len(watchlist)} pilihan EOD Consensus, mohon tunggu...")
 
@@ -2251,9 +2276,9 @@ async def consensus_live_command(update, context):
     }
 
     lines = [f"🎯 CONSENSUS LIVE — {market_regime}", ""]
-    lines.append(f"📌 STATUS LIVE — {len(watchlist)} pilihan EOD (Prime+Explosive)")
+    lines.append(f"📌 STATUS LIVE — {len(watchlist)} pilihan EOD (Prime+Explosive+Backbone Top-3)")
     if not watchlist:
-        lines.append("Tidak ada Consensus Prime/Explosive malam ini untuk dicek live.")
+        lines.append("Tidak ada Consensus Prime/Explosive/Backbone Top-3 malam ini untuk dicek live.")
 
     for t in watchlist:
         base = pool_by_ticker[t]
@@ -2281,7 +2306,11 @@ async def consensus_live_command(update, context):
             decision_label = tactical_decision["decision"].replace("_", " ")
             delta = tactical_rank["delta"]
             delta_str = f" ({delta:+.1f})" if delta else ""
-            tag = " [Prime]" if t in prime_tickers else " [Explosive]"
+            tag_bits = []
+            if t in prime_tickers: tag_bits.append("Prime")
+            if t in explosive_tickers: tag_bits.append("Explosive")
+            if t in backbone_top3_tickers: tag_bits.append("Backbone Top-3")
+            tag = f" [{', '.join(tag_bits)}]" if tag_bits else ""
             held_tag = " 💼" if is_held else ""
             lines.append(
                 f"{icon} {t}{tag}{held_tag} — {state}{wr_str} — {decision_label} | "
