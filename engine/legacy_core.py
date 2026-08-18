@@ -2133,6 +2133,14 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
             "bollinger_squeeze": r.get("bollinger_squeeze"),
             "bollinger_bandwidth_percentile": r.get("bollinger_bandwidth_percentile"),
             "bb_signal_note": r.get("bb_signal_note"),
+            # MBSS v2 (user request — riset speed-to-move menunjukkan FAST
+            # (<=1 hari resolve) menang 95.7% vs SLOW 40.1%): snapshot tag
+            # fast_candidate SAAT pick dikunci. SAMA seperti bollinger_squeeze
+            # di atas — murni data buat validasi forward (apakah tag ini
+            # BENERAN memprediksi resolve cepat + menang, di luar sampel yang
+            # dipakai buat menemukan kriterianya), belum menggating apa pun.
+            "fast_candidate": compute_fast_candidate_tag(r).get("is_fast_candidate"),
+            "fast_candidate_formula_version": FAST_CANDIDATE_FORMULA_VERSION,
         }
 
         # MBSS v2 (user request — evaluasi winrate PER BROKER smart money):
@@ -6056,6 +6064,48 @@ def select_screendaytrade_v5_candidates(results: list, count: int = DAYTRADE_FIN
     return picked[:count], note
 
 
+
+
+FAST_CANDIDATE_FORMULA_VERSION = "1.0"  # bump kalau kriteria fast_candidate berubah — dipakai buat interpretasi feature_snapshot lama vs baru saat evaluasi forward nanti
+
+def compute_fast_candidate_tag(r: dict) -> dict:
+    """
+    MBSS v2 (user request, berbasis riset backtest/research_speed_to_move.py
+    — picks yang resolve CEPAT, <=1 hari, menang 95.7% (n=92) vs yang SLOW,
+    >=3 hari, cuma 40.1% (n=349)): tag EOD murni INFORMASIONAL, belum
+    menggantikan/menggating skor apa pun — sama disiplin dengan
+    bollinger_squeeze (lacak dulu di feature_snapshot, validasi forward,
+    baru dipertimbangkan jadi filter/skor kalau prospectively terbukti).
+
+    Kriteria dipilih dari 2 fitur PALING KUAT & n PALING BESAR dari riset:
+    - vol_ratio >= 2.0x (n=110, winrate 52.7% vs <1.0x cuma 34.6% n=26)
+    - day_range_pct_10d >= 20% (n=103, winrate 53.4% vs <10% cuma 32.3% n=31)
+    SENGAJA belum mengikutkan CMF (arahnya berlawanan intuisi di data, perlu
+    riset lanjut) atau streak (n masih <15 di bucket teratas).
+
+    Tag ini juga dasar "alert entry secepatnya di OPEN" (user request) —
+    kalau EOD sudah menandai kandidat sebagai fast_candidate, user
+    diberitahu supaya TIDAK menunggu window konfirmasi tactical 30-40 menit
+    (lihat classify_signal_validity's UNKNOWN gate) yang justru bisa
+    membuat entry ketinggalan (real case: TEBE, SIPD).
+    """
+    vol_ratio = r.get("vol_ratio")
+    day_range = r.get("day_range_pct_10d")
+    is_fast = (
+        vol_ratio is not None and vol_ratio >= 2.0
+        and day_range is not None and day_range >= 20.0
+    )
+    return {
+        "is_fast_candidate": is_fast,
+        "reason": "vol_ratio>=2.0x & day_range_10d>=20%" if is_fast else None,
+    }
+
+
+def format_fast_candidate_tag(r: dict, prefix: str = "\n   ") -> str:
+    """Display helper dipakai /hc, /screendaytrade, /consensus — lihat compute_fast_candidate_tag."""
+    if not compute_fast_candidate_tag(r).get("is_fast_candidate"):
+        return ""
+    return f"{prefix}🚀 FAST CANDIDATE — prioritas entry saat OPEN besok, jangan tunggu konfirmasi tactical 30-40 menit (riset: 95.7% win kalau resolve <=1 hari, n=92)"
 
 
 def compute_screendaytrade_positive_bias(r: dict) -> dict:

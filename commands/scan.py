@@ -388,6 +388,7 @@ async def screen_daytrade(update, context):
             f"   Harga {r.get('price')} | Valid >{v5['valid_level']} | Ideal {v5['ideal']} | Invalid <{v5['invalid']}\n"
             f"   Room: {room['label']} ({room['dist_high_pct']}% ke high, upside TP1 {room['upside_tp1_pct']}%) | VolQ: {volq['label']} | Continuation: {cont['label']}\n"
             f"   Note: {v5['note']}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}{nightly_engine.format_breakout_alert_tag(r['ticker'])}"
+            f"{core.format_fast_candidate_tag(r)}"
         )
 
     buttons = core.build_check_buttons([r["ticker"] for r in top_candidates])
@@ -1228,6 +1229,7 @@ async def high_conviction_command(update, context):
             f"   {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)} kriteria | "
             f"RR {rr_str} | {label_str}{backbone_note}{sdt_lane_note}\n"
             f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}{breakout_alert_note}"
+            f"{core.format_fast_candidate_tag(r)}"
         )
 
     # MBSS v2 (RapidAPI integration, "diskusi trader" session, user request):
@@ -1975,6 +1977,12 @@ def _compute_backbone_top3(pool: list, sdt_selected: set, hc_selected: set, back
         streak = core.compute_consecutive_appearance_streak_any_source(t, today_marker, history)
         if streak >= 3:
             tags.append(f"STREAK {streak}x")
+        # NOTE: fast_candidate SENGAJA cuma anotasi tambahan pada ticker yang
+        # SUDAH qualify lewat tag lain di atas -- BUKAN kriteria qualifying
+        # sendiri (masih tag-and-track, belum filter/gate, sesuai kesepakatan
+        # user: validasi forward dulu sebelum dipakai menyaring apa pun).
+        if tags and core.compute_fast_candidate_tag(r).get("is_fast_candidate"):
+            tags.append("🚀 FAST")
         if tags:
             universe.append((r, tags))
 
@@ -2108,6 +2116,7 @@ async def consensus_command(update, context):
             f"{i}. {t} — {status_line}\n"
             f"   Entry Rank #{info.get('entry_rank', '-')}/{info.get('entry_rank_total', '-')} (prob {info.get('probability_score', '-')}, danger {info.get('predicted_danger', '-')})\n"
             f"   HC: {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)}{sm_tag}"
+            f"{core.format_fast_candidate_tag(r)}"
         )
     if cooldown_blocked:
         lines.append(
@@ -2148,6 +2157,7 @@ async def consensus_command(update, context):
             f"{i}. {r['ticker']} — Explosive {score:.0f} [{label}]\n"
             f"   Room {v5['room']['score']} | RR@now {rr_now} | Activity {activity_score}\n"
             f"   Action: /check {r['ticker']} sebelum entry"
+            f"{core.format_fast_candidate_tag(r)}"
         )
 
     # === SMART-MONEY WATCH (akumulasi kuat, belum ke-konfirmasi SDT/HC) ===
