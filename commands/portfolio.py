@@ -83,6 +83,99 @@ async def select_screendaytrade_brokersum(update, context):
     )
 
 
+async def batch_buy_position(update, context):
+    """
+    /batchbuy — MBSS v2 (user request, real case: entry 4 pick sekaligus
+    hari yang sama — AADI/CPIN/RAJA/SMGR — satu-satu lewat /buy kelamaan).
+    Satu posisi per baris, format PERSIS sama dengan /buy (TICKER HARGA
+    LOT), cuma dikirim sekaligus lewat newline, bukan argumen command.
+    REUSE core.add_position() langsung, TIDAK ada logic baru — cuma loop
+    tipis di atas fungsi yang sudah ada, per baris independen (satu baris
+    gagal tidak menggagalkan baris lain).
+    """
+    text = update.message.text or ""
+    lines = [l.strip() for l in text.split("\n")[1:] if l.strip()]
+    if not lines:
+        await core.safe_reply(update.message,
+            "Cara pakai (satu posisi per baris):\n"
+            "/batchbuy\n"
+            "TICKER HARGA LOT\n"
+            "TICKER HARGA LOT\n\n"
+            "Contoh:\n"
+            "/batchbuy\n"
+            "AADI 7200 10\n"
+            "CPIN 5450 5\n"
+            "RAJA 850 20\n"
+            "SMGR 3200 8"
+        )
+        return
+
+    results = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 3:
+            results.append(f"⚠️ \"{line}\" — format salah, butuh TICKER HARGA LOT")
+            continue
+        ticker = parts[0].upper().strip()
+        try:
+            price = float(parts[1])
+            lots = int(parts[2])
+            if price <= 0 or lots <= 0:
+                raise ValueError
+        except ValueError:
+            results.append(f"⚠️ {ticker} — harga/lot harus angka positif")
+            continue
+        success, error_message, position = core.add_position(ticker, price, lots)
+        if success:
+            results.append(f"✅ {ticker}: {position['lots']} lot @ avg Rp{position['avg_price']:,.0f}")
+        else:
+            results.append(f"⚠️ {ticker}: {error_message}")
+
+    results.append(f"\nCash tersisa: Rp{core.get_cash_balance():,.0f}")
+    await core.safe_reply(update.message, "\n".join(results))
+
+
+async def batch_sell_position(update, context):
+    """
+    /batchsell — pasangan /batchbuy, format PERSIS /sell (TICKER LOT HARGA)
+    per baris. REUSE core.reduce_position() langsung.
+    """
+    text = update.message.text or ""
+    lines = [l.strip() for l in text.split("\n")[1:] if l.strip()]
+    if not lines:
+        await core.safe_reply(update.message,
+            "Cara pakai (satu posisi per baris):\n"
+            "/batchsell\n"
+            "TICKER LOT HARGA\n"
+            "TICKER LOT HARGA\n\n"
+            "Contoh:\n"
+            "/batchsell\n"
+            "AADI 10 7250\n"
+            "CPIN 5 5500"
+        )
+        return
+
+    results = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 3:
+            results.append(f"⚠️ \"{line}\" — format salah, butuh TICKER LOT HARGA")
+            continue
+        ticker = parts[0].upper().strip()
+        try:
+            lots = int(parts[1])
+            sell_price = float(parts[2])
+            if lots <= 0 or sell_price <= 0:
+                raise ValueError
+        except ValueError:
+            results.append(f"⚠️ {ticker} — lot/harga harus angka positif")
+            continue
+        success, message = core.reduce_position(ticker, lots, sell_price)
+        results.append(("✅ " if success else "⚠️ ") + f"{ticker}: {message}")
+
+    await core.safe_reply(update.message, "\n".join(results))
+
+
 async def buy_position(update, context):
     if len(context.args) < 3:
         await core.safe_reply(update.message,

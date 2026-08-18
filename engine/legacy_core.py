@@ -6826,6 +6826,8 @@ def build_app():
     app.add_handler(MessageHandler(filters.PHOTO, commands_check.handle_brokersum_photo))
     app.add_handler(CommandHandler("buy", commands_portfolio.buy_position))
     app.add_handler(CommandHandler("sell", commands_portfolio.sell_position))
+    app.add_handler(CommandHandler("batchbuy", commands_portfolio.batch_buy_position))
+    app.add_handler(CommandHandler("batchsell", commands_portfolio.batch_sell_position))
     app.add_handler(CommandHandler("addcash", commands_portfolio.add_cash_command))
     app.add_handler(CommandHandler("withdrawcash", commands_portfolio.withdraw_cash_command))
     app.add_handler(CommandHandler("resetportfolio", commands_portfolio.reset_portfolio_command))
