@@ -336,6 +336,12 @@ async def screen_daytrade(update, context):
         # lonjakan volume ekstrem mentah — lihat docstring detect_volume_spikes()
         # untuk kenapa ini tidak bisa digabung ke ranking di atas.
         spikes = detect_volume_spikes(live_pool, count=8)
+        # MBSS v2 (user request — "/fastscan kalau dilakukan setelah
+        # screendaytrade live, ambil LONJAKAN VOL EKSTREM sebagai tambahan
+        # union"): simpan dengan timestamp supaya /fastscan bisa cek
+        # kesegarannya nanti — spike 5m ini basi cepat, /fastscan HARUS
+        # cek umur sebelum dipakai, bukan dipakai selamanya.
+        await asyncio.to_thread(core.save_latest_live_volume_spikes, [r["ticker"] for r in spikes])
         if spikes:
             lines.append(f"\n🔥 LONJAKAN VOLUME EKSTREM (vol_ref ≥{VOLUME_SPIKE_THRESHOLD:.0f}x, di luar ranking di atas — bisa jadi belum \"rapi\" secara struktur, RISIKO LEBIH TINGGI)")
             for r in spikes:
@@ -1528,6 +1534,11 @@ async def _run_bsjp_6criteria(update):
             "rsi": rsi, "ara_distance": ara_distance, "close_pos": close_pos,
             "akumulasi_note": akumulasi_note, "structure": structure,
             "targets": r.get("targets", {}), "action_label_id": r.get("action_label_id"),
+            # MBSS v2 (user request — "review /bsjp apakah perlu optimasi
+            # dengan adanya data /fastscan"): cross-reference tag FAST EOD,
+            # murni informasional (BUKAN filter/threshold baru -- n=3 pick
+            # /bsjp masih terlalu kecil buat ubah formula apa pun).
+            "fast_tag_note": core.format_fast_candidate_tag(r),
         })
 
     if not results:
@@ -1560,6 +1571,7 @@ async def _run_bsjp_6criteria(update):
             f"   Vol {r['vol_vs_ma20']}x MA20 | {r['vol_vs_prev']}x kemarin | SMA5 {r['sma5']:.0f}\n"
             f"   Value {r['value_traded_today']/1e9:.1f}M | RSI {r['rsi']} | Jarak ARA {r['ara_distance']}% | "
             f"Closing {r['close_pos']*100:.0f}% dari range{r['akumulasi_note']}{broker_engine.format_market_mover_tag(r['ticker'])}"
+            f"{r.get('fast_tag_note', '')}"
         )
         for c in r["structure"]["checklist"]:
             icon = "✅" if c["ok"] else "➖"
@@ -2078,31 +2090,91 @@ async def fast_candidates_command(update, context):
     await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
 
 
-async def fast_scan_command(update, context):
+def _load_fastscan_candidacy_union(max_hc_names: int = 5) -> tuple[list, dict, dict, str | None]:
     """
-    /fastscan — MBSS v2 (user request): scan 1-MENIT LIVE atas shortlist
-    kandidat FAST malam ini, cari ledakan volume + spike harga. Dipicu
-    MANUAL oleh user (bukan cron/auto) — paling efektif dijalankan di 2
-    window: 08:50-09:30 (chase opening) dan menjelang tutup Sesi 1
-    (~11:20-12:00, buat chase carry-over ke open Sesi 2). Universe SENGAJA
-    dibatasi ke shortlist FAST (bukan seluruh pool /eodscan) — reuse
-    _load_fast_candidates(), fungsi PERSIS sama dengan /fast, supaya
-    definisi kandidat konsisten dan scan 1m tidak perlu menyisir ratusan
-    ticker (mahal, dan 1m memang dari awal dimaksudkan cuma untuk
-    shortlist kecil — lihat get_intraday_session_bars).
+    MBSS v2 (user request — "explosive lane/fast momentum, high conviction
+    nilai tertinggi, bisa kah digabungkan?"): universe /fastscan DIPERLUAS
+    dari FAST tag SAJA jadi UNION 4 sumber (masuk salah SATU cukup, bukan
+    AND):
+    1. FAST tag EOD (_load_fast_candidates)
+    2. Explosive Lane malam ini (TRUE EXPLOSIVE + FAST MOMENTUM, reuse
+       _explosive_score PERSIS sama dengan /consensus)
+    3. Top HC by final score (reuse is_high_conviction, sudah termasuk
+       AVOID_SELL exclusion dari fix sebelumnya)
+    4. LONJAKAN VOLUME EKSTREM dari /screendaytrade live TERBARU, KALAU
+       masih segar (<=20 menit — lihat load_latest_live_volume_spikes)
+
+    "Highest live vol pace" (SDT live main ranking) SENGAJA TIDAK
+    diikutkan — itu discovery tool 5m yang sudah live-confirmed sendiri,
+    beda peran dari 3+1 sumber di atas yang murni EOD (kecuali #4 yang
+    sudah live tapi eksplisit "belum rapi struktur", exactly yang perlu
+    dikonfirmasi ulang).
+
+    Returns (union_records, tags_by_ticker, backbone_result, staleness_note).
     """
     fast_picks, backbone_result, staleness_note = _load_fast_candidates()
     if backbone_result is None:
+        return [], {}, None, staleness_note
+
+    scored, _ = nightly_engine.load_daily_scan_cache_allow_stale()
+    pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
+    pool_by_ticker = {r["ticker"]: r for r in pool}
+    market_regime = backbone_result.get("market_regime", "R0_UNKNOWN")
+
+    union = {}
+    tags = {}
+
+    def _add(ticker, r, tag):
+        if ticker not in union:
+            union[ticker] = r
+            tags[ticker] = set()
+        tags[ticker].add(tag)
+
+    for r in fast_picks:
+        _add(r["ticker"], r, "FAST")
+
+    min_score = EXPLOSIVE_MIN_SCORE_BY_REGIME.get(market_regime, EXPLOSIVE_MIN_SCORE_BY_REGIME["R0_UNKNOWN"])
+    for r in pool:
+        score, rejected, _reason = _explosive_score(r, pool)
+        if not rejected and score >= min_score:
+            _add(r["ticker"], r, "Explosive")
+
+    hc_candidates = [r for r in pool if r.get("high_conviction", {}).get("is_high_conviction")]
+    hc_candidates.sort(key=lambda r: r.get("scores", {}).get("final", 0), reverse=True)
+    for r in hc_candidates[:max_hc_names]:
+        _add(r["ticker"], r, "HC")
+
+    for t in core.load_latest_live_volume_spikes():
+        if t in pool_by_ticker:
+            _add(t, pool_by_ticker[t], "LiveSpike")
+
+    return list(union.values()), tags, backbone_result, staleness_note
+
+
+async def fast_scan_command(update, context):
+    """
+    /fastscan — MBSS v2 (user request): scan 1-MENIT LIVE atas union
+    kandidat malam ini (FAST ∪ Explosive Lane ∪ Top HC ∪ live-spike segar
+    dari /screendaytrade live — lihat _load_fastscan_candidacy_union),
+    cari ledakan volume + spike harga. Dipicu MANUAL oleh user (bukan
+    cron/auto) — paling efektif dijalankan di 2 window: 08:50-09:30 (chase
+    opening) dan menjelang tutup Sesi 1 (~11:20-12:00, buat chase
+    carry-over ke open Sesi 2). Universe SENGAJA dibatasi ke union di atas
+    (bukan seluruh pool /eodscan) — 1m memang dari awal dimaksudkan cuma
+    untuk shortlist kecil (lihat get_intraday_session_bars).
+    """
+    union_picks, source_tags, backbone_result, staleness_note = _load_fastscan_candidacy_union()
+    if backbone_result is None:
         await core.safe_reply(update.message, staleness_note or "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
         return
-    if not fast_picks:
-        await core.safe_reply(update.message, "⚠️ Tidak ada kandidat FAST malam ini — tidak ada yang bisa discan live.")
+    if not union_picks:
+        await core.safe_reply(update.message, "⚠️ Tidak ada kandidat FAST/Explosive/HC/live-spike malam ini — tidak ada yang bisa discan live.")
         return
 
-    await core.safe_reply(update.message, f"🔍 Scan 1m untuk {len(fast_picks)} kandidat FAST, mohon tunggu...")
+    await core.safe_reply(update.message, f"🔍 Scan 1m untuk {len(union_picks)} kandidat (FAST∪Explosive∪HC∪LiveSpike), mohon tunggu...")
 
     checked = []
-    for r in fast_picks:
+    for r in union_picks:
         t = r["ticker"]
         try:
             detection = await asyncio.to_thread(core.detect_intraday_explosion, t)
@@ -2115,7 +2187,7 @@ async def fast_scan_command(update, context):
     exploded = [(t, d) for t, d in checked if d["is_explosion"]]
     exploded.sort(key=lambda pair: pair[1]["volume_ratio"], reverse=True)
 
-    lines = [f"🔥 FASTSCAN 1m — {len(exploded)} dari {len(fast_picks)} kandidat FAST menunjukkan ledakan live"]
+    lines = [f"🔥 FASTSCAN 1m — {len(exploded)} dari {len(union_picks)} kandidat (FAST∪Explosive∪HC∪LiveSpike) menunjukkan ledakan live"]
     lines.append(
         "Kriteria PLACEHOLDER, BELUM ada data forward sama sekali: volume_ratio>=3.0x (3 bar terakhir vs "
         "baseline 15 bar sebelumnya) DAN price spike>=1.5% (3 bar terakhir). Paling efektif dijalankan manual "
@@ -2125,9 +2197,10 @@ async def fast_scan_command(update, context):
     if not exploded:
         lines.append("Belum ada ledakan terdeteksi saat ini — coba lagi beberapa menit lagi.")
     for t, d in exploded:
-        lines.append(f"🔥 {t} — {d['price']:.0f} | Vol ratio {d['volume_ratio']}x | Spike {d['price_spike_pct']:+.2f}% (3 bar terakhir)")
+        tag_str = f" [{', '.join(sorted(source_tags.get(t, [])))}]" if source_tags.get(t) else ""
+        lines.append(f"🔥 {t}{tag_str} — {d['price']:.0f} | Vol ratio {d['volume_ratio']}x | Spike {d['price_spike_pct']:+.2f}% (3 bar terakhir)")
 
-    skipped = len(fast_picks) - len(checked)
+    skipped = len(union_picks) - len(checked)
     if skipped:
         lines.append(f"\n({skipped} kandidat dilewati — data 1m belum cukup atau di luar jam bursa)")
 

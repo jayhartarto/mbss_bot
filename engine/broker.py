@@ -536,6 +536,8 @@ def fetch_zapi_stock_summary(ticker: str, date_str: str = None) -> dict:
     net_foreign_flow_idr di sini adalah ESTIMASI (volume x harga penutupan),
     bukan angka pasti seperti dari Index Alpha.
     """
+    if not core._zapi_quota_check_and_increment("stock-summary"):
+        return None
     try:
         params = {"length": "1", "start": "0", "code": ticker}
         if date_str:
@@ -544,6 +546,12 @@ def fetch_zapi_stock_summary(ticker: str, date_str: str = None) -> dict:
             f"{core.ZAPI_BASE_URL}/finance:idx/stock-summary",
             params=params, headers=core.ZAPI_HEADERS, timeout=20,
         )
+        if resp.status_code == 429:
+            print(f"⚠️ Zapi rate-limited (429) untuk stock-summary/{ticker} — backing off.")
+            return None
+        if resp.status_code != 200:
+            print(f"⚠️ Zapi stock-summary {ticker}: HTTP {resp.status_code}")
+            return None
         data = resp.json()
         rows = data.get("data", {}).get("data", [])
         if not rows:
@@ -553,6 +561,118 @@ def fetch_zapi_stock_summary(ticker: str, date_str: str = None) -> dict:
     except Exception as e:
         print(f"⚠️ Zapi stock-summary fetch gagal untuk {ticker}: {e}")
         return None
+
+
+def fetch_zapi_orderbook(ticker: str) -> dict | None:
+    """
+    MBSS v2 (user request, real find — endpoint order book ASLI dari Zapi,
+    /v1/finance:pluang/orderbook): langsung menjawab keterbatasan yang
+    berkali-kali disebut sepanjang sesi ini ("bot TIDAK punya akses
+    order-book bid/ask asli") — ini BENERAN order book, bukan proxy OHLCV.
+
+    Dipakai HANYA on-demand (flag "zapi" di /check), TIDAK PERNAH di-bulk-
+    scan — kuota Zapi 600/bulan, 100/menit, SHARED semua endpoint termasuk
+    stock-summary yang sudah lama dipakai. Return None kalau gagal/kuota
+    habis — TIDAK pernah menggagalkan /check, cuma bagian tampilan itu yang
+    kosong.
+    """
+    if not core._zapi_quota_check_and_increment("orderbook"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.ZAPI_BASE_URL}/finance:pluang/orderbook",
+            params={"code": ticker}, headers=core.ZAPI_HEADERS, timeout=20,
+        )
+        if resp.status_code == 429:
+            print(f"⚠️ Zapi rate-limited (429) untuk orderbook/{ticker} — backing off.")
+            return None
+        if resp.status_code != 200:
+            print(f"⚠️ Zapi orderbook {ticker}: HTTP {resp.status_code}")
+            return None
+        data = resp.json()
+        if not data.get("bestBid") and not data.get("bestAsk"):
+            return None
+        return data
+    except Exception as e:
+        print(f"⚠️ Zapi orderbook fetch gagal untuk {ticker}: {e}")
+        return None
+
+
+def fetch_zapi_running_trades(ticker: str, action: str = None, min_lot: int = None) -> dict | None:
+    """
+    MBSS v2 (user request, real find — endpoint running trade ASLI dari
+    Zapi, /v1/finance:pluang/running-trades): tape/time-and-sales riil per
+    cetakan transaksi, dengan filter aggressor side (BUY/SELL) dan ambang
+    lot (big-print filter) — ini yang dipakai buat deteksi "cetakan beli
+    besar berulang" (real case user: order buy tebal yang menjaga level
+    harga tertentu).
+
+    SATU HALAMAN SAJA (tidak menyusuri cursor/nextCursor) — sengaja, biar
+    biaya kuota tetap 1 call per pemanggilan, bukan berpotensi banyak call
+    kalau history panjang. `count`/`fetched` di respons Zapi bisa jauh
+    lebih besar dari yang benar-benar dikembalikan; itu OK, kita cuma
+    perlu cetakan PALING BARU untuk baca tekanan beli SAAT INI, bukan
+    seluruh histori hari itu.
+    """
+    if not core._zapi_quota_check_and_increment("running-trades"):
+        return None
+    try:
+        params = {"code": ticker}
+        if action:
+            params["action"] = action
+        if min_lot:
+            params["minLot"] = min_lot
+        resp = requests.get(
+            f"{core.ZAPI_BASE_URL}/finance:pluang/running-trades",
+            params=params, headers=core.ZAPI_HEADERS, timeout=20,
+        )
+        if resp.status_code == 429:
+            print(f"⚠️ Zapi rate-limited (429) untuk running-trades/{ticker} — backing off.")
+            return None
+        if resp.status_code != 200:
+            print(f"⚠️ Zapi running-trades {ticker}: HTTP {resp.status_code}")
+            return None
+        return resp.json()
+    except Exception as e:
+        print(f"⚠️ Zapi running-trades fetch gagal untuk {ticker}: {e}")
+        return None
+
+
+def compute_orderflow_snapshot_zapi(ticker: str, big_print_min_lot: int = 300) -> dict | None:
+    """
+    MBSS v2 (user request — "enrich entry buy call" dari order book +
+    running trade Zapi): satu ringkasan siap-tampil, MENGGABUNGKAN 2 call
+    (orderbook + running-trades BUY big-print) — TOTAL 2 kuota Zapi per
+    pemanggilan (di atas stock-summary yang sudah ada kalau flag "zapi"
+    dipakai bersamaan, jadi bisa sampai 3 call total per /check TICKER zapi).
+
+    Murni INFORMASIONAL — TIDAK menggating apa pun (sama disiplin dengan
+    tight_trailing_support/fast_candidate), belum ada bukti forward bahwa
+    order-book imbalance atau big-print count ini genuinely prediktif di
+    IDX. `big_print_min_lot=300` placeholder (kira-kira 30rb lembar,
+    signifikan tapi belum divalidasi) — sesuaikan berdasarkan observasi.
+    """
+    orderbook = fetch_zapi_orderbook(ticker)
+    trades = fetch_zapi_running_trades(ticker, action="BUY", min_lot=big_print_min_lot)
+
+    result = {"available": bool(orderbook or trades)}
+    if orderbook:
+        result["best_bid"] = orderbook.get("bestBid")
+        result["best_ask"] = orderbook.get("bestAsk")
+        result["bid_percent"] = orderbook.get("bidPercent")
+        result["ask_percent"] = orderbook.get("askPercent")
+        result["bid_lots"] = sum(b.get("lots", 0) for b in (orderbook.get("bids") or []))
+        result["ask_lots"] = sum(a.get("lots", 0) for a in (orderbook.get("asks") or []))
+
+    if trades:
+        items = trades.get("items") or []
+        result["big_buy_print_count"] = len(items)
+        result["big_buy_print_total_lots"] = sum(i.get("lots", 0) for i in items)
+        if items:
+            result["big_buy_print_latest_price"] = items[0].get("price")
+            result["big_buy_print_min_lot_threshold"] = big_print_min_lot
+
+    return result
 
 
 def compute_brokersum_metrics_zapi(ticker: str, cmf=None, obv_divergence=None) -> dict:

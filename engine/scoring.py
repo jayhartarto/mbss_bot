@@ -1193,6 +1193,35 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     # macd_state yang cuma baca TANDA histogram (macd_line - signal_line).
     macd_line_above_zero = bool(macd_line.iloc[-1] > 0)
 
+    # MBSS v2 (user request, real observasi live intraday — saham dengan
+    # "order buy tebal" yang bergerak mengikuti harga, seolah dijaga rapi
+    # di level tertentu yang naik bareng harga). Bot TIDAK punya akses
+    # order-book depth sama sekali (tidak bisa lihat wall order beneran) —
+    # ini PROXY dari OHLCV harian yang SUDAH ada: seberapa rapat LOW harian
+    # mengikuti EMA9 yang NAIK selama 10 hari terakhir, minim undercut.
+    # MURNI INFORMASIONAL/BONUS — user eksplisit TIDAK mau ini jadi filter
+    # yang mengecilkan pool kandidat, cuma tag tambahan buat kualitas pick,
+    # sama disiplin tag-and-track dengan fast_candidate/bollinger_squeeze
+    # (snapshot dulu, validasi forward, baru pertimbangkan jadi skor kalau
+    # prospectively terbukti).
+    tight_trailing_support = False
+    ema9_slope_pct = None
+    trailing_support_undercut_days = None
+    TRAILING_SUPPORT_LOOKBACK = 10
+    if len(close_prices) >= TRAILING_SUPPORT_LOOKBACK + 9:
+        ema9_series = close_prices.ewm(span=9, adjust=False).mean()
+        recent_ema9 = ema9_series.tail(TRAILING_SUPPORT_LOOKBACK)
+        recent_lows = low_prices.tail(TRAILING_SUPPORT_LOOKBACK)
+        ema9_start = float(recent_ema9.iloc[0])
+        if abs(ema9_start) > 1e-9:
+            ema9_slope_pct = round((float(recent_ema9.iloc[-1]) - ema9_start) / ema9_start * 100, 2)
+        undercut_days = sum(
+            1 for lo, ma in zip(recent_lows, recent_ema9) if float(lo) < float(ma) * 0.99
+        )
+        trailing_support_undercut_days = undercut_days
+        is_rising = ema9_slope_pct is not None and ema9_slope_pct > 1.0  # EMA9 naik >1% selama 10 hari, bukan cuma flat/noise
+        tight_trailing_support = bool(is_rising and undercut_days <= 2)  # maks 2 dari 10 hari boleh undercut signifikan
+
     # Berapa hari sejak cross terakhir (mundur cari kapan tanda histogram
     # terakhir berubah) — dipakai untuk formula PELURUHAN (decay) pengaruh
     # terhadap skor: cross 1 hari lalu = hampir penuh pengaruhnya, cross 5 hari
@@ -1588,6 +1617,9 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "macd_bullish_cross": macd_bullish_cross,
         "macd_bearish_cross": macd_bearish_cross,
         "macd_line_above_zero": macd_line_above_zero,
+        "tight_trailing_support": tight_trailing_support,  # informational/bonus only, TIDAK menggating apa pun -- lihat catatan di atas
+        "ema9_slope_pct": ema9_slope_pct,
+        "trailing_support_undercut_days": trailing_support_undercut_days,
         "is_below_sma50": is_below_sma50,
         "is_below_ema21": is_below_ema21,
         "adx": round(current_adx, 1),

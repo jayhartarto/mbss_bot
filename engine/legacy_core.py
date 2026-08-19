@@ -2306,6 +2306,15 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
             # backbone di harga sekarang) -- dua definisi RR ini SENGAJA
             # dua-duanya disimpan biar bisa dibandingkan forward.
             "risk_reward_at_max": (r.get("targets") or {}).get("risk_reward_at_max"),
+            # MBSS v2 (user request, real observasi live intraday — bandar
+            # "menjaga" support yang naik bareng harga, proxy dari OHLCV
+            # karena bot tidak punya akses order-book asli): informational/
+            # bonus only, TIDAK menggating apa pun — snapshot dulu, validasi
+            # forward, baru pertimbangkan jadi skor kalau prospectively
+            # terbukti (sama disiplin dgn fast_candidate/bollinger_squeeze).
+            "tight_trailing_support": r.get("tight_trailing_support"),
+            "ema9_slope_pct": r.get("ema9_slope_pct"),
+            "trailing_support_undercut_days": r.get("trailing_support_undercut_days"),
         }
 
         # MBSS v2 (user request — evaluasi winrate PER BROKER smart money):
@@ -2720,6 +2729,64 @@ ZAPI_API_KEY  = os.environ.get("ZAPI_API_KEY", "")
 ZAPI_HEADERS  = {"x-api-key": ZAPI_API_KEY}
 ZAPI_BASE_URL = os.environ.get("ZAPI_BASE_URL", "https://api.zpi.web.id/v1")
 
+# MBSS v2 (user request — akun Zapi dibatasi 100 call/menit (rolling 60s,
+# shared SEMUA API key) DAN 600 call/bulan, user eksplisit "jangan sampai
+# melebihi"): guard lokal SEBELUM setiap panggilan Zapi mana pun. TIDAK
+# ADA proteksi kuota sama sekali sebelumnya (beda dari RapidAPI yang sudah
+# punya _rapidapi_idx_quota_check_and_increment) — fetch_zapi_stock_summary
+# yang sudah lama ada pun belum dijaga, baru ditambahkan sekarang bareng
+# 2 endpoint baru (orderbook, running-trades).
+#
+# CATATAN: ini SAFETY NET lokal, BUKAN sumber kebenaran — kalau bot
+# restart, counter lokal ini reset ke 0 walau kuota Zapi sendiri (server-
+# side) tetap jalan dari state sebenarnya. Selalu tetap tangani respons
+# 429/non-200 dari Zapi sendiri sebagai lapis kedua (lihat fetch_zapi_*).
+ZAPI_QUOTA_FILE = os.path.join(PROJECT_ROOT, "zapi_quota.json")
+ZAPI_MONTHLY_LIMIT = 600
+ZAPI_PER_MINUTE_LIMIT = 100
+
+
+def _zapi_quota_check_and_increment(endpoint: str) -> bool:
+    """Return True kalau aman lanjut fetch, False kalau limit tercapai (caller HARUS skip, jangan tetap coba)."""
+    now = datetime.datetime.now(WIB)
+    quota = {}
+    if os.path.exists(ZAPI_QUOTA_FILE):
+        try:
+            with open(ZAPI_QUOTA_FILE) as f:
+                quota = json.load(f)
+        except Exception:
+            quota = {}
+
+    month_key = now.strftime("%Y-%m")
+    if quota.get("month_key") != month_key:
+        quota = {"month_key": month_key, "month_count": 0, "minute_window_start": now.isoformat(), "minute_count": 0}
+
+    try:
+        window_start = datetime.datetime.fromisoformat(quota.get("minute_window_start", now.isoformat()))
+    except Exception:
+        window_start = now
+    if (now - window_start).total_seconds() >= 60:
+        quota["minute_window_start"] = now.isoformat()
+        quota["minute_count"] = 0
+
+    if quota.get("month_count", 0) >= ZAPI_MONTHLY_LIMIT:
+        print(f"⚠️ Zapi kuota BULANAN habis ({ZAPI_MONTHLY_LIMIT}/bulan) — {endpoint} dilewati.")
+        return False
+    if quota.get("minute_count", 0) >= ZAPI_PER_MINUTE_LIMIT:
+        print(f"⚠️ Zapi rate limit PER-MENIT tercapai ({ZAPI_PER_MINUTE_LIMIT}/menit) — {endpoint} dilewati, coba lagi sesaat lagi.")
+        return False
+
+    quota["month_count"] = quota.get("month_count", 0) + 1
+    quota["minute_count"] = quota.get("minute_count", 0) + 1
+    try:
+        tmp_path = ZAPI_QUOTA_FILE + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(quota, f, indent=2)
+        os.replace(tmp_path, ZAPI_QUOTA_FILE)
+    except Exception as e:
+        print(f"⚠️ Gagal simpan Zapi quota tracking: {e}")
+    return True
+
 
 def itick_get_kline_batch(tickers, limit=10):
     """
@@ -2857,7 +2924,7 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
 # new factors, etc). This makes it visible when a score difference between two runs is
 # due to a real formula change vs. genuine day-to-day market movement — comparing scores
 # across different versions isn't apples-to-apples.
-SCORING_FORMULA_VERSION = "3.17.2"  # v3.17.2: compute_high_conviction_score sekarang menerima action_id, is_high_conviction dipaksa False kalau AVOID_SELL (real case RAJA: HC badge ticker yang core blend-nya sudah bilang HINDARI/JUAL); v3.17.1: tambah field macd_line_above_zero (dipakai TRUE EXPLOSIVE /consensus) di compute_factor_scoring; v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
+SCORING_FORMULA_VERSION = "3.17.3"  # v3.17.3: tambah field tight_trailing_support/ema9_slope_pct/trailing_support_undercut_days (informational/bonus only, real observasi live intraday bandar "menjaga" support yang naik bareng harga -- proxy dari OHLCV, bukan order-book asli); v3.17.2: compute_high_conviction_score sekarang menerima action_id, is_high_conviction dipaksa False kalau AVOID_SELL (real case RAJA: HC badge ticker yang core blend-nya sudah bilang HINDARI/JUAL); v3.17.1: tambah field macd_line_above_zero (dipakai TRUE EXPLOSIVE /consensus) di compute_factor_scoring; v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
 
 
 # NOTE (MBSS v2 refactor, Sprint 2 Tier 1.1): compute_factor_scoring moved to
@@ -6617,6 +6684,47 @@ def save_latest_screendaytrade_picks(top_candidates):
             json.dump({"picks": rows, "saved_at": datetime.datetime.now(WIB).isoformat()}, f, indent=2)
     except Exception as e:
         print(f"⚠️ Gagal simpan latest_screendaytrade_picks.json: {e}")
+
+
+LATEST_LIVE_VOLUME_SPIKES_FILE = os.path.join(PROJECT_ROOT, "latest_live_volume_spikes.json")
+
+
+def save_latest_live_volume_spikes(tickers: list):
+    """
+    MBSS v2 (user request — union tambahan /fastscan): daftar ticker dari
+    "LONJAKAN VOLUME EKSTREM" section /screendaytrade live, dengan
+    timestamp — /fastscan cek kesegaran ini sebelum dipakai (lihat
+    load_latest_live_volume_spikes), karena spike 5m basi cepat.
+    """
+    tmp_path = LATEST_LIVE_VOLUME_SPIKES_FILE + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump({"tickers": tickers, "saved_at": datetime.datetime.now(WIB).isoformat()}, f, indent=2)
+        os.replace(tmp_path, LATEST_LIVE_VOLUME_SPIKES_FILE)
+    except Exception as e:
+        print(f"⚠️ Gagal simpan latest_live_volume_spikes.json: {e}")
+
+
+def load_latest_live_volume_spikes(max_age_minutes: int = 20) -> list:
+    """
+    Return [] kalau belum pernah disimpan ATAU sudah lebih tua dari
+    `max_age_minutes` — spike 5m yang basi (screendaytrade live dijalankan
+    sejam lalu, misalnya) tidak relevan lagi buat /fastscan, jangan
+    dipakai diam-diam.
+    """
+    if not os.path.exists(LATEST_LIVE_VOLUME_SPIKES_FILE):
+        return []
+    try:
+        with open(LATEST_LIVE_VOLUME_SPIKES_FILE) as f:
+            data = json.load(f)
+        saved_at = datetime.datetime.fromisoformat(data["saved_at"])
+        age_minutes = (datetime.datetime.now(WIB) - saved_at).total_seconds() / 60
+        if age_minutes > max_age_minutes:
+            return []
+        return data.get("tickers", [])
+    except Exception as e:
+        print(f"⚠️ Gagal baca latest_live_volume_spikes.json: {e}")
+        return []
 
 
 # NOTE (MBSS v2 refactor, Phase 5a): screen_daytrade() moved to

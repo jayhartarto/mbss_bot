@@ -164,6 +164,16 @@ async def check_stock(update, context):
                 await core.safe_reply(update.message, f"⚠️ Gagal mengambil data Zapi untuk {ticker}, lanjut tanpa data broker.")
         except Exception as e:
             print(f"⚠️ Zapi brokersum gagal untuk {ticker}: {e}")
+
+        # MBSS v2 (user request — order book + running trade ASLI dari Zapi,
+        # "enrich entry buy call"): cuma jalan kalau flag "zapi" eksplisit
+        # dipakai (SAMA disiplin dengan brokersum di atas) -- +2 kuota Zapi
+        # per panggilan (orderbook + running-trades), TIDAK PERNAH otomatis/
+        # bulk. Murni informasional, lihat compute_orderflow_snapshot_zapi.
+        try:
+            result["orderflow_zapi"] = await asyncio.to_thread(broker_engine.compute_orderflow_snapshot_zapi, ticker)
+        except Exception as e:
+            print(f"⚠️ Zapi orderflow snapshot gagal untuk {ticker}: {e}")
     else:
         cached_brokersum = broker_engine.get_cached_brokersum(ticker)
         if cached_brokersum:
@@ -274,6 +284,11 @@ async def check_stock(update, context):
         bb_line += f"\n{bb_note_text}"
     if result.get("bollinger_squeeze"):
         bb_line += f"\n🎯 Bollinger squeeze (bandwidth persentil {result.get('bollinger_bandwidth_percentile', '-')}) — volatilitas terkompresi, potensi pra-breakout (arah belum pasti)"
+    # MBSS v2 (user request, real observasi live intraday): proxy OHLCV
+    # utk "bandar menjaga support yang naik bareng harga" -- informational
+    # only, belum ada bukti forward, jangan dibaca sebagai konfirmasi kuat.
+    if result.get("tight_trailing_support"):
+        bb_line += f"\n🛡️ Trailing support rapi (LOW mengikuti EMA9 naik {result.get('ema9_slope_pct', '-')}%/10hr, {result.get('trailing_support_undercut_days', '-')} hari undercut) — indikasi dijaga, belum tervalidasi forward"
 
     # AB-RC1 backbone (MBSS v2, user request — "bisa dibandingkan posisi
     # dengan entry lainnya"): angka rank yang SAMA dipakai konsisten di
@@ -370,6 +385,28 @@ async def check_stock(update, context):
         )
     except Exception as e:
         print(f"⚠️ /check: gagal hitung tactical live rank untuk {ticker}: {e}")
+
+    # MBSS v2 (user request — order book + running trade ASLI dari Zapi,
+    # "enrich entry buy call"): tampil HANYA kalau flag "zapi" dipakai dan
+    # datanya berhasil diambil. Murni informasional, belum ada bukti
+    # forward -- angka mentah ditampilkan apa adanya, user yang menilai.
+    orderflow_line = ""
+    orderflow = result.get("orderflow_zapi")
+    if orderflow and orderflow.get("available"):
+        parts = []
+        if orderflow.get("bid_percent") is not None:
+            parts.append(
+                f"Bid {orderflow['bid_percent']}% ({_fmt(orderflow.get('bid_lots', 0))} lot @ {_fmt(orderflow.get('best_bid'))})"
+                f" vs Ask {orderflow['ask_percent']}% ({_fmt(orderflow.get('ask_lots', 0))} lot @ {_fmt(orderflow.get('best_ask'))})"
+            )
+        if orderflow.get("big_buy_print_count") is not None:
+            threshold = orderflow.get("big_buy_print_min_lot_threshold", "-")
+            parts.append(
+                f"Big buy print (>={threshold} lot): {orderflow['big_buy_print_count']}x, "
+                f"total {_fmt(orderflow.get('big_buy_print_total_lots', 0))} lot"
+            )
+        if parts:
+            orderflow_line = "🔍 ORDER FLOW (Zapi live)\n" + "\n".join(parts) + "\n"
 
     # MBSS v2 (RapidAPI integration, user request) — replaces the old
     # "💹 BROKER RIIL" block (which mixed Index Alpha/Zapi/screenshot sources,
@@ -637,6 +674,7 @@ async def check_stock(update, context):
         f"📅 {date_str}  |  {jam_str}",
         "",
         tactical_line,
+        orderflow_line,
         freshness_line,
         posisi_lines,
         intraday_status,
