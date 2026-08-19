@@ -1941,6 +1941,16 @@ def _explosive_score(r: dict, pool: list) -> tuple[float, bool, str]:
         return score, True, "MACD bearish cross + di bawah SMA50"
     if drp_percentile >= 95:
         return score, True, "volatilitas di ekor ekstrem (persentil >=95)"
+    # BUGFIX (user report, real case: RAJA di-tag Explosive/FAST MOMENTUM
+    # padahal action_id-nya HINDARI/JUAL keesokan harinya, danger meroket
+    # ke 73/gagal gate — Explosive Lane TIDAK PERNAH cek action_id sama
+    # sekali, formula Room/RR/Activity/ControlledVol murni independen dari
+    # blend Value/Momentum/Sentimen yang menghasilkan AVOID_SELL). Section
+    # ini didesain jadi daftar entry SIAP PAKAI — kontradiksi kalau tag
+    # "opportunity" berdampingan dengan sinyal "avoid/sell" utk ticker yang
+    # SAMA. Reject keras, sejajar dengan reject lain di atas.
+    if r.get("action_id") == "AVOID_SELL":
+        return score, True, "action_id AVOID_SELL (HINDARI/JUAL) — kontradiksi dgn status Explosive"
     return score, False, ""
 
 

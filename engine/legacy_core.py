@@ -6066,7 +6066,7 @@ def select_screendaytrade_v5_candidates(results: list, count: int = DAYTRADE_FIN
 
 
 
-FAST_CANDIDATE_FORMULA_VERSION = "2.0"  # v2.0: relaks kriteria kecepatan awal (vol_ratio>=1.5x & day_range>=15%, turun dari 2.0x/20%) + WAJIB sinyal "dijaga bandar" (Bias Bandar AKUMULASI SEGAR/PULLBACK DIDUKUNG + >=2 broker whitelist). Real case pemicu (user report): YELO lolos kriteria v1.0 murni (vol_ratio+day_range) TAPI gagal naik hari itu; BAIK sebaliknya nunjukkin karakter "dijaga bandar, readable, ada bantalan support" yang v1.0 sama sekali tidak menangkap. v1.0: vol_ratio>=2.0x & day_range_10d>=20% murni dari riset speed-to-move (n=92 fast vs n=349 slow) — statistik itu TIDAK otomatis berlaku lagi buat kriteria v2.0 ini (kombinasi baru, belum ada data forward-nya), jangan dikutip ulang sampai ada evaluasi baru.
+FAST_CANDIDATE_FORMULA_VERSION = "2.1"  # v2.1: tambah hard-reject action_id==AVOID_SELL (real case: RAJA di-tag FAST lalu keesokan harinya HINDARI/JUAL + gagal Danger Gate, formula lama tidak pernah cek action_id). v2.0: relaks kriteria kecepatan awal (vol_ratio>=1.5x & day_range>=15%, turun dari 2.0x/20%) + WAJIB sinyal "dijaga bandar" (Bias Bandar AKUMULASI SEGAR/PULLBACK DIDUKUNG + >=2 broker whitelist). Real case pemicu (user report): YELO lolos kriteria v1.0 murni (vol_ratio+day_range) TAPI gagal naik hari itu; BAIK sebaliknya nunjukkin karakter "dijaga bandar, readable, ada bantalan support" yang v1.0 sama sekali tidak menangkap. v1.0: vol_ratio>=2.0x & day_range_10d>=20% murni dari riset speed-to-move (n=92 fast vs n=349 slow) — statistik itu TIDAK otomatis berlaku lagi buat kriteria v2.0 ini (kombinasi baru, belum ada data forward-nya), jangan dikutip ulang sampai ada evaluasi baru.
 
 def compute_fast_candidate_tag(r: dict) -> dict:
     """
@@ -6115,7 +6115,14 @@ def compute_fast_candidate_tag(r: dict) -> dict:
         and (r.get("whitelist_num_brokers") or 0) >= 2
     )
 
-    is_fast = speed_ok and defended_ok
+    # BUGFIX (user report, real case: RAJA di-tag FAST CANDIDATE lalu
+    # keesokan harinya action_id-nya HINDARI/JUAL + gagal Danger Gate —
+    # fungsi ini TIDAK PERNAH cek action_id sama sekali sebelumnya).
+    # Reject keras kalau core blend SUDAH bilang avoid/sell — jangan
+    # kasih alert "prioritas entry di open" utk ticker begini.
+    not_avoid_sell = r.get("action_id") != "AVOID_SELL"
+
+    is_fast = speed_ok and defended_ok and not_avoid_sell
     reason = None
     if is_fast:
         reason = f"vol_ratio>={vol_ratio}x & day_range>={day_range}% (speed) + {bias_label} {r.get('whitelist_num_brokers')} broker (defended)"
@@ -6123,6 +6130,7 @@ def compute_fast_candidate_tag(r: dict) -> dict:
         "is_fast_candidate": is_fast,
         "speed_ok": speed_ok,
         "defended_ok": defended_ok,
+        "not_avoid_sell": not_avoid_sell,
         "reason": reason,
     }
 
