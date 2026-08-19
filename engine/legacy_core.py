@@ -5,6 +5,8 @@ import json
 import pickle
 import copy
 import time
+import glob
+import shutil
 import asyncio
 import logging
 import datetime
@@ -2022,6 +2024,39 @@ def _json_default_numpy_safe(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+def _backup_json_file_daily(path: str, keep_days: int = 14):
+    """
+    MBSS v2 (user request, setelah insiden nyata numpy.bool_ menghancurkan
+    seluruh daytrade_picks_history.json — ratusan pick history hilang
+    permanen, tidak ada backup sama sekali): simpan salinan bertanggal
+    (maks 1x per hari, retensi `keep_days`) SEBELUM file yang ada ditimpa.
+    Skenario terburuk ke depan (bug lain, field baru yang lupa di-cast)
+    paling rugi 1 hari, bukan seluruh histori.
+
+    Validasi file lama BISA di-parse dulu sebelum di-backup — jangan
+    sampai backup justru menyalin file yang SUDAH rusak.
+    """
+    if not os.path.exists(path):
+        return
+    backup_path = f"{path}.{datetime.datetime.now(WIB).strftime('%Y-%m-%d')}.bak"
+    if os.path.exists(backup_path):
+        return  # sudah ada backup hari ini
+    try:
+        with open(path) as f:
+            json.load(f)  # validasi -- jangan backup file yang sudah korup
+        shutil.copy2(path, backup_path)
+    except Exception:
+        return  # file lama tidak valid/gagal dibaca -- diam saja, jangan gagalkan save baru
+
+    try:
+        pattern = f"{path}.*.bak"
+        backups = sorted(glob.glob(pattern))
+        for old in backups[:-keep_days]:
+            os.remove(old)
+    except Exception:
+        pass
+
+
 def save_daytrade_picks_history(picks: list):
     """
     BUGFIX (real production incident, data-loss risk — sebelumnya
@@ -2030,10 +2065,12 @@ def save_daytrade_picks_history(picks: list):
     RUSAK — riwayat picks lama (ratusan entry) bisa HILANG PERMANEN kalau
     kejadian ini tidak ketahuan cepat. Sekarang tulis ke file TEMPORARY
     dulu, baru os.replace() (atomic di POSIX & Windows) — kalau serialisasi
-    gagal di mana pun, file ASLI TIDAK TERSENTUH sama sekali.
+    gagal di mana pun, file ASLI TIDAK TERSENTUH sama sekali. Plus rolling
+    backup harian (_backup_json_file_daily) SEBELUM file lama ditimpa.
     """
     tmp_path = DAYTRADE_PICKS_HISTORY_FILE + ".tmp"
     try:
+        _backup_json_file_daily(DAYTRADE_PICKS_HISTORY_FILE)
         with open(tmp_path, "w") as f:
             json.dump(picks, f, indent=2, default=_json_default_numpy_safe)
         os.replace(tmp_path, DAYTRADE_PICKS_HISTORY_FILE)
