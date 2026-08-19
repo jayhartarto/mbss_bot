@@ -2461,9 +2461,24 @@ async def consensus_live_command(update, context):
             if t in backbone_top3_tickers: tag_bits.append("Backbone Top-3")
             tag = f" [{', '.join(tag_bits)}]" if tag_bits else ""
             held_tag = " 💼" if is_held else ""
+
+            # MBSS v2 (user request — "1-minute bar ini pakai juga untuk
+            # consensus live bisa?"): TAG TAMBAHAN, bukan pengganti tactical
+            # state di atas (yang tetap 5m -- sengaja, biar tidak tambah
+            # flip-flop yang sudah dikeluhkan). Pool consensus live kecil
+            # (~5-10 ticker), sama order-of-magnitude dengan shortlist
+            # /fastscan, jadi murah buat dicek juga per ticker di sini.
+            explosion_str = ""
+            try:
+                explosion = await asyncio.to_thread(core.detect_intraday_explosion, t)
+                if explosion and explosion.get("is_explosion"):
+                    explosion_str = f" | 🔥 LEDAKAN 1m (vol {explosion['volume_ratio']}x, spike {explosion['price_spike_pct']:+.2f}%)"
+            except Exception as e:
+                print(f"⚠️ /consensus live: gagal cek ledakan 1m {t}: {e}")
+
             lines.append(
                 f"{icon} {t}{tag}{held_tag} — {state}{wr_str} — {decision_label} | "
-                f"Live Rank {tactical_rank['live_rank']:.0f}/100{delta_str}"
+                f"Live Rank {tactical_rank['live_rank']:.0f}/100{delta_str}{explosion_str}"
             )
         except Exception as e:
             print(f"⚠️ /consensus live: gagal cek tactical {t}: {e}")
