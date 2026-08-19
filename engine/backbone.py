@@ -908,8 +908,16 @@ def save_tactical_shadow_snapshot(ticker: str, validity: dict, tactical_rank: di
             "formula_version": TACTICAL_FORMULA_VERSION,
         })
         log = log[-TACTICAL_SHADOW_LOG_MAX_ENTRIES:]
-        with open(TACTICAL_SHADOW_LOG_FILE, "w", encoding="utf-8") as f:
-            json.dump(log, f, indent=2)
+        # BUGFIX (defense-in-depth setelah insiden nyata di
+        # daytrade_picks_history.json — numpy.bool_ dari perhitungan
+        # pandas bocor ke data yang di-json.dump, TIDAK serializable,
+        # dan open(path,"w") langsung truncate SEBELUM dump gagal, jadi
+        # file lama ikut rusak). Tulis ke temp file dulu, baru
+        # os.replace() atomic -- kalau serialisasi gagal, log lama utuh.
+        tmp_path = TACTICAL_SHADOW_LOG_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(log, f, indent=2, default=core._json_default_numpy_safe)
+        os.replace(tmp_path, TACTICAL_SHADOW_LOG_FILE)
     except Exception as e:
         print(f"⚠️ Gagal simpan tactical shadow snapshot buat {ticker}: {e}")
 

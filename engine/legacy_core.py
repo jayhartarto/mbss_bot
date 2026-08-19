@@ -1997,12 +1997,53 @@ def load_daytrade_picks_history() -> list:
         return []
 
 
-def save_daytrade_picks_history(picks: list):
+def _json_default_numpy_safe(obj):
+    """
+    BUGFIX (real production incident — "Object of type bool is not JSON
+    serializable" merusak daytrade_picks_history.json berulang kali, root
+    cause: numpy.bool_/numpy.integer/numpy.floating dari perhitungan pandas
+    bocor ke data yang di-json.dump, tipe-tipe itu TIDAK diterima json
+    module standar walau terlihat identik dengan bool/int/float Python).
+    Safety net TERAKHIR — perbaikan utama tetap di sumbernya (lihat
+    compute_fast_candidate_tag), tapi fallback ini mencegah kelas bug yang
+    SAMA (field baru mana pun ke depan yang lupa di-cast) dari merusak file
+    lagi.
+    """
     try:
-        with open(DAYTRADE_PICKS_HISTORY_FILE, "w") as f:
-            json.dump(picks, f, indent=2)
+        import numpy as np
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+    except ImportError:
+        pass
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def save_daytrade_picks_history(picks: list):
+    """
+    BUGFIX (real production incident, data-loss risk — sebelumnya
+    open(path, "w") LANGSUNG truncate file, lalu kalau json.dump gagal di
+    tengah jalan (persis kasus numpy.bool_ di atas), file KEISI PARTIAL/
+    RUSAK — riwayat picks lama (ratusan entry) bisa HILANG PERMANEN kalau
+    kejadian ini tidak ketahuan cepat. Sekarang tulis ke file TEMPORARY
+    dulu, baru os.replace() (atomic di POSIX & Windows) — kalau serialisasi
+    gagal di mana pun, file ASLI TIDAK TERSENTUH sama sekali.
+    """
+    tmp_path = DAYTRADE_PICKS_HISTORY_FILE + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(picks, f, indent=2, default=_json_default_numpy_safe)
+        os.replace(tmp_path, DAYTRADE_PICKS_HISTORY_FILE)
     except Exception as e:
         print(f"⚠️ Gagal menyimpan daytrade picks history: {e}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def compute_consecutive_appearance_streak_any_source(ticker: str, pick_date: str, history: list) -> int:
@@ -6172,7 +6213,17 @@ def compute_fast_candidate_tag(r: dict) -> dict:
     # kasih alert "prioritas entry di open" utk ticker begini.
     not_avoid_sell = r.get("action_id") != "AVOID_SELL"
 
-    is_fast = speed_ok and defended_ok and not_avoid_sell
+    # BUGFIX (user report, real production incident — "Object of type bool
+    # is not JSON serializable" merusak daytrade_picks_history.json BERULANG
+    # KALI): vol_ratio/day_range_pct_10d adalah numpy.float64 (dari pandas),
+    # jadi `vol_ratio >= 1.5` menghasilkan numpy.bool_, BUKAN bool Python
+    # native — dan numpy.bool_ TIDAK bisa di-serialize json.dump. speed_ok
+    # (hasil `and` chain berakhir di operand numpy itu) ikut tercemar, lalu
+    # is_fast juga. Explicit bool() di sini SEKARANG mencegah tipe numpy
+    # bocor ke feature_snapshot sama sekali.
+    speed_ok = bool(speed_ok)
+    defended_ok = bool(defended_ok)
+    is_fast = bool(speed_ok and defended_ok and not_avoid_sell)
     reason = None
     if is_fast:
         reason = f"vol_ratio>={vol_ratio}x & day_range>={day_range}% (speed) + {bias_label} {r.get('whitelist_num_brokers')} broker (defended)"
