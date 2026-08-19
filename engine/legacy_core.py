@@ -2150,7 +2150,7 @@ def get_previous_trading_day_marker(date_str: str) -> str:
     return d.strftime("%Y-%m-%d")
 
 
-def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrade"):
+def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrade", backbone_lookup: dict | None = None):
     """
     Kunci picks hari ini (IMMUTABLE begitu tersimpan) — dipakai untuk uji winrate
     nanti. Tiap pick disimpan dengan TP1/cut_loss ASLI dari rekomendasi hari itu
@@ -2159,6 +2159,19 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
     muncul di beberapa tanggal berbeda — ini SENGAJA, karena tiap hari adalah
     sinyal/keputusan independen yang diuji terpisah, bukan "apakah saham X bagus".
     Tidak menambah entri duplikat untuk ticker+pick_date+source yang sama (idempotent).
+
+    backbone_lookup (MBSS v2, user request — celah nyata ditemukan saat
+    mengaudit mbss_formula_diagnosis_claude_agent.md's Step 3 checklist:
+    predicted_danger/probability_score/entry_rank TIDAK PERNAH tersimpan di
+    feature_snapshot sebelumnya, padahal field itu ada di backbone_result
+    sejak AB-RC1): opsional, isi dengan `backbone_result.get("all_scored", {})`
+    kalau caller sudah punya backbone_result di scope (screendaytrade, hc,
+    consensus sudah begitu) — dipakai buat snapshot predicted_danger,
+    probability_score, entry_rank, entry_rank_total, DAN predicted_danger_vnext
+    (shadow bucketed, lihat compute_danger_score_bucketed_vnext) ke setiap
+    pick. None kalau caller belum wire backbone (gptpick/bsjp/testbrief/check
+    saat ini) — field-field itu tetap None, TIDAK menggagalkan lock, sama
+    "missing = neutral" seperti field lain.
 
     source: "screendaytrade" (default) atau "gptpick" — dua command berbeda
     (universe & kriteria seleksi beda) sama-sama lewat mekanisme lock/resolve
@@ -2183,6 +2196,10 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
         # benar". History yang dipakai untuk hitung ini BELUM termasuk entri
         # baru yang sedang dibangun sekarang (dihitung sebelum di-append).
         streak = compute_consecutive_appearance_streak(ticker, source, pick_date, history)
+
+        # MBSS v2 (user request — celah dari audit mbss_formula_diagnosis_
+        # claude_agent.md Step 3): backbone_lookup opsional, None-safe.
+        bb_info = (backbone_lookup or {}).get(ticker, {}) or {}
 
         # MBSS v2 (user request, tindak lanjut analisis /winrate): snapshot
         # fitur teknikal LENGKAP saat pick dikunci — sebelumnya cuma
@@ -2219,6 +2236,24 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
             # dipakai buat menemukan kriterianya), belum menggating apa pun.
             "fast_candidate": compute_fast_candidate_tag(r).get("is_fast_candidate"),
             "fast_candidate_formula_version": FAST_CANDIDATE_FORMULA_VERSION,
+            # MBSS v2 (user request — celah nyata dari audit
+            # mbss_formula_diagnosis_claude_agent.md Step 3: field-field ini
+            # DISEBUT EKSPLISIT di checklist backtest brief itu tapi TIDAK
+            # PERNAH tersimpan sebelumnya walau sudah ada sejak AB-RC1).
+            # None kalau backbone_lookup tidak di-pass caller (missing =
+            # neutral, sama seperti field lain).
+            "predicted_danger": bb_info.get("predicted_danger"),
+            "probability_score": bb_info.get("probability_score"),
+            "entry_rank": bb_info.get("entry_rank"),
+            "entry_rank_total": bb_info.get("entry_rank_total"),
+            "rank_score": bb_info.get("rank_score"),
+            # MBSS v2 (user request, dari mbss_formula_diagnosis_claude_agent.md
+            # "double counting" concern): snapshot danger score versi
+            # bucketed/capped SHADOW (predicted_danger asli TIDAK berubah,
+            # ini cuma tag-and-track) — lihat compute_danger_score_bucketed_
+            # vnext di engine/backbone.py.
+            "predicted_danger_vnext": bb_info.get("predicted_danger_vnext"),
+            "danger_bucket_breakdown_vnext": bb_info.get("danger_bucket_breakdown_vnext"),
         }
 
         # MBSS v2 (user request — evaluasi winrate PER BROKER smart money):

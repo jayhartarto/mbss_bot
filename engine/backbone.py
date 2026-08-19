@@ -46,7 +46,7 @@ import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.6"  # ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.7"  # 1.7: tambah predicted_danger_vnext/danger_bucket_breakdown_vnext (SHADOW ONLY, tidak dipakai gate/rank) ke all_scored[ticker] -- lihat compute_danger_score_bucketed_vnext, dari mbss_formula_diagnosis_claude_agent.md's double-counting concern. ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
@@ -179,6 +179,128 @@ def compute_danger_score(scoring: dict, market_regime: str, day_range_percentile
     danger += {"R4_RISK_OFF": 8, "R5_STRESS": 16, "R0_UNKNOWN": 8}.get(market_regime, 0)
 
     return round(max(0.0, min(100.0, danger)), 1)
+
+
+DANGER_BUCKETED_VNEXT_VERSION = "shadow.1"  # SHADOW ONLY -- lihat compute_danger_score_bucketed_vnext, belum menggantikan compute_danger_score di mana pun
+
+def compute_danger_score_bucketed_vnext(scoring: dict, market_regime: str, day_range_percentile: float | None) -> dict:
+    """
+    MBSS v2 (user request, dari mbss_formula_diagnosis_claude_agent.md
+    "Risk 1: Double counting of related signals" — divalidasi manual
+    terhadap compute_danger_score di atas: macd_bearish_cross (+8) dan
+    rr_now (+10/+5) SAMA-SAMA sudah jadi input v4 base (100-v5['risk']
+    ['score'], yang menurut docstring-nya sendiri mencakup MACD/ADX/
+    liquidity/dist-to-high/vol_ratio/CMF/RSI/RR/fade/ret1) TAPI dapat
+    penalti eksplisit KEDUA di atasnya juga -- real double-count, bukan
+    kekhawatiran teoretis).
+
+    SHADOW COMPUTATION SAJA — TIDAK menggantikan compute_danger_score di
+    Danger Gate/rank_score/mana pun. daytrade_picks_history.json baru saja
+    ke-reset ke nol (insiden numpy.bool_, lihat commit sebelumnya), jadi
+    TIDAK ADA data buat validasi apakah versi bucketed ini genuinely lebih
+    baik memisahkan pemenang dari yang kalah. Dipanggil PARALEL dengan
+    compute_danger_score, hasilnya disimpan sebagai field TAMBAHAN di
+    feature_snapshot (predicted_danger_vnext dst) supaya begitu histori
+    cukup terkumpul lagi, kita punya data buat BANDINGKAN dua-duanya --
+    baru pertimbangkan switch, sama disiplin dgn seluruh AB-RC1 (forward-
+    validate dulu, jangan switch dari observasi/teori doang).
+
+    STRUKTUR: v4 base (100-v5['risk']['score']) TETAP DIPAKAI APA ADANYA
+    (REUSE, sudah teruji, bukan didekomposisi ulang -- itu perubahan jauh
+    lebih besar dan berisiko tanpa data). Yang diubah HANYA lapisan
+    penalti tambahan yang compute_danger_score susun ADDITIVE TANPA CAP --
+    di sini dikelompokkan ke 5 kategori (TREND/FLOW/CHASE/LIQUIDITY/
+    REGIME, persis kategori brief) + 1 kategori STRUCTURAL (distress flag,
+    tidak cocok ke 5 kategori brief), MASING-MASING DIBATASI (capped)
+    supaya 1 kategori (terutama CHASE -- di formula lama bisa sampai +48
+    RAW dari room+rr+ret1d_spike+volume_spike sekaligus, jauh lebih besar
+    dari kategori lain) tidak mendominasi total tanpa batas.
+
+    Cap dipilih dari OBSERVASI actual max raw tiap kategori di formula
+    lama (BUKAN angka brief yang dikarang tanpa data) -- placeholder,
+    tetap perlu revalidasi setelah ada data forward.
+    """
+    v5 = core.compute_daytrade_v5_summary(scoring)
+    base = 100.0 - v5["risk"]["score"]
+
+    # TREND RISK (raw max lama: 18, cap dijaga sama)
+    trend_risk = 0.0
+    if scoring.get("macd_bearish_cross"):
+        trend_risk += 8
+    if scoring.get("is_below_sma50") and scoring.get("is_below_ema21"):
+        trend_risk += 10
+    trend_risk = min(trend_risk, 18)
+
+    # FLOW RISK (raw max lama: 20, cap dijaga sama)
+    flow_risk = 0.0
+    if scoring.get("obv_divergence") == "bearish_divergence":
+        flow_risk += 10
+    whitelist_net_pct = scoring.get("whitelist_accumulation_net_pct")
+    whitelist_brokers = scoring.get("whitelist_num_brokers") or 0
+    if whitelist_net_pct is not None and whitelist_net_pct <= -15 and whitelist_brokers >= 2:
+        flow_risk += 10
+    flow_risk = min(flow_risk, 20)
+
+    # CHASE RISK (raw max lama: 48 -- room 12 + rr 10 + ret1d 20 + volspike 6.
+    # INI kategori yang paling butuh cap, dari lama-lama tidak dibatasi sama
+    # sekali. Cap 25 dipilih supaya masih signifikan tapi tidak lagi bisa
+    # mendominasi 2-3x kategori lain seperti sebelumnya -- placeholder,
+    # perlu revalidasi.)
+    room_score = v5["room"]["score"]
+    chase_risk = 0.0
+    if room_score < 40:
+        chase_risk += 12
+    elif room_score < 55:
+        chase_risk += 6
+    rr_now = compute_rr_at_current_price(scoring)
+    if rr_now < 0.5:
+        chase_risk += 10
+    elif rr_now < 1.0:
+        chase_risk += 5
+    ret_1d = _f(scoring, "ret_1d_pct")
+    if ret_1d >= 20:
+        chase_risk += 20
+    elif ret_1d >= 12:
+        chase_risk += 10
+    if scoring.get("is_volume_spike_anomaly"):
+        chase_risk += 6
+    chase_risk = min(chase_risk, 25)
+
+    # LIQUIDITY/NOISE RISK (raw max lama: 27, cap 20 -- turun dari raw lama)
+    liquidity_risk = 0.0
+    if day_range_percentile is not None:
+        if day_range_percentile >= 90:
+            liquidity_risk += 15
+        elif day_range_percentile >= 75:
+            liquidity_risk += 7
+    if scoring.get("is_near_price_floor"):
+        liquidity_risk += 12
+    liquidity_risk = min(liquidity_risk, 20)
+
+    # REGIME RISK (sudah bounded by construction, raw max 16)
+    regime_risk = {"R4_RISK_OFF": 8, "R5_STRESS": 16, "R0_UNKNOWN": 8}.get(market_regime, 0)
+    regime_risk = min(regime_risk, 16)
+
+    # STRUCTURAL RISK -- tidak cocok ke 5 kategori brief (distress bukan
+    # trend/flow/chase/liquidity/regime, ini soal fundamental/kredibilitas
+    # data), dikasih kategori sendiri, cap 15 (sama dgn raw lama, sudah
+    # binary jadi tidak ada yang perlu dibatasi lebih jauh).
+    structural_risk = 15.0 if scoring.get("is_financial_distress_flag") else 0.0
+
+    total = base + trend_risk + flow_risk + chase_risk + liquidity_risk + regime_risk + structural_risk
+    return {
+        "predicted_danger_vnext": round(max(0.0, min(100.0, total)), 1),
+        "danger_bucket_breakdown_vnext": {
+            "base_v4": round(base, 1),
+            "trend_risk": round(trend_risk, 1),
+            "flow_risk": round(flow_risk, 1),
+            "chase_risk": round(chase_risk, 1),
+            "liquidity_risk": round(liquidity_risk, 1),
+            "regime_risk": round(regime_risk, 1),
+            "structural_risk": round(structural_risk, 1),
+        },
+        "formula_version": DANGER_BUCKETED_VNEXT_VERSION,
+    }
 
 
 def compute_rr_at_current_price(scoring: dict) -> float:
@@ -318,6 +440,22 @@ def compute_backbone(results: list, market_regime: str) -> dict:
             "probability_score": probability,
             "day_range_percentile": day_range_pct,
         }
+        # SHADOW ONLY (user request, dari mbss_formula_diagnosis_claude_agent.md
+        # -- lihat compute_danger_score_bucketed_vnext docstring): TIDAK
+        # dipakai Danger Gate/rank_score, cuma dihitung + disimpan ke
+        # `scored[ticker]` (BUKAN `r` -- `r` sudah TERSIMPAN ke
+        # daily_scan_cache SEBELUM compute_backbone ini jalan, lihat
+        # run_nightly_full_scan; mutasi ke `r` tidak akan pernah persist.
+        # `scored` yang jadi backbone_result["all_scored"], itu yang
+        # BENERAN disimpan lewat save_backbone_daily) — supaya caller bisa
+        # ambil predicted_danger_vnext dari situ, sama seperti
+        # entry_rank/probability_score yang sudah ada.
+        try:
+            danger_vnext = compute_danger_score_bucketed_vnext(r, market_regime, day_range_pct)
+            scored[r["ticker"]]["predicted_danger_vnext"] = danger_vnext["predicted_danger_vnext"]
+            scored[r["ticker"]]["danger_bucket_breakdown_vnext"] = danger_vnext["danger_bucket_breakdown_vnext"]
+        except Exception as e:
+            print(f"⚠️ Gagal hitung danger bucketed vnext (shadow) untuk {r.get('ticker')}: {e}")
 
     danger_values = [v["predicted_danger"] for v in scored.values()]
     gate_quantile = DANGER_GATE_QUANTILE_BY_REGIME.get(market_regime, DANGER_GATE_QUANTILE_BY_REGIME["R0_UNKNOWN"])

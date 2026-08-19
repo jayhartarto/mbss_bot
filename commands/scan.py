@@ -294,7 +294,10 @@ async def screen_daytrade(update, context):
 
     # Kunci picks hari ini untuk uji winrate — idempotent (tidak duplikat kalau
     # /screendaytrade dipanggil berkali-kali di hari yang sama).
-    await asyncio.to_thread(core.lock_daily_daytrade_picks, top_candidates, "screendaytrade_live" if use_live else "screendaytrade")
+    await asyncio.to_thread(
+        core.lock_daily_daytrade_picks, top_candidates, "screendaytrade_live" if use_live else "screendaytrade",
+        (backbone_result or {}).get("all_scored", {})
+    )
     await asyncio.to_thread(core.save_latest_screendaytrade_picks, top_candidates)
 
     if use_live:
@@ -1144,7 +1147,7 @@ async def high_conviction_command(update, context):
     # dasarnya (is_high_conviction) sama, cuma urutan tampilan yang beda.
     # Gagal-lunak — kalau lock gagal, tetap tampilkan hasil seperti biasa.
     try:
-        await asyncio.to_thread(core.lock_daily_daytrade_picks, top10, "hc")
+        await asyncio.to_thread(core.lock_daily_daytrade_picks, top10, "hc", (backbone_result or {}).get("all_scored", {}))
     except Exception as e:
         print(f"⚠️ Gagal mengunci picks /hc untuk /winrate: {e}")
 
@@ -2351,7 +2354,7 @@ async def consensus_command(update, context):
     lock_candidates = [pool_by_ticker[t] for t in prime_tickers] + [r for _, r in explosive_picks]
     if lock_candidates:
         try:
-            await asyncio.to_thread(core.lock_daily_daytrade_picks, lock_candidates, "consensus")
+            await asyncio.to_thread(core.lock_daily_daytrade_picks, lock_candidates, "consensus", (backbone_result or {}).get("all_scored", {}))
         except Exception as e:
             print(f"⚠️ Gagal mengunci picks /consensus untuk /winrate: {e}")
 
