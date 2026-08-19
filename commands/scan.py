@@ -2020,13 +2020,14 @@ async def fast_candidates_command(update, context):
         return (backbone_result.get("all_scored", {}).get(r["ticker"], {}) or {}).get("probability_score", 0)
     fast_picks.sort(key=_probscore, reverse=True)
 
-    lines = [f"🚀 FAST CANDIDATES — {len(fast_picks)} saham (vol_ratio>=2.0x & day_range_10d>=20%, lolos Danger Gate)"]
+    lines = [f"🚀 FAST CANDIDATES — {len(fast_picks)} saham (speed direlaks vol_ratio>=1.5x & day_range_10d>=15% + WAJIB dijaga bandar, lolos Danger Gate)"]
     if backbone_staleness:
         lines.insert(0, backbone_staleness)
     lines.append(
-        "Prioritas entry saat OPEN besok, jangan tunggu konfirmasi tactical 30-40 menit "
-        "(riset speed-to-move: pick FAST resolve <=1 hari menang 95.7% n=92 vs SLOW >=3 hari cuma 40.1% n=349). "
-        "Tag ini MASIH tag-and-track, belum tervalidasi forward secara independen — bukan jaminan.\n"
+        "Prioritas entry saat OPEN besok, jangan tunggu konfirmasi tactical 30-40 menit. "
+        "Kriteria v2.0 (speed + sinyal dijaga bandar/Bias Bandar) — BELUM ada data forward sama sekali, "
+        "murni hipotesis dari observasi manual (YELO gagal di kriteria lama, BAIK jadi acuan baru). "
+        "Tag ini MASIH tag-and-track — bukan jaminan.\n"
     )
     if not fast_picks:
         lines.append("Tidak ada kandidat fast malam ini.")
@@ -2040,7 +2041,8 @@ async def fast_candidates_command(update, context):
         lines.append(
             f"{i}. {t} — Entry Rank #{info.get('entry_rank', '-')}/{info.get('entry_rank_total', '-')} "
             f"(prob {info.get('probability_score', '-')}, danger {info.get('predicted_danger', '-')}){also_str}\n"
-            f"   Vol ratio {r.get('vol_ratio')}x | Day range 10D {r.get('day_range_pct_10d')}%"
+            f"   Vol ratio {r.get('vol_ratio')}x | Day range 10D {r.get('day_range_pct_10d')}% | "
+            f"Bias Bandar {r.get('bias_bandar', '-')} ({r.get('whitelist_num_brokers', 0)} broker)"
         )
 
     buttons = core.build_check_buttons([r["ticker"] for r in fast_picks])

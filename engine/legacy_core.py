@@ -6066,22 +6066,35 @@ def select_screendaytrade_v5_candidates(results: list, count: int = DAYTRADE_FIN
 
 
 
-FAST_CANDIDATE_FORMULA_VERSION = "1.0"  # bump kalau kriteria fast_candidate berubah — dipakai buat interpretasi feature_snapshot lama vs baru saat evaluasi forward nanti
+FAST_CANDIDATE_FORMULA_VERSION = "2.0"  # v2.0: relaks kriteria kecepatan awal (vol_ratio>=1.5x & day_range>=15%, turun dari 2.0x/20%) + WAJIB sinyal "dijaga bandar" (Bias Bandar AKUMULASI SEGAR/PULLBACK DIDUKUNG + >=2 broker whitelist). Real case pemicu (user report): YELO lolos kriteria v1.0 murni (vol_ratio+day_range) TAPI gagal naik hari itu; BAIK sebaliknya nunjukkin karakter "dijaga bandar, readable, ada bantalan support" yang v1.0 sama sekali tidak menangkap. v1.0: vol_ratio>=2.0x & day_range_10d>=20% murni dari riset speed-to-move (n=92 fast vs n=349 slow) — statistik itu TIDAK otomatis berlaku lagi buat kriteria v2.0 ini (kombinasi baru, belum ada data forward-nya), jangan dikutip ulang sampai ada evaluasi baru.
 
 def compute_fast_candidate_tag(r: dict) -> dict:
     """
-    MBSS v2 (user request, berbasis riset backtest/research_speed_to_move.py
-    — picks yang resolve CEPAT, <=1 hari, menang 95.7% (n=92) vs yang SLOW,
-    >=3 hari, cuma 40.1% (n=349)): tag EOD murni INFORMASIONAL, belum
+    MBSS v2 (user request, revisi v2.0 — lihat FAST_CANDIDATE_FORMULA_VERSION
+    di atas untuk alasan lengkap): tag EOD murni INFORMASIONAL, belum
     menggantikan/menggating skor apa pun — sama disiplin dengan
     bollinger_squeeze (lacak dulu di feature_snapshot, validasi forward,
     baru dipertimbangkan jadi filter/skor kalau prospectively terbukti).
+    LEBIH provisional dari v1.0 — v1.0 setidaknya lahir dari data /winrate
+    real, v2.0 ini kombinasi baru (speed direlaks + defended signal) yang
+    BELUM ADA bukti forward sama sekali, murni hipotesis dari 2 observasi
+    manual (YELO gagal, BAIK berhasil).
 
-    Kriteria dipilih dari 2 fitur PALING KUAT & n PALING BESAR dari riset:
-    - vol_ratio >= 2.0x (n=110, winrate 52.7% vs <1.0x cuma 34.6% n=26)
-    - day_range_pct_10d >= 20% (n=103, winrate 53.4% vs <10% cuma 32.3% n=31)
-    SENGAJA belum mengikutkan CMF (arahnya berlawanan intuisi di data, perlu
-    riset lanjut) atau streak (n masih <15 di bucket teratas).
+    Dua syarat, KEDUANYA wajib:
+    1. Speed (direlaks dari v1.0): vol_ratio >= 1.5x DAN day_range_pct_10d
+       >= 15%.
+    2. Defended/dijaga bandar (BARU): bias_bandar di {AKUMULASI SEGAR,
+       PULLBACK DIDUKUNG} (klasifikasi day-over-day whitelist net-buy yang
+       SUDAH ada, classify_bias_bandar di engine/broker.py — "PULLBACK
+       DIDUKUNG" secara harfiah berarti dip-nya dibeli/dijaga whitelist
+       broker) DAN whitelist_num_brokers >= 2 (bukan cuma 1 desk).
+
+    CATATAN ARSITEKTUR: bagian "readable secara live" (VWAP bertahan/
+    memantul di 15m/30m/60m walau naik-turun) SENGAJA belum diikutkan di
+    sini — itu cuma bisa dicek pakai data live (vwap_movement), yang belum
+    ada saat /eodscan jalan sebelum market buka. Itu jadi lapisan
+    konfirmasi TAMBAHAN di sisi live (/check, /consensus live), bukan
+    bagian dari tag EOD ini.
 
     Tag ini juga dasar "alert entry secepatnya di OPEN" (user request) —
     kalau EOD sudah menandai kandidat sebagai fast_candidate, user
@@ -6091,13 +6104,26 @@ def compute_fast_candidate_tag(r: dict) -> dict:
     """
     vol_ratio = r.get("vol_ratio")
     day_range = r.get("day_range_pct_10d")
-    is_fast = (
-        vol_ratio is not None and vol_ratio >= 2.0
-        and day_range is not None and day_range >= 20.0
+    speed_ok = (
+        vol_ratio is not None and vol_ratio >= 1.5
+        and day_range is not None and day_range >= 15.0
     )
+
+    bias_label = r.get("bias_bandar")
+    defended_ok = (
+        bias_label in ("AKUMULASI SEGAR", "PULLBACK DIDUKUNG")
+        and (r.get("whitelist_num_brokers") or 0) >= 2
+    )
+
+    is_fast = speed_ok and defended_ok
+    reason = None
+    if is_fast:
+        reason = f"vol_ratio>={vol_ratio}x & day_range>={day_range}% (speed) + {bias_label} {r.get('whitelist_num_brokers')} broker (defended)"
     return {
         "is_fast_candidate": is_fast,
-        "reason": "vol_ratio>=2.0x & day_range_10d>=20%" if is_fast else None,
+        "speed_ok": speed_ok,
+        "defended_ok": defended_ok,
+        "reason": reason,
     }
 
 
@@ -6105,7 +6131,7 @@ def format_fast_candidate_tag(r: dict, prefix: str = "\n   ") -> str:
     """Display helper dipakai /hc, /screendaytrade, /consensus — lihat compute_fast_candidate_tag."""
     if not compute_fast_candidate_tag(r).get("is_fast_candidate"):
         return ""
-    return f"{prefix}🚀 FAST CANDIDATE — prioritas entry saat OPEN besok, jangan tunggu konfirmasi tactical 30-40 menit (riset: 95.7% win kalau resolve <=1 hari, n=92)"
+    return f"{prefix}🚀 FAST CANDIDATE — prioritas entry saat OPEN besok, jangan tunggu konfirmasi tactical 30-40 menit (kriteria v2.0: speed + dijaga bandar, belum ada data forward — lihat FAST_CANDIDATE_FORMULA_VERSION)"
 
 
 def compute_screendaytrade_positive_bias(r: dict) -> dict:
