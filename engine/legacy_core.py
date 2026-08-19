@@ -2692,7 +2692,7 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
 # new factors, etc). This makes it visible when a score difference between two runs is
 # due to a real formula change vs. genuine day-to-day market movement — comparing scores
 # across different versions isn't apples-to-apples.
-SCORING_FORMULA_VERSION = "3.17.1"  # v3.17.1: tambah field macd_line_above_zero (dipakai TRUE EXPLOSIVE /consensus) di compute_factor_scoring; v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
+SCORING_FORMULA_VERSION = "3.17.2"  # v3.17.2: compute_high_conviction_score sekarang menerima action_id, is_high_conviction dipaksa False kalau AVOID_SELL (real case RAJA: HC badge ticker yang core blend-nya sudah bilang HINDARI/JUAL); v3.17.1: tambah field macd_line_above_zero (dipakai TRUE EXPLOSIVE /consensus) di compute_factor_scoring; v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
 
 
 # NOTE (MBSS v2 refactor, Sprint 2 Tier 1.1): compute_factor_scoring moved to
@@ -6297,6 +6297,17 @@ def compute_screendaytrade_positive_bias(r: dict) -> dict:
         if lane != "LOW EDGE / CHASE":
             lane = "EXTENDED / CHASE WATCH"
             priority = min(priority, 1)
+
+    # BUGFIX (user report, revisit dari kasus RAJA di Explosive Lane/FAST —
+    # SDT lane punya celah struktural yang sama: kriteria di atas MURNI
+    # teknikal day-trade (Room/Activity/VolQ/Continuation), tidak pernah
+    # cek action_id, jadi bisa kasih lane PRIORITY ke ticker yang core
+    # blend-nya SUDAH bilang HINDARI/JUAL). Demosikan lane PRIORITY* kalau
+    # action_id AVOID_SELL — sejajar dengan Explosive Lane/FAST tag.
+    if lane in ("PRIORITY FRESH", "PRIORITY CONT", "PRIORITY ACCUMULATION") and r.get("action_id") == "AVOID_SELL":
+        lane = "AVOID_SELL OVERRIDE"
+        score -= 10
+        priority = 1
 
     # MBSS v2 (RapidAPI integration, user request — "pelajari secara
     # adaptif untuk hindari picks yang cenderung gagal"): lapisan TAMBAHAN

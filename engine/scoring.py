@@ -241,7 +241,7 @@ def classify_risk_character(scoring: dict) -> dict:
 
 
 
-def compute_high_conviction_score(ticker: str, scoring: dict, hist_daily: pd.DataFrame = None) -> dict:
+def compute_high_conviction_score(ticker: str, scoring: dict, hist_daily: pd.DataFrame = None, action_id: str = None) -> dict:
     """
     8 kriteria High Conviction Breakout dari framework Minervini/IBD style
     (sumber: video yang ditinjau user), diadaptasi untuk IDX EOD + 4H Yahoo Finance.
@@ -254,6 +254,16 @@ def compute_high_conviction_score(ticker: str, scoring: dict, hist_daily: pd.Dat
 
     Return dict dengan setiap kriteria (True/False/None), jumlah yang terpenuhi,
     dan flag is_high_conviction (>=5 dari 7 kriteria yang bisa dicek).
+
+    BUGFIX (user report, revisit dari kasus RAJA di Explosive/FAST — HC punya
+    celah struktural yang sama: kriteria 1-8 di sini MURNI teknikal, tidak
+    pernah cek action_id/blend Value-Momentum-Sentimen sama sekali, jadi bisa
+    badge "HIGH CONVICTION" untuk ticker yang core blend-nya SUDAH bilang
+    HINDARI/JUAL). `action_id` opsional (caller kirim dari decide_action() yang
+    SUDAH dihitung lebih dulu di compute_factor_scoring) — kalau
+    "AVOID_SELL", is_high_conviction dipaksa False terlepas dari berapa
+    kriteria teknikal yang terpenuhi. TIDAK mengubah criteria_met/checkable
+    individual (tetap apa adanya, transparan), cuma flag akhirnya.
     """
     result = {
         "consolidation_tight": None,      # Kriteria 1: konsolidasi <12%
@@ -446,11 +456,15 @@ def compute_high_conviction_score(ticker: str, scoring: dict, hist_daily: pd.Dat
     checkable = result["criteria_checkable"]
     met = result["criteria_met"]
     threshold = max(5, round(checkable * 0.7))  # 70% dari yang bisa dicek, min 5
-    result["is_high_conviction"] = met >= threshold
-    result["conviction_label"] = (
-        "🔥 HIGH CONVICTION" if met >= threshold
-        else f"⚪ Low conviction ({met}/{checkable} kriteria)"
-    )
+    technically_qualified = met >= threshold
+    result["is_high_conviction"] = technically_qualified and action_id != "AVOID_SELL"
+    if technically_qualified and action_id == "AVOID_SELL":
+        result["conviction_label"] = f"⚪ Low conviction ({met}/{checkable} kriteria teknikal, TAPI action_id AVOID_SELL)"
+    else:
+        result["conviction_label"] = (
+            "🔥 HIGH CONVICTION" if result["is_high_conviction"]
+            else f"⚪ Low conviction ({met}/{checkable} kriteria)"
+        )
     return result
 
 
@@ -1593,7 +1607,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
             "vol_ratio": vol_ratio,
             "is_below_ema21": is_below_ema21,
             "is_below_sma50": is_below_sma50,
-        }, hist_daily=hist),
+        }, hist_daily=hist, action_id=decision["action_id"]),
         "action_id": decision["action_id"],
         "action_label_id": decision["action_label_id"],
         "action_ceiling_applied": decision["ceiling_applied"],
