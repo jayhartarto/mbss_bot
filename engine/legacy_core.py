@@ -2254,6 +2254,58 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
             # vnext di engine/backbone.py.
             "predicted_danger_vnext": bb_info.get("predicted_danger_vnext"),
             "danger_bucket_breakdown_vnext": bb_info.get("danger_bucket_breakdown_vnext"),
+            # MBSS v2 (user request — "snapshot seluruh detail sebisa mungkin
+            # sehingga walk forward ke depan bisa lebih granular", momentum
+            # histori baru saja ke-reset ke nol jadi ini kesempatan bersih):
+            # market_regime WAJIB ada supaya /winrate bisa disegmentasi per
+            # regime nanti (DANGER_GATE_QUANTILE_BY_REGIME/EXPLOSIVE_MIN_SCORE_
+            # BY_REGIME semuanya masih placeholder pending forward data PER
+            # REGIME, tidak bisa divalidasi tanpa ini).
+            "market_regime": bb_info.get("market_regime"),
+            # Flow/distribution — persis fitur yang double-counting audit
+            # (backtest/research_double_counting_audit.py) TIDAK BISA cek
+            # sebelumnya karena belum ke-snapshot.
+            "obv_divergence": r.get("obv_divergence"),
+            "whitelist_accumulation_net_pct": r.get("whitelist_accumulation_net_pct"),
+            "whitelist_num_brokers": r.get("whitelist_num_brokers"),
+            "bias_bandar": r.get("bias_bandar"),
+            # Input danger score lain yang belum ke-snapshot (baik versi asli
+            # maupun bucketed vnext sama-sama pakai ini).
+            "is_near_price_floor": r.get("is_near_price_floor"),
+            "is_financial_distress_flag": r.get("is_financial_distress_flag"),
+            "is_volume_spike_anomaly": r.get("is_volume_spike_anomaly"),
+            "day_range_percentile": bb_info.get("day_range_percentile"),
+            "ret_1d_pct": r.get("ret_1d_pct"),
+            # Granularitas MACD tambahan (state/cross boolean sudah ada di
+            # tempat lain, ini versi lebih detail).
+            "macd_hist": r.get("macd_hist"),
+            "macd_bullish_cross": r.get("macd_bullish_cross"),
+            "macd_bearish_cross": r.get("macd_bearish_cross"),
+            "macd_line_above_zero": r.get("macd_line_above_zero"),
+            "macd_cross_days_ago": r.get("macd_cross_days_ago"),
+            "macd_cross_direction": r.get("macd_cross_direction"),
+            # Flag teknikal lain + konteks kualitas data.
+            "is_weak_trend": r.get("is_weak_trend"),
+            "is_new_high_20d": r.get("is_new_high_20d"),
+            "is_overbought_caution": r.get("is_overbought_caution"),
+            "is_high_conviction": r.get("high_conviction", {}).get("is_high_conviction"),
+            "chart_pattern": r.get("chart_pattern"),
+            "consecutive_low_volume_days": r.get("consecutive_low_volume_days"),
+            "has_data_freshness_warning": bool(r.get("data_freshness_warning")),
+            # Sektor + komponen skor mentah Value/Momentum/Sentimen (final
+            # score dan tier sudah ada via action_id, tapi komponen individual
+            # belum -- berguna buat riset "komponen mana yang genuinely
+            # prediktif" seperti yang mbss_formula_diagnosis_claude_agent.md
+            # minta).
+            "sector": r.get("sector"),
+            "score_value": (r.get("scores") or {}).get("value"),
+            "score_momentum": (r.get("scores") or {}).get("momentum"),
+            "score_sentiment": (r.get("scores") or {}).get("sentiment"),
+            "score_final": (r.get("scores") or {}).get("final"),
+            # RR di batas atas entry range (beda dari rr_now yang dihitung
+            # backbone di harga sekarang) -- dua definisi RR ini SENGAJA
+            # dua-duanya disimpan biar bisa dibandingkan forward.
+            "risk_reward_at_max": (r.get("targets") or {}).get("risk_reward_at_max"),
         }
 
         # MBSS v2 (user request — evaluasi winrate PER BROKER smart money):

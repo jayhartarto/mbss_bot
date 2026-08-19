@@ -46,7 +46,7 @@ import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.7"  # 1.7: tambah predicted_danger_vnext/danger_bucket_breakdown_vnext (SHADOW ONLY, tidak dipakai gate/rank) ke all_scored[ticker] -- lihat compute_danger_score_bucketed_vnext, dari mbss_formula_diagnosis_claude_agent.md's double-counting concern. ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.8"  # 1.8: tambah market_regime ke tiap all_scored[ticker] (supaya /winrate bisa disegmentasi per regime -- "snapshot granular utk walk-forward" user request). 1.7: tambah predicted_danger_vnext/danger_bucket_breakdown_vnext (SHADOW ONLY, tidak dipakai gate/rank) ke all_scored[ticker] -- lihat compute_danger_score_bucketed_vnext, dari mbss_formula_diagnosis_claude_agent.md's double-counting concern. ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
@@ -439,6 +439,16 @@ def compute_backbone(results: list, market_regime: str) -> dict:
             "predicted_danger": danger,
             "probability_score": probability,
             "day_range_percentile": day_range_pct,
+            # MBSS v2 (user request — "snapshot seluruh detail sebisa mungkin
+            # supaya walk-forward ke depan bisa lebih granular"): market_regime
+            # itu sendiri GLOBAL per malam (bukan per-ticker), tapi disimpan DI
+            # SINI (per-ticker entry) supaya lock_daily_daytrade_picks bisa
+            # ambil lewat lookup yang SAMA (backbone_lookup) tanpa parameter
+            # terpisah -- tanpa ini, hasil /winrate tidak bisa disegmentasi per
+            # regime sama sekali (padahal DANGER_GATE_QUANTILE_BY_REGIME/
+            # EXPLOSIVE_MIN_SCORE_BY_REGIME semuanya regime-adaptive dan
+            # butuh data forward PER REGIME buat divalidasi).
+            "market_regime": market_regime,
         }
         # SHADOW ONLY (user request, dari mbss_formula_diagnosis_claude_agent.md
         # -- lihat compute_danger_score_bucketed_vnext docstring): TIDAK
