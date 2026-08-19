@@ -2003,6 +2003,31 @@ def _compute_backbone_top3(pool: list, sdt_selected: set, hc_selected: set, back
     return universe[:3]
 
 
+def _load_fast_candidates() -> tuple[list, dict, str | None]:
+    """
+    Shared antara /fast dan /fastscan (MBSS v2, user request) — extract
+    supaya kedua tempat pakai definisi kandidat FAST malam ini yang SAMA
+    PERSIS. Returns (fast_picks sorted by probability_score desc,
+    backbone_result, staleness_note_or_None). fast_picks kosong (bukan
+    exception) kalau cache belum ada — caller cek backbone_result is None
+    utk membedakan "belum ada eodscan" dari "ada tapi 0 kandidat fast".
+    """
+    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
+    if not scored:
+        return [], None, staleness_note
+    backbone_result, backbone_staleness = nightly_engine.load_backbone_daily_allow_stale()
+    if not backbone_result:
+        return [], None, backbone_staleness
+
+    pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
+    fast_picks = [r for r in pool if core.compute_fast_candidate_tag(r).get("is_fast_candidate")]
+
+    def _probscore(r):
+        return (backbone_result.get("all_scored", {}).get(r["ticker"], {}) or {}).get("probability_score", 0)
+    fast_picks.sort(key=_probscore, reverse=True)
+    return fast_picks, backbone_result, backbone_staleness
+
+
 async def fast_candidates_command(update, context):
     """
     /fast — MBSS v2 (user request): daftar BERDIRI SENDIRI kandidat
@@ -2012,23 +2037,14 @@ async def fast_candidates_command(update, context):
     scroll command lain. Tetap dibatasi ke Danger Gate survivor (pool) —
     fast TANPA lolos gate bukan sinyal aman buat prioritas entry di open.
     """
-    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
-    if not scored:
-        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
-        return
-    backbone_result, backbone_staleness = nightly_engine.load_backbone_daily_allow_stale()
-    if not backbone_result:
-        await core.safe_reply(update.message, "⚠️ Backbone belum pernah dihitung — jalankan /eodscan dulu (versi terbaru).")
+    fast_picks, backbone_result, backbone_staleness = _load_fast_candidates()
+    if backbone_result is None:
+        await core.safe_reply(update.message, backbone_staleness or "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
         return
 
+    scored, _ = nightly_engine.load_daily_scan_cache_allow_stale()
     pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
     sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool)
-
-    fast_picks = [r for r in pool if core.compute_fast_candidate_tag(r).get("is_fast_candidate")]
-
-    def _probscore(r):
-        return (backbone_result.get("all_scored", {}).get(r["ticker"], {}) or {}).get("probability_score", 0)
-    fast_picks.sort(key=_probscore, reverse=True)
 
     lines = [f"🚀 FAST CANDIDATES — {len(fast_picks)} saham (speed direlaks vol_ratio>=1.5x & day_range_10d>=15% + WAJIB dijaga bandar, lolos Danger Gate)"]
     if backbone_staleness:
@@ -2056,6 +2072,63 @@ async def fast_candidates_command(update, context):
         )
 
     buttons = core.build_check_buttons([r["ticker"] for r in fast_picks])
+    await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
+
+
+async def fast_scan_command(update, context):
+    """
+    /fastscan — MBSS v2 (user request): scan 1-MENIT LIVE atas shortlist
+    kandidat FAST malam ini, cari ledakan volume + spike harga. Dipicu
+    MANUAL oleh user (bukan cron/auto) — paling efektif dijalankan di 2
+    window: 08:50-09:30 (chase opening) dan menjelang tutup Sesi 1
+    (~11:20-12:00, buat chase carry-over ke open Sesi 2). Universe SENGAJA
+    dibatasi ke shortlist FAST (bukan seluruh pool /eodscan) — reuse
+    _load_fast_candidates(), fungsi PERSIS sama dengan /fast, supaya
+    definisi kandidat konsisten dan scan 1m tidak perlu menyisir ratusan
+    ticker (mahal, dan 1m memang dari awal dimaksudkan cuma untuk
+    shortlist kecil — lihat get_intraday_session_bars).
+    """
+    fast_picks, backbone_result, staleness_note = _load_fast_candidates()
+    if backbone_result is None:
+        await core.safe_reply(update.message, staleness_note or "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
+        return
+    if not fast_picks:
+        await core.safe_reply(update.message, "⚠️ Tidak ada kandidat FAST malam ini — tidak ada yang bisa discan live.")
+        return
+
+    await core.safe_reply(update.message, f"🔍 Scan 1m untuk {len(fast_picks)} kandidat FAST, mohon tunggu...")
+
+    checked = []
+    for r in fast_picks:
+        t = r["ticker"]
+        try:
+            detection = await asyncio.to_thread(core.detect_intraday_explosion, t)
+        except Exception as e:
+            print(f"⚠️ /fastscan: gagal cek {t}: {e}")
+            continue
+        if detection:
+            checked.append((t, detection))
+
+    exploded = [(t, d) for t, d in checked if d["is_explosion"]]
+    exploded.sort(key=lambda pair: pair[1]["volume_ratio"], reverse=True)
+
+    lines = [f"🔥 FASTSCAN 1m — {len(exploded)} dari {len(fast_picks)} kandidat FAST menunjukkan ledakan live"]
+    lines.append(
+        "Kriteria PLACEHOLDER, BELUM ada data forward sama sekali: volume_ratio>=3.0x (3 bar terakhir vs "
+        "baseline 15 bar sebelumnya) DAN price spike>=1.5% (3 bar terakhir). Paling efektif dijalankan manual "
+        "08:50-09:30 (chase opening) atau menjelang tutup Sesi 1 (chase carry-over ke Sesi 2). "
+        "Verifikasi manual sebelum entry — ini sinyal awal, bukan konfirmasi final.\n"
+    )
+    if not exploded:
+        lines.append("Belum ada ledakan terdeteksi saat ini — coba lagi beberapa menit lagi.")
+    for t, d in exploded:
+        lines.append(f"🔥 {t} — {d['price']:.0f} | Vol ratio {d['volume_ratio']}x | Spike {d['price_spike_pct']:+.2f}% (3 bar terakhir)")
+
+    skipped = len(fast_picks) - len(checked)
+    if skipped:
+        lines.append(f"\n({skipped} kandidat dilewati — data 1m belum cukup atau di luar jam bursa)")
+
+    buttons = core.build_check_buttons([t for t, _ in exploded])
     await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
 
 

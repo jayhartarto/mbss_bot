@@ -3464,6 +3464,56 @@ def get_intraday_session_bars(ticker: str, interval: str = "5m", period: str = "
         return bars.dropna()
 
 
+def detect_intraday_explosion(
+    ticker: str, lookback_bars: int = 3, volume_ratio_threshold: float = 3.0, price_spike_pct_threshold: float = 1.5
+) -> dict | None:
+    """
+    MBSS v2 (user request — "/fastscan", chase produktif di 08:50-09:30 dan
+    menjelang tutup Sesi 1): deteksi ledakan volume + spike harga di
+    timeframe 1 MENIT, dipanggil HANYA untuk shortlist FAST tag EOD malam
+    ini (bukan seluruh universe) — persis skenario yang sejak awal
+    dimaksudkan buat 1m (lihat docstring get_intraday_session_bars di
+    atas: "1m dipakai hanya untuk shortlist/check").
+
+    Kriteria PLACEHOLDER, BELUM ADA data forward sama sekali (beda dari
+    FAST tag EOD yang setidaknya sudah lewat 1-2 revisi observasi) —
+    volume_ratio (N bar terakhir vs baseline N bar sebelumnya) >= 3.0x DAN
+    price_spike_pct (perubahan N bar terakhir) >= 1.5%. User jalankan
+    MANUAL, bukan auto/cron — jadi tidak butuh presisi sempurna, cukup
+    jadi sinyal awal buat diverifikasi manual sebelum entry.
+
+    Returns None kalau data tidak cukup (di luar jam bursa, API gagal, bar
+    kurang dari baseline minimum) — bukan exception, caller cukup skip.
+    """
+    bars = get_intraday_session_bars(ticker, interval="1m", period="1d")
+    min_bars = lookback_bars + 15  # perlu baseline yang cukup, bukan cuma 1-2 bar
+    if bars is None or bars.empty or len(bars) < min_bars:
+        return None
+
+    volumes = bars["Volume"].fillna(0).astype(float)
+    closes = bars["Close"].astype(float)
+
+    recent_vol = volumes.tail(lookback_bars).sum()
+    baseline_bars = volumes.iloc[:-lookback_bars].tail(15)
+    baseline_vol = baseline_bars.mean() * lookback_bars if not baseline_bars.empty else 0
+    if baseline_vol <= 0:
+        return None
+    volume_ratio = recent_vol / baseline_vol
+
+    price_now = float(closes.iloc[-1])
+    price_before = float(closes.iloc[-(lookback_bars + 1)])
+    price_spike_pct = ((price_now - price_before) / price_before * 100) if price_before > 0 else 0.0
+
+    is_explosion = volume_ratio >= volume_ratio_threshold and price_spike_pct >= price_spike_pct_threshold
+    return {
+        "is_explosion": is_explosion,
+        "volume_ratio": round(volume_ratio, 2),
+        "price_spike_pct": round(price_spike_pct, 2),
+        "price": price_now,
+        "bars_available": len(bars),
+    }
+
+
 def compute_active_breakout_score(ticker: str, scoring: dict = None, prefer_1m: bool = False) -> dict:
     """
     Skor live untuk mencari saham yang ready breakout sesi ini / sesi berikutnya.
@@ -6938,6 +6988,7 @@ def build_app():
     app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.strong_buy_command))
     app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
     app.add_handler(CommandHandler("fast", commands_scan.fast_candidates_command))
+    app.add_handler(CommandHandler("fastscan", commands_scan.fast_scan_command))
     app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
     app.add_handler(CommandHandler("brokerdiscovery", commands_scan.broker_discovery_command))
     app.add_handler(CommandHandler("bsjp", commands_scan.bsjp_screening_command))
