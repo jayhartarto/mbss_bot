@@ -415,7 +415,7 @@ async def screen_daytrade(update, context):
     # FRESH/CONT yang sudah tervalidasi live.
     macd_approach_candidates = [
         r for r in results
-        if r.get("macd_approach_tier") in ("SWEET_SPOT", "SQUEEZE_RESCUE")
+        if r.get("macd_approach_tier") in ("SWEET_SPOT", "SQUEEZE_RESCUE", "PULLBACK_RESUME")
     ]
     if macd_approach_candidates:
         # BUGFIX (user report, ditemukan lewat cek chart manual — real case
@@ -424,9 +424,15 @@ async def screen_daytrade(update, context):
         # ini ke centerline — MNCN (cross 1 hari lalu, paling MENTAH) malah
         # tampil #1 karena probability_score-nya kebetulan tinggi, sementara
         # PTBA (cross 11 hari lalu, PALING DEKAT ke centerline saat dicek
-        # manual di chart) malah tampil TERAKHIR). Urutan baru: tier dulu
-        # (SWEET_SPOT sebelum SQUEEZE_RESCUE — bucket yang backtest-nya
-        # lebih matang), lalu KEMATANGAN spesifik-MACD di dalam tier:
+        # manual di chart) malah tampil TERAKHIR). Urutan baru: tier dulu,
+        # lalu KEMATANGAN spesifik-MACD di dalam tier:
+        # - PULLBACK_RESUME: sinyal PALING SEGAR (signal-line cross HARI
+        #   INI, bukan sedang berkembang seperti dua tier lain) dengan
+        #   evidence win-rate tertinggi di antara ketiganya (backtest
+        #   research_macd_cross_winner_profile_v2.py + research_macd_
+        #   pullback_resume_threshold.py) -- diprioritaskan PALING ATAS.
+        #   Di dalam tier ini, dist_to_sma50_pct makin besar makin
+        #   diprioritaskan (quintile teratas = win-rate tertinggi).
         # - SWEET_SPOT: makin dekat ke bin puncak backtest (16-19 hari,
         #   tengah ~17) makin diprioritaskan -- lihat catatan riset di
         #   compute_factor_scoring.
@@ -440,9 +446,11 @@ async def screen_daytrade(update, context):
         def _macd_maturity_key(r):
             tier = r.get("macd_approach_tier")
             days = r.get("macd_cross_days_ago") or 0
+            if tier == "PULLBACK_RESUME":
+                return (0, -(r.get("dist_to_sma50_pct") or 0))
             if tier == "SWEET_SPOT":
-                return (0, abs(days - SWEET_SPOT_PEAK_DAY))
-            return (1, -days)  # SQUEEZE_RESCUE: days makin besar (0..11) makin diprioritaskan
+                return (1, abs(days - SWEET_SPOT_PEAK_DAY))
+            return (2, -days)  # SQUEEZE_RESCUE: days makin besar (0..11) makin diprioritaskan
         macd_approach_candidates.sort(key=_macd_maturity_key)
         macd_approach_candidates = macd_approach_candidates[:8]
 
@@ -454,17 +462,21 @@ async def screen_daytrade(update, context):
         lines.append(
             "\n📐 SETUP PRA-BREAKOUT — MACD approach (BACKTEST OHLCV lokal, BELUM ada histori /winrate live — watchlist, bukan entry final)"
         )
+        MACD_TIER_LABELS = {"SWEET_SPOT": "SWEET SPOT", "SQUEEZE_RESCUE": "SQUEEZE RESCUE", "PULLBACK_RESUME": "PULLBACK RESUME"}
         for r in macd_approach_candidates:
             tier = r.get("macd_approach_tier")
-            tier_label = "SWEET SPOT" if tier == "SWEET_SPOT" else "SQUEEZE RESCUE"
+            tier_label = MACD_TIER_LABELS.get(tier, tier)
             bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
             backbone_note = (
                 f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
                 if bb_info and "entry_rank" in bb_info else ""
             )
+            if tier == "PULLBACK_RESUME":
+                detail = f"cross bullish HARI INI, {r.get('dist_to_sma50_pct', '-')}% di atas SMA50"
+            else:
+                detail = f"cross bullish {r.get('macd_cross_days_ago', '-')} hari lalu" + (" + squeeze aktif" if tier == "SQUEEZE_RESCUE" else "")
             lines.append(
-                f"  • {r['ticker']} — {tier_label}, cross bullish {r.get('macd_cross_days_ago', '-')} hari lalu"
-                f"{' + squeeze aktif' if tier == 'SQUEEZE_RESCUE' else ''} | Harga {r.get('price')}{backbone_note}"
+                f"  • {r['ticker']} — {tier_label}, {detail} | Harga {r.get('price')}{backbone_note}"
                 f"{market_engine.format_sector_tag(r.get('sector'))}"
             )
 

@@ -312,6 +312,12 @@ async def check_stock(update, context):
             f"\n📐 MACD approach + squeeze (BACKTEST): cross bullish {result.get('macd_cross_days_ago', '-')} hari lalu (masih awal) "
             f"TAPI bollinger squeeze aktif — backtest historis setara performa sweet spot"
         )
+    elif macd_approach_tier == "PULLBACK_RESUME":
+        bb_line += (
+            f"\n📐 MACD pullback-resume (BACKTEST): signal-line cross HARI INI SAMBIL MACD line sudah di atas centerline "
+            f"({result.get('dist_to_sma50_pct', '-')}% di atas SMA50) — pola pullback dalam uptrend mapan, "
+            f"backtest historis win-rate tertinggi dari 3 tier MACD approach"
+        )
 
     # AB-RC1 backbone (MBSS v2, user request — "bisa dibandingkan posisi
     # dengan entry lainnya"): angka rank yang SAMA dipakai konsisten di

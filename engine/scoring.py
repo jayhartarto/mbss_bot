@@ -1390,9 +1390,16 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     # investing horizon) — catches "looks fine short-term but still in a weaker medium-
     # term regime" cases that SMA20 alone (already used above) can miss.
     is_below_sma50 = False
+    dist_to_sma50_pct = None
     if len(close_prices) >= 50:
         sma50 = close_prices.rolling(window=50).mean().iloc[-1]
         is_below_sma50 = bool(current_price < sma50)
+        # MBSS v2 (user request — riset MACD pullback-resume): jarak eksplisit
+        # dalam persen, bukan cuma boolean is_below_sma50 — dipakai sebagai
+        # gate macd_approach_tier="PULLBACK_RESUME" di bawah (lihat catatan
+        # riset di situ), sekaligus berguna standalone.
+        if sma50:
+            dist_to_sma50_pct = round((current_price - sma50) / sma50 * 100, 2)
 
     # --- ADX: pengali KEPERCAYAAN terhadap momentum_score, bukan sekadar info.
     # ADX rendah (<20) = pasar sideways/noise — sinyal momentum apa pun di
@@ -1647,6 +1654,43 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         elif macd_cross_days_ago <= 11 and bollinger_squeeze:
             macd_approach_tier = "SQUEEZE_RESCUE"
 
+    # MBSS v2 (user request — eksplorasi pola BARU dari backtest
+    # research_macd_cross_winner_profile_v1/v2.py: populasi SIGNAL_CROSS
+    # PENUH, macd_line_above_zero d=+0.259, winner LEBIH SERING sudah di
+    # atas centerline saat cross, bukan di bawah -- pola pullback-resume
+    # dalam uptrend mapan, di LUAR cakupan SWEET_SPOT/SQUEEZE_RESCUE di
+    # atas (keduanya syarat macd_line<0). Dipecah v2 jadi sub-populasi
+    # ABOVE_CENTERLINE (n=1458): win-rate 24.6% (vs BELOW_CENTERLINE
+    # 16.2%, n=2764) -- effect size jauh lebih besar & lebih bersih di
+    # HAMPIR SEMUA fitur dibanding sub-populasi approach lama.
+    #
+    # research_macd_pullback_resume_threshold.py (quintile sweep DALAM
+    # sub-populasi ABOVE_CENTERLINE itu sendiri, n=1458): TIGA fitur
+    # teratas (dist_to_sma50_pct d=0.717, macd_line_pct_of_price d=0.659,
+    # rsi d=0.570) SEMUA menunjukkan pola sama -- flat Q1-Q4 (9-27%
+    # win-rate), lalu LONCATAN tajam di Q5/kuintil teratas (44.9%/44.5%/
+    # 40.4% win-rate) -- BUKAN kenaikan linear halus, breakpoint nyata di
+    # sekitar quintile atas. Ketiga fitur SANGAT berkorelasi (sama-sama
+    # mengukur "seberapa kuat/established trend-nya") -- REUSE cuma SATU
+    # (dist_to_sma50_pct, d tertinggi + sudah established di codebase via
+    # is_below_sma50) sebagai gate, BUKAN AND ketiganya sekaligus (hindari
+    # redundansi struktural, persis pelajaran dari kasus kriteria HC 2&7
+    # yang matematically coupled).
+    #
+    # Threshold 18% dipilih SEDIKIT DI BAWAH batas kuintil 4/5 riil
+    # (19.192% dari sampel n=1458) -- placeholder dari SATU backtest,
+    # BUKAN angka final, perlu revalidasi forward setelah data /winrate
+    # (source screendaytrade_macd_approach) cukup terkumpul.
+    MACD_PULLBACK_RESUME_MIN_DIST_SMA50_PCT = 18.0
+    if (
+        macd_approach_tier is None
+        and macd_bullish_cross
+        and macd_line_above_zero
+        and dist_to_sma50_pct is not None
+        and dist_to_sma50_pct >= MACD_PULLBACK_RESUME_MIN_DIST_SMA50_PCT
+    ):
+        macd_approach_tier = "PULLBACK_RESUME"
+
     # OBV divergence: the key check for "price looks fine but volume flow disagrees"
     obv_series = core.calculate_obv(close_prices, volumes)
     obv_divergence = core.detect_obv_divergence(close_prices, obv_series)
@@ -1817,6 +1861,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "ema9_slope_pct": ema9_slope_pct,
         "trailing_support_undercut_days": trailing_support_undercut_days,
         "is_below_sma50": is_below_sma50,
+        "dist_to_sma50_pct": dist_to_sma50_pct,
         "is_below_ema21": is_below_ema21,
         "adx": round(current_adx, 1),
         "is_weak_trend": is_weak_trend,
@@ -1826,7 +1871,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "macd_cross_days_ago": macd_cross_days_ago,
         "macd_cross_direction": macd_cross_direction,
         "macd_line_slope_3d": macd_line_slope_3d,
-        "macd_approach_tier": macd_approach_tier,  # SWEET_SPOT / SQUEEZE_RESCUE / None -- lihat catatan riset di atas, informational only
+        "macd_approach_tier": macd_approach_tier,  # SWEET_SPOT / SQUEEZE_RESCUE / PULLBACK_RESUME / None -- lihat catatan riset di atas, informational only
         "is_new_high_20d": is_new_high_20d,
         "relative_strength_vs_ihsg": relative_strength_vs_ihsg,
         "consecutive_low_volume_days": consecutive_low_volume_days,
