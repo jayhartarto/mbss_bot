@@ -418,10 +418,32 @@ async def screen_daytrade(update, context):
         if r.get("macd_approach_tier") in ("SWEET_SPOT", "SQUEEZE_RESCUE")
     ]
     if macd_approach_candidates:
-        def _macd_bb_prob(r):
-            bb = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
-            return bb.get("probability_score", 0) if bb else 0
-        macd_approach_candidates.sort(key=_macd_bb_prob, reverse=True)
+        # BUGFIX (user report, ditemukan lewat cek chart manual — real case
+        # MNCN/BMTR/PTBA: urutan lama pakai probability_score backbone,
+        # yang sama sekali TIDAK mengukur seberapa matang/dekat setup MACD
+        # ini ke centerline — MNCN (cross 1 hari lalu, paling MENTAH) malah
+        # tampil #1 karena probability_score-nya kebetulan tinggi, sementara
+        # PTBA (cross 11 hari lalu, PALING DEKAT ke centerline saat dicek
+        # manual di chart) malah tampil TERAKHIR). Urutan baru: tier dulu
+        # (SWEET_SPOT sebelum SQUEEZE_RESCUE — bucket yang backtest-nya
+        # lebih matang), lalu KEMATANGAN spesifik-MACD di dalam tier:
+        # - SWEET_SPOT: makin dekat ke bin puncak backtest (16-19 hari,
+        #   tengah ~17) makin diprioritaskan -- lihat catatan riset di
+        #   compute_factor_scoring.
+        # - SQUEEZE_RESCUE: cross_days_ago PALING BESAR (paling lama sejak
+        #   cross, dalam rentang 0-11) diprioritaskan duluan -- proxy
+        #   "paling jauh sudah berkembang menuju centerline", PERSIS urutan
+        #   yang cocok dengan cek manual user (PTBA 11 > BMTR 10 > MNCN 1).
+        # probability_score backbone TETAP ditampilkan di tiap baris (info),
+        # cuma bukan lagi kunci pengurutan section ini.
+        SWEET_SPOT_PEAK_DAY = 17  # tengah bin 16-19 hari, bucket backtest terbaik (fwd10d +2.13%)
+        def _macd_maturity_key(r):
+            tier = r.get("macd_approach_tier")
+            days = r.get("macd_cross_days_ago") or 0
+            if tier == "SWEET_SPOT":
+                return (0, abs(days - SWEET_SPOT_PEAK_DAY))
+            return (1, -days)  # SQUEEZE_RESCUE: days makin besar (0..11) makin diprioritaskan
+        macd_approach_candidates.sort(key=_macd_maturity_key)
         macd_approach_candidates = macd_approach_candidates[:8]
 
         await asyncio.to_thread(
