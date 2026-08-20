@@ -1332,6 +1332,17 @@ BSJP_ARA_DISTANCE_MAX_PCT = 15  # sebelum kunci rentang final (ganti setelah lih
 BSJP_PREFILTER_COUNT = 40  # berapa kandidat dari cache EOD yang di-live-check
 BSJP_DAILY_HISTORY_LOOKBACK = 25  # buat hitung SMA5 & volume MA20 (butuh >=20 bar + buffer)
 
+# MBSS v2 (user request, dari riset /finance — "buy the dip DALAM uptrend"
+# terbukti (literatur umum + IDX-specific findings.md) lebih baik dari
+# "bottom fishing oversold murni". Lane BARU, BERDAMPINGAN dengan 6
+# kriteria momentum di atas, arah BEDA: cari saham yang MASIH uptrend
+# jangka pendek TAPI baru selesai pullback sehat & reclaim EMA9 — bukan
+# cari yang lagi kencang naik. Ambang REUSE dari findings.md's
+# MOMENTUM_PULLBACK (IDX-validated, 63.0% win, n=671), BUKAN dikarang
+# baru): "above SMA50, 20d ROC>5%, dip lalu reclaim EMA9".
+BSJP_PULLBACK_MIN_ROC_20D = 5.0  # PERSIS threshold MOMENTUM_PULLBACK di findings.md
+BSJP_PULLBACK_DIP_LOOKBACK_DAYS = 3  # placeholder -- findings.md tidak spesifikkan window pastinya, perlu revalidasi forward
+
 # MBSS v2 (user request — BSJP-ARA "pola GIAA"):
 BSJP_ARA_MIN_MOMENTUM_PCT = 5.0   # harga hari ini vs open hari ini, minimal naik segini buat jadi kandidat
 BSJP_ARA_MIN_VOLQ = 3.0           # direvisi dari 5.0 (user request) — lebih banyak kandidat, referensi GIAA tetap 13x jauh di atas ini
@@ -1558,7 +1569,7 @@ async def _run_bsjp_6criteria(update):
     # mechanism was built for.
     await asyncio.to_thread(broker_engine.get_or_refresh_intraday_market_snapshot)
 
-    lines = [f"🌆 BSJP SCREENING (diperketat) — {len(results)} kandidat lolos SEMUA 6 kriteria wajib\n"]
+    lines = [f"🚀 BSJP MOMENTUM (diperketat) — {len(results)} kandidat lolos SEMUA 6 kriteria wajib\n"]
     lines.append("⚠️ Ambang jarak ARA (0-15%) masih SEMENTARA/permisif — cuma informasi, belum jadi filter.")
     lines.append("⚠️ Checklist struktur (CMF/OBV/MACD/volume-shape/multi-timeframe) KONFIRMASI saja, TIDAK menggugurkan — belum cukup data buat dikunci jadi wajib.\n")
     for i, r in enumerate(results, 1):
@@ -1583,6 +1594,119 @@ async def _run_bsjp_6criteria(update):
         await asyncio.to_thread(core.lock_daily_daytrade_picks, results, "bsjp")
     except Exception as e:
         print(f"⚠️ Gagal mengunci picks /bsjp untuk /winrate: {e}")
+
+
+async def _run_bsjp_pullback(update):
+    """
+    BSJP PULLBACK lane (MBSS v2, user request — "satu command, 2 tagging").
+    Arah BEDA dari _run_bsjp_6criteria (lane MOMENTUM, chase kekuatan hari
+    ini): lane ini cari saham yang MASIH uptrend jangka pendek TAPI baru
+    saja selesai pullback SEHAT dan reclaim EMA9 — bukan yang lagi kencang
+    naik. Dasar riset /finance: literatur umum (buy-the-dip DALAM uptrend
+    > bottom-fishing oversold murni, risiko "dead cat bounce" jauh lebih
+    rendah) + findings.md's MOMENTUM_PULLBACK (IDX-specific, independent
+    backtest, 63.0% win n=671) — kriteria REUSE definisi itu, bukan
+    dikarang baru.
+
+    BERDAMPINGAN dengan lane momentum & BSJP-ARA — TIDAK saling
+    menggantikan/menggagalkan, source /winrate terpisah ("bsjp_pullback").
+    """
+    scored = nightly_engine.load_daily_scan_cache()
+    if not scored:
+        return  # pesan error sudah ditampilkan _run_bsjp_6criteria, tidak perlu diulang
+
+    # Pra-filter murah: masih di atas SMA50 (uptrend jangka pendek). SENGAJA
+    # tidak filter EMA9 di sini -- justru butuh yang SEMPAT di bawah EMA9,
+    # itu dicek di loop live pakai histori harian.
+    pre_candidates = [r for r in scored.values() if r.get("is_below_sma50") is False]
+    pre_candidates.sort(key=lambda r: r.get("relative_strength_vs_ihsg", 0), reverse=True)
+    pre_candidates = pre_candidates[:BSJP_PREFILTER_COUNT]
+    if not pre_candidates:
+        return
+
+    results = []
+    for r in pre_candidates:
+        ticker = r["ticker"]
+        try:
+            hist_daily = await asyncio.to_thread(core.get_ohlcv_smart, ticker, BSJP_DAILY_HISTORY_LOOKBACK)
+        except Exception as e:
+            print(f"⚠️ BSJP Pullback: gagal fetch histori harian {ticker}: {e}")
+            continue
+        if hist_daily is None or hist_daily.empty or len(hist_daily) < 25:
+            continue
+
+        closes = hist_daily["Close"]
+        current_price = float(closes.iloc[-1])
+
+        # 20d ROC -- konfirmasi uptrend jangka pendek MASIH genuinely ada,
+        # bukan cuma kebetulan di atas SMA50 tapi sudah datar/melemah.
+        if len(closes) < 21:
+            continue
+        close_20d_ago = float(closes.iloc[-21])
+        roc_20d = (current_price - close_20d_ago) / close_20d_ago * 100 if close_20d_ago else None
+        if roc_20d is None or roc_20d < BSJP_PULLBACK_MIN_ROC_20D:
+            continue
+
+        # Dip-then-reclaim EMA9: HARI INI sudah di atas EMA9, tapi salah
+        # satu dari N hari terakhir SEMPAT di bawahnya (pullback genuine,
+        # bukan uptrend yang belum pernah mundur sama sekali).
+        ema9_series = closes.ewm(span=9, adjust=False).mean()
+        today_ema9 = float(ema9_series.iloc[-1])
+        today_above_ema9 = current_price > today_ema9
+        recent_dip = any(
+            float(closes.iloc[-1 - i]) < float(ema9_series.iloc[-1 - i])
+            for i in range(1, BSJP_PULLBACK_DIP_LOOKBACK_DAYS + 1)
+            if len(closes) > i
+        )
+        if not (today_above_ema9 and recent_dip):
+            continue
+
+        # Likuiditas -- floor SAMA dengan lane momentum, konsisten (bukan
+        # angka baru yang dikarang terpisah).
+        volume_today = float(hist_daily["Volume"].iloc[-1])
+        value_traded_today = current_price * volume_today
+        if value_traded_today < BSJP_MIN_VALUE_TRADED_IDR:
+            continue
+
+        results.append({
+            "ticker": ticker, "current_price": current_price, "roc_20d": round(roc_20d, 1),
+            "rsi": r.get("rsi"), "value_traded_today": value_traded_today,
+            "ema9": round(today_ema9, 0),
+            "action_label_id": r.get("action_label_id"),
+            "fast_tag_note": core.format_fast_candidate_tag(r),
+        })
+
+    if not results:
+        await core.safe_reply(
+            update.message,
+            "🔄 BSJP PULLBACK: tidak ada kandidat (uptrend jangka pendek + dip-reclaim EMA9) saat ini."
+        )
+        return
+
+    results.sort(key=lambda r: r["roc_20d"], reverse=True)
+
+    lines = [
+        f"🔄 BSJP PULLBACK — {len(results)} kandidat (uptrend jangka pendek + reclaim EMA9)\n",
+        "Arah BEDA dari BSJP MOMENTUM di atas: lane ini cari pullback SEHAT yang baru selesai "
+        "(riset: buy-the-dip DALAM uptrend > bottom-fishing oversold murni), BUKAN saham yang lagi kencang naik. "
+        "Kriteria REUSE dari findings.md's MOMENTUM_PULLBACK (IDX-validated, 63.0% win n=671).\n",
+    ]
+    for i, r in enumerate(results, 1):
+        label = r.get("action_label_id")
+        wr = core.get_winrate_for_label(label) if label else ""
+        wr_note = f" | WR {wr}" if wr else ""
+        lines.append(
+            f"{i}. {r['ticker']} — {r['current_price']:.0f} (ROC20d {r['roc_20d']:+.1f}%){wr_note}\n"
+            f"   RSI {r['rsi']} | EMA9 {r['ema9']} | Value {r['value_traded_today']/1e9:.1f}M"
+            f"{r.get('fast_tag_note', '')}"
+        )
+
+    buttons = core.build_check_buttons([r["ticker"] for r in results])
+    await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
+    try:
+        await asyncio.to_thread(core.lock_daily_daytrade_picks, results, "bsjp_pullback")
+    except Exception as e:
+        print(f"⚠️ Gagal mengunci picks /bsjp pullback untuk /winrate: {e}")
 
 
 async def bsjp_screening_command(update, context):
@@ -1619,6 +1743,15 @@ async def bsjp_screening_command(update, context):
     # bagian BSJP-ARA di bawahnya — dua metode harus tetap berjalan
     # independen, sesuai kesepakatan "berdampingan, bukan saling gantung".
     await _run_bsjp_6criteria(update)
+
+    # MBSS v2 (user request — "satu command tapi 2 tagging"): lane KEDUA,
+    # arah beda (pullback-dalam-uptrend, bukan chase momentum) — sama
+    # prinsip independen dengan BSJP-ARA di bawah, satu lane gagal/kosong
+    # tidak menghentikan yang lain.
+    try:
+        await _run_bsjp_pullback(update)
+    except Exception as e:
+        print(f"⚠️ BSJP Pullback lane gagal: {e}")
 
     # ==========================================
     # 🌆 PESAN KE-2: BSJP-ARA — "pola GIAA" (MBSS v2, user request)
