@@ -1334,6 +1334,20 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     # jadi cross lemah/masih dalam fase pemulihan dari downtrend). Beda dari
     # macd_state yang cuma baca TANDA histogram (macd_line - signal_line).
     macd_line_above_zero = bool(macd_line.iloc[-1] > 0)
+    # MBSS v2 (user request — reframing dari "MACD line loncat besar sehari
+    # sebelum cross" (research_macd_cross_winner_profile_v2.py, CENTERLINE_
+    # CROSS fixed, d=-0.881 -- fitur PALING dominan di seluruh analisis MACD
+    # sesi ini): user tepat mengoreksi -- fitur itu TIDAK bisa dipakai
+    # prospektif buat cari kandidat SEBELUM cross (kita tidak tahu di muka
+    # hari mana yang akan jadi hari cross, jadi "MACD line sudah jauh di
+    # bawah 0 kemarin" bukan sinyal actionable sendirian). TAPI valid sebagai
+    # KONFIRMASI SETELAH cross terjadi -- persis positioning HC ("follow
+    # FRESH breakout yang SUDAH terjadi", beda dari SDT yang cari SEBELUM
+    # breakout). Flag cross line HARI INI, reuse pola persis sama dengan
+    # macd_bullish_cross/macd_bearish_cross (histogram) tapi untuk LINE.
+    macd_centerline_cross_today = bool(
+        len(macd_line) > 1 and macd_line.iloc[-1] >= 0 and macd_line.iloc[-2] < 0
+    )
 
     # MBSS v2 (user request, real observasi live intraday — saham dengan
     # "order buy tebal" yang bergerak mengikuti harga, seolah dijaga rapi
@@ -1691,6 +1705,32 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     ):
         macd_approach_tier = "PULLBACK_RESUME"
 
+    # MBSS v2 (user request — reframing HC-appropriate dari temuan
+    # macd_line_pct_of_price di atas): BUKAN sinyal SDT pre-breakout (itu
+    # 3 tier macd_approach_tier di atas) -- ini KONFIRMASI breakout yang
+    # SUDAH terjadi HARI INI, cocok untuk HC (positioning: "follow FRESH
+    # breakout", beda dari SDT yang "cari SEBELUM breakout"). Backtest yang
+    # SUDAH ADA (research_macd_centerline_breakout_validation.py, versi
+    # ASLI SEBELUM baseline digeser ke i-1 -- pengukuran forward return
+    # DARI hari cross itu sendiri, TIDAK diubah lagi karena justru itu yang
+    # relevan di sini): dibucket per days_from_signal_cross_to_centerline
+    # (macd_cross_days_ago DIBACA PADA hari cross), n=1930 total --
+    # 4-7 hari (n=450, fwd5d +1.25%, masih di atas centerline 87.3%, masih
+    # naik 82.9%) dan 8-11 hari (n=323, fwd5d +1.26%, masih di atas 85.8%,
+    # masih naik 79.9%) JELAS follow-through TERBAIK di antara semua bucket
+    # ber-n besar -- 0-3 hari (cross simultan/spike) LEBIH JELEK dari
+    # baseline pasar (+0.24% vs baseline +0.55%), 12-23 hari (justru window
+    # SWEET_SPOT approach di atas) MALAH NEGATIF/lemah sebagai continuation
+    # -- dua window yang genuinely BEDA tujuan, bukan kontradiksi.
+    MACD_FRESH_BREAKOUT_MIN_DAYS = 4
+    MACD_FRESH_BREAKOUT_MAX_DAYS = 11
+    macd_fresh_breakout_confirmed = bool(
+        macd_centerline_cross_today
+        and macd_cross_direction == "bullish"
+        and macd_cross_days_ago is not None
+        and MACD_FRESH_BREAKOUT_MIN_DAYS <= macd_cross_days_ago <= MACD_FRESH_BREAKOUT_MAX_DAYS
+    )
+
     # OBV divergence: the key check for "price looks fine but volume flow disagrees"
     obv_series = core.calculate_obv(close_prices, volumes)
     obv_divergence = core.detect_obv_divergence(close_prices, obv_series)
@@ -1857,6 +1897,8 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "macd_bullish_cross": macd_bullish_cross,
         "macd_bearish_cross": macd_bearish_cross,
         "macd_line_above_zero": macd_line_above_zero,
+        "macd_centerline_cross_today": macd_centerline_cross_today,
+        "macd_fresh_breakout_confirmed": macd_fresh_breakout_confirmed,  # HC-appropriate: konfirmasi breakout SUDAH terjadi, cross 4-11 hari dari signal cross -- lihat catatan riset di atas
         "tight_trailing_support": tight_trailing_support,  # informational/bonus only, TIDAK menggating apa pun -- lihat catatan di atas
         "ema9_slope_pct": ema9_slope_pct,
         "trailing_support_undercut_days": trailing_support_undercut_days,

@@ -1317,11 +1317,22 @@ async def high_conviction_command(update, context):
         sdt_wr = core.get_winrate_for_label(sdt_lane) if sdt_lane else ""
         sdt_lane_note = f"\n   📊 Lane {sdt_lane} (WR {sdt_wr})" if sdt_lane and sdt_wr else (f"\n   📊 Lane {sdt_lane}" if sdt_lane else "")
 
+        # MBSS v2 (user request — HC-appropriate MACD confirmation, beda dari
+        # macd_approach_tier SDT): konfirmasi breakout centerline HARI INI +
+        # timing 4-11 hari dari signal cross awal (backtest research_macd_
+        # centerline_breakout_validation.py) -- informational, TIDAK
+        # menggating is_high_conviction/kriteria HC.
+        macd_fresh_note = (
+            f"\n   📈 MACD fresh breakout confirmed (BACKTEST): centerline cross hari ini, "
+            f"{r.get('macd_cross_days_ago', '-')} hari dari signal cross awal — backtest historis follow-through terbaik"
+            if r.get("macd_fresh_breakout_confirmed") else ""
+        )
+
         lines.append(
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f}{daytrade_note}{streak_str} "
             f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
             f"   {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)} kriteria | "
-            f"RR {rr_str} | {label_str}{backbone_note}{sdt_lane_note}\n"
+            f"RR {rr_str} | {label_str}{backbone_note}{sdt_lane_note}{macd_fresh_note}\n"
             f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}{breakout_alert_note}"
             f"{core.format_fast_candidate_tag(r)}"
         )

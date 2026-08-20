@@ -318,6 +318,16 @@ async def check_stock(update, context):
             f"({result.get('dist_to_sma50_pct', '-')}% di atas SMA50) — pola pullback dalam uptrend mapan, "
             f"backtest historis win-rate tertinggi dari 3 tier MACD approach"
         )
+    # MBSS v2 (user request — HC-appropriate, BEDA dari macd_approach_tier di
+    # atas yang untuk SDT pre-breakout): konfirmasi centerline cross yang
+    # SUDAH terjadi HARI INI, backtest research_macd_centerline_breakout_
+    # validation.py — cross 4-11 hari dari signal cross awal follow-through
+    # terbaik (fwd5d +1.25%/+1.26%, masih di atas centerline 87%/86%).
+    if result.get("macd_fresh_breakout_confirmed"):
+        bb_line += (
+            f"\n📈 MACD fresh breakout confirmed (BACKTEST): centerline cross HARI INI, "
+            f"{result.get('macd_cross_days_ago', '-')} hari dari signal cross awal — cocok untuk follow FRESH breakout (positioning HC)"
+        )
 
     # AB-RC1 backbone (MBSS v2, user request — "bisa dibandingkan posisi
     # dengan entry lainnya"): angka rank yang SAMA dipakai konsisten di
