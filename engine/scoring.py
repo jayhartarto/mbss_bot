@@ -283,6 +283,29 @@ def compute_high_conviction_score(ticker: str, scoring: dict, hist_daily: pd.Dat
     if not price:
         return result
 
+    # MBSS v2 (user request, real case: MSIN/PPRE lolos HC walau volume
+    # kering -- kriteria 5/6 di bawah cuma "vote" di antara 7-8 kriteria
+    # lain, gampang diabaikan kalau kriteria lain kompak lolos duluan).
+    # Filter ABSOLUT di AWAL sekarang, bukan lagi cuma salah satu vote:
+    # value_traded (RUPIAH, BUKAN share count seperti kriteria 6 di bawah
+    # yang pakai 300rb LEMBAR -- angka lembar tidak seragam lintas tier
+    # harga, saham Rp100 vs Rp5000 sama-sama "300rb lembar" tapi nilai
+    # transaksinya beda 50x). Value_traded < floor = TIDAK lolos HC sama
+    # sekali, terlepas berapa kriteria lain yang lolos. Floor 3B REUSE
+    # dari compute_activity_score_v5's floor sendiri (engine/legacy_
+    # core.py) -- angka yang SUDAH established di codebase (dipakai juga
+    # sebagai batas bawah Activity score), bukan threshold baru yang
+    # dikarang tanpa dasar. Missing data (None) TIDAK menggagalkan --
+    # "missing = neutral", cuma value yang EKSPLISIT rendah yang di-reject.
+    HC_MIN_VALUE_TRADED_IDR = 3_000_000_000
+    value_traded = scoring.get("value_traded")
+    if value_traded is not None and value_traded < HC_MIN_VALUE_TRADED_IDR:
+        result["summary"].append(
+            f"❌ Value traded Rp{value_traded/1e9:.1f}M di bawah floor likuiditas Rp{HC_MIN_VALUE_TRADED_IDR/1e9:.0f}M "
+            f"— TIDAK lolos HC sama sekali, terlepas kriteria teknikal lain"
+        )
+        return result
+
     # --- Kriteria 1: Konsolidasi ketat <=20%, jendela 5 hari (direvisi dari
     # <12%/10 hari, user request — tujuan prediksi breakout 1-2 hari ke depan,
     # jendela lebih pendek lebih relevan daripada rata-rata 10 hari yang bisa
@@ -1639,6 +1662,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
             "vol_ratio": vol_ratio,
             "is_below_ema21": is_below_ema21,
             "is_below_sma50": is_below_sma50,
+            "value_traded": int(float(current_price * current_vol)),
         }, hist_daily=hist, action_id=decision["action_id"]),
         "action_id": decision["action_id"],
         "action_label_id": decision["action_label_id"],
