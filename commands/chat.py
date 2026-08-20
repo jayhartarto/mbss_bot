@@ -92,7 +92,9 @@ async def _fetch_live_ticker_context(ticker: str) -> dict | None:
 def _build_context_bundle(scored: dict, staleness_note, portfolio: dict, live_data: dict) -> dict:
     """Ringkasan konteks pasar buat Gemini — bukan seluruh field mentah scoring, biar fokus & hemat token."""
     broksum_data = nightly_engine.load_broksum_250()
-    qualifying, multi_broker_lines = commands_scan.compute_consensus_candidates(scored, broksum_data)
+    backbone_result, _ = nightly_engine.load_backbone_daily_allow_stale()
+    market_regime = (backbone_result or {}).get("market_regime")
+    qualifying, multi_broker_lines = commands_scan.compute_consensus_candidates(scored, broksum_data, market_regime)
 
     consensus_summary = [{
         "ticker": r["ticker"], "tools": r["_consensus_tools"],
@@ -101,7 +103,7 @@ def _build_context_bundle(scored: dict, staleness_note, portfolio: dict, live_da
         "risk_reward_at_max": r.get("targets", {}).get("risk_reward_at_max"),
     } for r in qualifying[:TANYA_CONSENSUS_TOP_N]]
 
-    hc_candidates = [r for r in scored.values() if r.get("high_conviction", {}).get("is_high_conviction")]
+    hc_candidates = [r for r in scored.values() if scoring_engine.is_high_conviction_regime_aware(r, market_regime)]
     for r in hc_candidates:
         r["_daytrade_score_hc"] = core.compute_daytrade_score(r)
     hc_candidates.sort(key=lambda r: r["_daytrade_score_hc"], reverse=True)

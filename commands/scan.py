@@ -267,7 +267,7 @@ async def screen_daytrade(update, context):
         # Refactor ranking:
         # Tidak lagi murni scalping_readiness snapshot.
         # Ranking final memisahkan Fresh Breakout dan Strong Continuation.
-        top_candidates = core.rank_screendaytrade_refactor(live_pool, core.DAYTRADE_FINAL_PICKS_COUNT)
+        top_candidates = core.rank_screendaytrade_refactor(live_pool, core.DAYTRADE_FINAL_PICKS_COUNT, (backbone_result or {}).get("market_regime"))
         if len(ready_pool) >= core.DAYTRADE_FINAL_PICKS_COUNT:
             filter_tier_note = filter_tier_note + " + Positive Bias lane refactor + live active breakout context"
         else:
@@ -1093,7 +1093,12 @@ async def high_conviction_command(update, context):
     pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
     scored = {r["ticker"]: r for r in pool}
 
-    candidates = [r for r in scored.values() if r.get("high_conviction", {}).get("is_high_conviction")]
+    # MBSS v2 (user request — "HC dan SDT justru butuh regime aware"):
+    # recheck regime-scaled (HC_MET_FRACTION_BY_REGIME, engine/scoring.py)
+    # di atas is_high_conviction mentah — regime lebih ketat dari R1 butuh
+    # criteria_met lebih tinggi dari fraction 0.70 lama.
+    hc_market_regime = (backbone_result or {}).get("market_regime")
+    candidates = [r for r in scored.values() if scoring_engine.is_high_conviction_regime_aware(r, hc_market_regime)]
     if not candidates:
         await core.safe_reply(update.message, "📋 Tidak ada saham HIGH CONVICTION di cache hari ini.")
         return
@@ -1226,7 +1231,7 @@ async def high_conviction_command(update, context):
         # /screendaytrade dan /gptpick (lihat _gptpick_format_item), bukan
         # cuma satu sisi yang kelihatan.
         try:
-            sdt_lane = core.compute_screendaytrade_positive_bias(r).get("lane")
+            sdt_lane = core.compute_screendaytrade_positive_bias(r, hc_market_regime).get("lane")
         except Exception:
             sdt_lane = None
         sdt_wr = core.get_winrate_for_label(sdt_lane) if sdt_lane else ""
@@ -1912,7 +1917,7 @@ async def strong_buy_command(update, context):
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
 
-def compute_consensus_candidates(scored: dict, broksum_data: dict) -> tuple[list, list]:
+def compute_consensus_candidates(scored: dict, broksum_data: dict, market_regime: str | None = None) -> tuple[list, list]:
     """
     Shared cross-tool tagging logic behind /consensus, extracted so /tanya can
     reuse the SAME "which tools agree on this ticker" computation instead of
@@ -1947,14 +1952,14 @@ def compute_consensus_candidates(scored: dict, broksum_data: dict) -> tuple[list
     for r in scored.values():
         tools = []
 
-        if r.get("high_conviction", {}).get("is_high_conviction"):
+        if scoring_engine.is_high_conviction_regime_aware(r, market_regime):
             tools.append("HIGH CONVICTION")
 
         if r.get("action_id") == "STRONG_BUY":
             tools.append("STRONG_BUY")
 
         try:
-            bias = core.compute_screendaytrade_positive_bias(r)
+            bias = core.compute_screendaytrade_positive_bias(r, market_regime)
             if bias.get("lane") in GOOD_SDT_LANES:
                 tools.append(f"SCREENDAYTRADE ({bias['lane']})")
         except Exception:
@@ -2030,7 +2035,7 @@ EXPLOSIVE_MAX_NAMES = 3
 SMART_MONEY_NET_SELL_THRESHOLD = -15.0  # mirrors the +15 threshold /hc's AKUMULASI section already uses for the buy side
 
 
-def _consensus_sdt_hc_selected(pool: list) -> tuple[set, set]:
+def _consensus_sdt_hc_selected(pool: list, market_regime: str | None = None) -> tuple[set, set]:
     """
     EOD-only "selected by /screendaytrade" / "selected by /hc" per AB-RC1
     doc section 6.1 — reuses compute_screendaytrade_positive_bias's lane
@@ -2048,11 +2053,11 @@ def _consensus_sdt_hc_selected(pool: list) -> tuple[set, set]:
     sdt_selected, hc_selected = set(), set()
     for r in pool:
         try:
-            if core.compute_screendaytrade_positive_bias(r).get("lane") in GOOD_SDT_LANES:
+            if core.compute_screendaytrade_positive_bias(r, market_regime).get("lane") in GOOD_SDT_LANES:
                 sdt_selected.add(r["ticker"])
         except Exception:
             pass
-        if r.get("high_conviction", {}).get("is_high_conviction"):
+        if scoring_engine.is_high_conviction_regime_aware(r, market_regime):
             hc_selected.add(r["ticker"])
     return sdt_selected, hc_selected
 
@@ -2192,7 +2197,7 @@ async def fast_candidates_command(update, context):
 
     scored, _ = nightly_engine.load_daily_scan_cache_allow_stale()
     pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
-    sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool)
+    sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool, backbone_result.get("market_regime"))
 
     lines = [f"🚀 FAST CANDIDATES — {len(fast_picks)} saham (speed direlaks vol_ratio>=1.5x & day_range_10d>=15% + WAJIB dijaga bandar, lolos Danger Gate)"]
     if backbone_staleness:
@@ -2272,7 +2277,7 @@ def _load_fastscan_candidacy_union(max_hc_names: int = 5) -> tuple[list, dict, d
         if not rejected and score >= min_score:
             _add(r["ticker"], r, "Explosive")
 
-    hc_candidates = [r for r in pool if r.get("high_conviction", {}).get("is_high_conviction")]
+    hc_candidates = [r for r in pool if scoring_engine.is_high_conviction_regime_aware(r, market_regime)]
     hc_candidates.sort(key=lambda r: r.get("scores", {}).get("final", 0), reverse=True)
     for r in hc_candidates[:max_hc_names]:
         _add(r["ticker"], r, "HC")
@@ -2388,9 +2393,9 @@ async def consensus_command(update, context):
     pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
     pool_by_ticker = {r["ticker"]: r for r in pool}
     top8_tickers = [r["ticker"] for r in backbone_result.get("top8", [])]
-    sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool)
-
     market_regime = backbone_result.get("market_regime", "R0_UNKNOWN")
+    sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool, market_regime)
+
     lines = [
         "📊 MARKET REGIME",
         market_regime,
@@ -2599,8 +2604,8 @@ async def consensus_live_command(update, context):
     pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
     pool_by_ticker = {r["ticker"]: r for r in pool}
     top8_tickers = [r["ticker"] for r in backbone_result.get("top8", [])]
-    sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool)
     market_regime = backbone_result.get("market_regime", "R0_UNKNOWN")
+    sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool, market_regime)
 
     prime_tickers = [t for t in top8_tickers if t in sdt_selected and t in hc_selected]
 

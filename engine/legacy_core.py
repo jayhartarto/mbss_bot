@@ -2927,7 +2927,7 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
 # new factors, etc). This makes it visible when a score difference between two runs is
 # due to a real formula change vs. genuine day-to-day market movement — comparing scores
 # across different versions isn't apples-to-apples.
-SCORING_FORMULA_VERSION = "3.17.5"  # v3.17.5: tambah compute_bull_flag_pullback_signal (PROTOTYPE, informational only) -- deteksi pola bull flag (pole+lower-high pullback terkontrol+reclaim), dari riset "lower high sebagai kandidat gate HC"; v3.17.4: HC (compute_high_conviction_score) sekarang punya hard floor value_traded (Rp3B, REUSE dari compute_activity_score_v5's floor) di AWAL -- real case MSIN/PPRE lolos HC walau volume kering karena kriteria volume cuma 1-2 vote dari 7-8, bisa diabaikan; v3.17.3: tambah field tight_trailing_support/ema9_slope_pct/trailing_support_undercut_days (informational/bonus only, real observasi live intraday bandar "menjaga" support yang naik bareng harga -- proxy dari OHLCV, bukan order-book asli); v3.17.2: compute_high_conviction_score sekarang menerima action_id, is_high_conviction dipaksa False kalau AVOID_SELL (real case RAJA: HC badge ticker yang core blend-nya sudah bilang HINDARI/JUAL); v3.17.1: tambah field macd_line_above_zero (dipakai TRUE EXPLOSIVE /consensus) di compute_factor_scoring; v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
+SCORING_FORMULA_VERSION = "3.17.6"  # v3.17.6: (a) compute_rr_at_current_price dipindah dari backbone.py ke sini, compute_entry_room_score_v5's RR sekarang pakai RR-at-current-price (bukan risk_reward_at_max yang understate risiko kalau harga sudah lari dari entry_max) -- konsisten dengan Backbone's danger/probability score; (b) compute_screendaytrade_positive_bias & rank_screendaytrade_refactor sekarang menerima market_regime, threshold fresh_ok/continuation_ok di-tighten per regime (SDT_LANE_TIGHTEN_BY_REGIME) -- sebelumnya threshold sama persis di R1 Bull Stable maupun R5 Stress; (c) LIQUIDITY_FLOOR_VALUE_TRADED_IDR jadi satu constant shared (Backbone gate + HC gate + SDT activity/volq soft-cap semua reuse angka yang sama, sebelumnya 3 angka 3B terpisah). v3.17.5: tambah compute_bull_flag_pullback_signal (PROTOTYPE, informational only) -- deteksi pola bull flag (pole+lower-high pullback terkontrol+reclaim), dari riset "lower high sebagai kandidat gate HC"; v3.17.4: HC (compute_high_conviction_score) sekarang punya hard floor value_traded (Rp3B, REUSE dari compute_activity_score_v5's floor) di AWAL -- real case MSIN/PPRE lolos HC walau volume kering karena kriteria volume cuma 1-2 vote dari 7-8, bisa diabaikan; v3.17.3: tambah field tight_trailing_support/ema9_slope_pct/trailing_support_undercut_days (informational/bonus only, real observasi live intraday bandar "menjaga" support yang naik bareng harga -- proxy dari OHLCV, bukan order-book asli); v3.17.2: compute_high_conviction_score sekarang menerima action_id, is_high_conviction dipaksa False kalau AVOID_SELL (real case RAJA: HC badge ticker yang core blend-nya sudah bilang HINDARI/JUAL); v3.17.1: tambah field macd_line_above_zero (dipakai TRUE EXPLOSIVE /consensus) di compute_factor_scoring; v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
 
 
 # NOTE (MBSS v2 refactor, Sprint 2 Tier 1.1): compute_factor_scoring moved to
@@ -5980,12 +5980,54 @@ def _v5_float(x, default=0.0):
         return default
 
 
+# MBSS v2 (user request — "liquidity gate perlu di implementasi sejak di
+# backbone, jadi tidak ada saham kering"): satu floor Rupiah SHARED dipakai
+# di tiga tempat (Backbone gate, HC's absolute gate, SDT activity/volq
+# score) — sebelumnya masing-masing punya angka 3B sendiri-sendiri
+# (hardcoded terpisah), sekarang satu sumber kebenaran di sini (module
+# paling bawah dalam rantai import: legacy_core <- scoring <- backbone).
+LIQUIDITY_FLOOR_VALUE_TRADED_IDR = 3_000_000_000  # Rp3B
+
+
+def compute_rr_at_current_price(scoring: dict) -> float:
+    """
+    RR di HARGA TERAKHIR (close), bukan risk_reward_at_max (RR di batas ATAS
+    range entry yang disarankan) — moved here (dari engine/backbone.py) MBSS
+    v2 user request supaya Layer-1 V5 sub-score (compute_entry_room_score_v5
+    di bawah) bisa reuse definisi yang SAMA persis dengan yang dipakai
+    Backbone's danger/probability score, bukan duplikat logic terpisah.
+    engine/backbone.py mempertahankan nama function yang sama sebagai thin
+    wrapper ke sini (backward-compat untuk caller lain yang sudah pakai
+    `backbone_engine.compute_rr_at_current_price`).
+
+    Returns 0 kalau harga sudah >= TP1 (tidak ada ruang naik lagi) atau
+    harga sudah <= cut_loss (SL sudah kebobol secara definisi) — dua-duanya
+    genuinely RR=0/negatif, bukan data hilang.
+    """
+    price = _v5_float(scoring.get("price"), 0)
+    targets = scoring.get("targets") or {}
+    tp_1 = _v5_float(targets.get("tp_1"), 0)
+    cut_loss = _v5_float(targets.get("cut_loss"), 0)
+    if not price or not tp_1 or not cut_loss or price <= cut_loss or price >= tp_1:
+        return 0.0
+    risk = price - cut_loss
+    reward = tp_1 - price
+    return round(reward / risk, 2) if risk > 0 else 0.0
+
+
 def compute_entry_room_score_v5(scoring: dict) -> dict:
     """Score whether there is still a healthy entry room instead of chasing near high/TP."""
     price = _v5_float(scoring.get("price"), 0)
     high = _v5_float(scoring.get("intraday_high"), 0) or price
     low = _v5_float(scoring.get("intraday_low"), 0) or price
-    rr = _v5_float((scoring.get("targets") or {}).get("risk_reward_at_max"), 0)
+    # MBSS v2 (user request — konsisten dengan Backbone's danger/probability
+    # score, lihat compute_rr_at_current_price docstring): RR-at-max
+    # understate risiko kalau harga sudah lari dari entry_max, yang sering
+    # kejadian di saat pick ini dibaca. RR-at-current-price dipakai di sini
+    # supaya "room" (dipakai lane fresh_score/continuation_score di
+    # compute_screendaytrade_positive_bias) menilai risiko entry SEKARANG,
+    # bukan entry di harga lama yang mungkin sudah terlewat.
+    rr = compute_rr_at_current_price(scoring)
     tp1 = _v5_float((scoring.get("targets") or {}).get("tp_1"), 0)
     rsi = _v5_float(scoring.get("rsi"), 0)
     cmf = _v5_float(scoring.get("cmf"), 0)
@@ -6437,7 +6479,29 @@ def format_fast_candidate_tag(r: dict, prefix: str = "\n   ") -> str:
     return f"{prefix}🚀 FAST CANDIDATE — prioritas entry saat OPEN besok, jangan tunggu konfirmasi tactical 30-40 menit (kriteria v2.0: speed + dijaga bandar, belum ada data forward — lihat FAST_CANDIDATE_FORMULA_VERSION)"
 
 
-def compute_screendaytrade_positive_bias(r: dict) -> dict:
+# MBSS v2 (user request — "HC dan SDT justru butuh regime aware"): SDT lane
+# threshold (fresh_ok/continuation_ok di bawah) sebelumnya SAMA PERSIS di
+# R1 Bull Stable maupun R5 Stress, walau Backbone's Danger Gate quantile
+# sudah lama regime-aware. Reuse filosofi yang sama seperti
+# DANGER_GATE_QUANTILE_BY_REGIME (engine/backbone.py) -- HANYA R1 yang
+# punya forward-validation nyata (semua tanggal simulasi doc AB-RC1 R1),
+# regime lain sengaja dibuat LEBIH KETAT (bukan ditebak longgar) sampai ada
+# data forward. Additive "tighten" ditambah ke tiap threshold poin (skala
+# 0-100 sub-score), BUKAN mengganti bobot formula fresh_score/continuation_
+# score itu sendiri -- placeholder, perlu revalidasi setelah data /winrate
+# per-regime cukup terkumpul (market_regime sudah di-snapshot di feature_
+# snapshot sejak BACKBONE_FORMULA_VERSION 1.8).
+SDT_LANE_TIGHTEN_BY_REGIME = {
+    "R1_BULL_STABLE": 0,
+    "R2_BULL_HIGH_VOL": 4,
+    "R3_SIDEWAYS": 4,
+    "R4_RISK_OFF": 8,
+    "R5_STRESS": 12,
+    "R0_UNKNOWN": 8,
+}
+
+
+def compute_screendaytrade_positive_bias(r: dict, market_regime: str | None = None) -> dict:
     """
     Refactor ranking /screendaytrade:
     Pisahkan Fresh Breakout lane dan Continuation lane.
@@ -6504,19 +6568,21 @@ def compute_screendaytrade_positive_bias(r: dict) -> dict:
         0.10 * v
     )
 
+    tighten = SDT_LANE_TIGHTEN_BY_REGIME.get(market_regime, SDT_LANE_TIGHTEN_BY_REGIME["R0_UNKNOWN"]) if market_regime else 0
+
     fresh_ok = (
-        b >= 68 and
-        rm >= 65 and
-        a >= 50 and
-        sf >= 65 and
+        b >= 68 + tighten and
+        rm >= 65 + tighten and
+        a >= 50 + tighten and
+        sf >= 65 + tighten and
         upside >= 7
     )
 
     continuation_ok = (
-        c >= 72 and
-        a >= 75 and
-        b >= 75 and
-        sf >= 75
+        c >= 72 + tighten and
+        a >= 75 + tighten and
+        b >= 75 + tighten and
+        sf >= 75 + tighten
     )
 
     # Sinyal whitelist accumulation/distribution — sudah dihitung SEKALI di
@@ -6627,17 +6693,23 @@ def compute_screendaytrade_positive_bias(r: dict) -> dict:
     }
 
 
-def rank_screendaytrade_refactor(candidates, count):
+def rank_screendaytrade_refactor(candidates, count, market_regime: str | None = None):
     """
     Ranking final /screendaytrade berbasis Positive Bias.
     Tidak menambah formula besar baru, hanya membersihkan lane:
     Fresh Breakout vs Continuation.
+
+    market_regime (MBSS v2, user request — "HC dan SDT justru butuh regime
+    aware"): diteruskan ke compute_screendaytrade_positive_bias supaya
+    threshold fresh_ok/continuation_ok ikut ketat/longgar sesuai regime
+    malam ini (lihat SDT_LANE_TIGHTEN_BY_REGIME). None = default R1-setara,
+    backward-compat untuk caller yang belum sempat diupdate.
     """
     enriched = []
 
     for r in candidates:
         try:
-            bias = compute_screendaytrade_positive_bias(r)
+            bias = compute_screendaytrade_positive_bias(r, market_regime)
             r["_positive_bias"] = bias["score"]
             r["_positive_lane"] = bias["lane"]
             r["_positive_priority"] = bias["priority"]

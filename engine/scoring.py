@@ -380,7 +380,7 @@ def compute_high_conviction_score(ticker: str, scoring: dict, hist_daily: pd.Dat
     # sebagai batas bawah Activity score), bukan threshold baru yang
     # dikarang tanpa dasar. Missing data (None) TIDAK menggagalkan --
     # "missing = neutral", cuma value yang EKSPLISIT rendah yang di-reject.
-    HC_MIN_VALUE_TRADED_IDR = 3_000_000_000
+    HC_MIN_VALUE_TRADED_IDR = core.LIQUIDITY_FLOOR_VALUE_TRADED_IDR  # MBSS v2: satu shared constant (engine/legacy_core.py), sekarang juga dipakai Backbone gate -- lihat BACKBONE_FORMULA_VERSION 1.9
     value_traded = scoring.get("value_traded")
     if value_traded is not None and value_traded < HC_MIN_VALUE_TRADED_IDR:
         result["summary"].append(
@@ -573,6 +573,42 @@ def compute_high_conviction_score(ticker: str, scoring: dict, hist_daily: pd.Dat
         )
     return result
 
+
+# MBSS v2 (user request — "HC dan SDT justru butuh regime aware"): HC's
+# checkable-criteria fraction (0.70, dipakai di atas) TIDAK bisa dihitung
+# regime-aware DI DALAM compute_high_conviction_score itu sendiri --
+# classify_market_regime baru bisa dihitung SETELAH seluruh universe
+# selesai di-score malam ini (breadth-nya butuh action_id semua ticker,
+# lihat engine/nightly.py run_nightly_full_scan urutan compute_backbone
+# SETELAH fetch_tickers_scored_with_cache). Jadi regime-awareness HC
+# diterapkan sebagai RECHECK di sini, dibaca ulang dari criteria_met/
+# criteria_checkable yang SUDAH tersimpan di r["high_conviction"] (tanpa
+# perlu hist_daily lagi, murah) begitu market_regime sudah diketahui --
+# dipanggil di command layer (commands/scan.py) yang sudah punya
+# backbone_result["market_regime"], BUKAN mengganti r["high_conviction"]
+# ["is_high_conviction"] yang sudah frozen di nightly cache. Filosofi sama
+# dengan DANGER_GATE_QUANTILE_BY_REGIME/SDT_LANE_TIGHTEN_BY_REGIME -- hanya
+# R1 tervalidasi forward, regime lain sengaja lebih ketat, placeholder.
+HC_MET_FRACTION_BY_REGIME = {
+    "R1_BULL_STABLE": 0.70,
+    "R2_BULL_HIGH_VOL": 0.75,
+    "R3_SIDEWAYS": 0.75,
+    "R4_RISK_OFF": 0.80,
+    "R5_STRESS": 0.85,
+    "R0_UNKNOWN": 0.80,
+}
+
+
+def is_high_conviction_regime_aware(r: dict, market_regime: str | None) -> bool:
+    """Regime-scaled recheck of an already-computed r["high_conviction"] verdict — see HC_MET_FRACTION_BY_REGIME above for why this can't live inside compute_high_conviction_score itself."""
+    hc = r.get("high_conviction") or {}
+    checkable = hc.get("criteria_checkable", 0) or 0
+    met = hc.get("criteria_met", 0) or 0
+    if checkable <= 0:
+        return bool(hc.get("is_high_conviction", False))
+    fraction = HC_MET_FRACTION_BY_REGIME.get(market_regime, HC_MET_FRACTION_BY_REGIME["R0_UNKNOWN"]) if market_regime else HC_MET_FRACTION_BY_REGIME["R1_BULL_STABLE"]
+    threshold = max(5, round(checkable * fraction))
+    return met >= threshold and r.get("action_id") != "AVOID_SELL"
 
 
 def compute_brokersum_priority(scoring: dict, total_stock_value: float = 0) -> float:

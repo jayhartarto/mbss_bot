@@ -46,7 +46,7 @@ import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.8"  # 1.8: tambah market_regime ke tiap all_scored[ticker] (supaya /winrate bisa disegmentasi per regime -- "snapshot granular utk walk-forward" user request). 1.7: tambah predicted_danger_vnext/danger_bucket_breakdown_vnext (SHADOW ONLY, tidak dipakai gate/rank) ke all_scored[ticker] -- lihat compute_danger_score_bucketed_vnext, dari mbss_formula_diagnosis_claude_agent.md's double-counting concern. ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.9"  # 1.9: (a) liquidity gate Rp3B diterapkan SEKALI di compute_backbone (LIQUIDITY_FLOOR_VALUE_TRADED_IDR, reuse dari legacy_core.py) sebelum danger gate -- sebelumnya cuma HC/SDT yang punya floor sendiri-sendiri, saham tipis bisa lolos Backbone lalu ditolak belakangan; (b) compute_rr_at_current_price dipindah ke core (thin wrapper di sini) supaya Layer-1 room score reuse definisi yang sama, bukan risk_reward_at_max yang understate risiko. 1.8: tambah market_regime ke tiap all_scored[ticker] (supaya /winrate bisa disegmentasi per regime -- "snapshot granular utk walk-forward" user request). 1.7: tambah predicted_danger_vnext/danger_bucket_breakdown_vnext (SHADOW ONLY, tidak dipakai gate/rank) ke all_scored[ticker] -- lihat compute_danger_score_bucketed_vnext, dari mbss_formula_diagnosis_claude_agent.md's double-counting concern. ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
@@ -305,28 +305,14 @@ def compute_danger_score_bucketed_vnext(scoring: dict, market_regime: str, day_r
 
 def compute_rr_at_current_price(scoring: dict) -> float:
     """
-    RR di HARGA TERAKHIR (close), bukan risk_reward_at_max (RR di batas ATAS
-    range entry yang disarankan) — koreksi user (real case: range entry
-    biasanya area pullback DI BAWAH harga sekarang, jadi kalau harga sudah
-    lewat entry_max, risk_reward_at_max under-estimate risiko beli di harga
-    sekarang; RR asli kalau masuk SEKARANG bisa lebih jelek dari yang
-    ditampilkan). Dihitung lokal di backbone.py, TIDAK mengubah
-    risk_reward_at_max di scoring['targets'] (field itu dipakai fitur lain
-    di luar backbone — /check, /myportfolio, dll — scoped di sini saja).
-
-    Returns 0 kalau harga sudah >= TP1 (tidak ada ruang naik lagi) atau
-    harga sudah <= cut_loss (SL sudah kebobol secara definisi) — dua-duanya
-    genuinely RR=0/negatif, bukan data hilang.
+    MBSS v2: definisi PINDAH ke engine/legacy_core.py (core.compute_rr_at_
+    current_price) supaya Layer-1 V5 room score bisa reuse yang sama persis
+    — fungsi ini sekarang thin wrapper, backward-compat untuk caller yang
+    sudah pakai `backbone_engine.compute_rr_at_current_price` (commands/
+    scan.py, backtest/sanity_check_backbone.py) dan semua call site lokal
+    di file ini.
     """
-    price = _f(scoring, "price")
-    targets = scoring.get("targets") or {}
-    tp_1 = _f(targets, "tp_1")
-    cut_loss = _f(targets, "cut_loss")
-    if not price or not tp_1 or not cut_loss or price <= cut_loss or price >= tp_1:
-        return 0.0
-    risk = price - cut_loss
-    reward = tp_1 - price
-    return round(reward / risk, 2) if risk > 0 else 0.0
+    return core.compute_rr_at_current_price(scoring)
 
 
 def compute_probability_score(scoring: dict, market_regime: str) -> float:
@@ -419,6 +405,24 @@ def compute_backbone(results: list, market_regime: str) -> dict:
         }
     """
     candidates = [r for r in results if r and r.get("ticker") and r.get("price")]
+
+    # MBSS v2 (user request — "liquidity gate perlu di implementasi sejak
+    # di backbone, jadi tidak ada saham kering"): sebelumnya HC punya gate
+    # Rp3B sendiri dan SDT punya soft-cap Rp3B/5B sendiri, tapi Backbone
+    # (Danger Gate + Probability Rank, konsumsi utama /hc & /screendaytrade
+    # lewat filter_to_gate_survivors) sama sekali tidak punya liquidity
+    # gate — saham tipis bisa lolos danger gate + dapat probability rank
+    # bagus, cuma ditolak belakangan oleh HC. Filter SEKALI di sini supaya
+    # semua downstream consumer (top8, all_scored, entry_rank, /consensus)
+    # otomatis warisi floor yang sama, bukan tiap tool re-implement floor
+    # sendiri-sendiri. "missing = neutral": value_traded None TIDAK
+    # direject, cuma nilai EKSPLISIT di bawah floor. Reuse
+    # LIQUIDITY_FLOOR_VALUE_TRADED_IDR (engine/legacy_core.py) — floor yang
+    # SAMA dipakai HC's absolute gate & SDT's activity/volq soft-cap.
+    candidates = [
+        r for r in candidates
+        if r.get("value_traded") is None or r.get("value_traded") >= core.LIQUIDITY_FLOOR_VALUE_TRADED_IDR
+    ]
 
     day_range_values = [r.get("day_range_pct_10d") for r in candidates if r.get("day_range_pct_10d") is not None]
 
