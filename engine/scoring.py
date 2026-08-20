@@ -241,6 +241,89 @@ def classify_risk_character(scoring: dict) -> dict:
 
 
 
+def compute_bull_flag_pullback_signal(hist_daily: pd.DataFrame, lookback: int = 15, min_flag_bars: int = 2, max_retracement_pct: float = 50.0) -> dict:
+    """
+    PROTOTYPE (MBSS v2, user request — riset "lower high" sebagai kandidat
+    gate HC, lihat diskusi /finance): deteksi pola bull flag dari daily
+    bars — pole (gerak naik kuat) diikuti flag (pullback terkontrol dengan
+    LOWER HIGH yang drift turun ringan + volume mengecil), lalu trigger =
+    harga hari ini reclaim HIGH FLAG-nya sendiri (bukan high pole).
+
+    PENTING, dua makna "lower high" yang beda arah (lihat riset): lower
+    high di PULLBACK PENDEK dalam uptrend besar (yang dideteksi di sini)
+    = pola KONTINUASI bullish (bull flag). Lower high di SWING UTAMA
+    (jangka lebih panjang) = justru sinyal AWAL PELEMAHAN/reversal —
+    fungsi ini SENGAJA cuma menangani makna pertama (flag pendek), bukan
+    dipakai untuk baca swing utama.
+
+    BELUM di-wire ke HC gate/skor apa pun — murni informational/prototype
+    dulu, sesuai disiplin tag-and-track (sama seperti tight_trailing_
+    support/fast_candidate) — validasi forward dulu sebelum dipertimbangkan
+    masuk Stage 2 funnel HC yang diusulkan.
+
+    Deteksi SEDERHANA, bukan swing-detection penuh:
+    1. Pole: dari LOW terendah di window ke swing HIGH (max High) di window.
+    2. Flag: segmen SETELAH swing high sampai KEMARIN (hari ini dikecualikan
+       — itu kandidat breakout day, bukan bagian pola).
+    3. Flag valid kalau: highs drift TURUN (avg paruh kedua < paruh
+       pertama), volume flag < volume pole (kontraksi >=15%), retracement
+       (swing_high - flag_low)/(swing_high - pole_low) <= max_retracement_pct.
+    4. Trigger: close HARI INI > flag_high (reclaim, bukan pole_high).
+    """
+    if hist_daily is None or len(hist_daily) < lookback + 1:
+        return {"available": False}
+
+    window = hist_daily.tail(lookback + 1)
+    today = window.iloc[-1]
+    history = window.iloc[:-1]  # semua SEBELUM hari ini (kandidat breakout)
+
+    pole_low = float(history["Low"].min())
+    swing_high_pos = int(history["High"].values.argmax())
+    swing_high = float(history["High"].iloc[swing_high_pos])
+
+    flag = history.iloc[swing_high_pos + 1:]
+    if len(flag) < min_flag_bars:
+        return {"available": False, "reason": f"flag terlalu pendek (<{min_flag_bars} bar sejak swing high)"}
+
+    pole_range = swing_high - pole_low
+    if pole_range <= 0:
+        return {"available": False, "reason": "pole range invalid"}
+
+    flag_low = float(flag["Low"].min())
+    retracement_pct = (swing_high - flag_low) / pole_range * 100
+
+    # Drift highs selama flag — bandingkan rata-rata paruh pertama vs kedua
+    # (proxy sederhana, bukan regresi penuh — cukup untuk prototype).
+    mid = max(1, len(flag) // 2)
+    highs_first_half = flag["High"].iloc[:mid].mean()
+    highs_second_half = flag["High"].iloc[mid:].mean() if len(flag) > mid else flag["High"].iloc[-1]
+    drifting_down = highs_second_half < highs_first_half
+
+    pole_bars = history.iloc[:swing_high_pos + 1]
+    pole_avg_vol = float(pole_bars["Volume"].mean()) if not pole_bars.empty else 0.0
+    flag_avg_vol = float(flag["Volume"].mean())
+    volume_contracted = pole_avg_vol > 0 and flag_avg_vol < pole_avg_vol * 0.85
+
+    flag_high = float(flag["High"].max())
+    today_close = float(today["Close"])
+    reclaimed = today_close > flag_high
+
+    valid_pullback = drifting_down and volume_contracted and retracement_pct <= max_retracement_pct
+    is_bull_flag_breakout = bool(valid_pullback and reclaimed)
+
+    return {
+        "available": True,
+        "is_bull_flag_breakout": is_bull_flag_breakout,
+        "drifting_down": bool(drifting_down),
+        "volume_contracted": bool(volume_contracted),
+        "retracement_pct": round(retracement_pct, 1),
+        "flag_bars": len(flag),
+        "flag_high": round(flag_high, 2),
+        "reclaimed_flag_high": bool(reclaimed),
+        "pole_range_pct": round(pole_range / pole_low * 100, 1) if pole_low else None,
+    }
+
+
 def compute_high_conviction_score(ticker: str, scoring: dict, hist_daily: pd.DataFrame = None, action_id: str = None) -> dict:
     """
     8 kriteria High Conviction Breakout dari framework Minervini/IBD style
@@ -1664,6 +1747,10 @@ def compute_factor_scoring(ticker, include_quote_check=True):
             "is_below_sma50": is_below_sma50,
             "value_traded": int(float(current_price * current_vol)),
         }, hist_daily=hist, action_id=decision["action_id"]),
+        # PROTOTYPE (user request — riset "lower high" bull flag sebagai
+        # kandidat gate HC): murni informational, BELUM menggating apa pun.
+        # Reuse `hist` yang sudah di-fetch, zero cost tambahan.
+        "bull_flag_pullback": compute_bull_flag_pullback_signal(hist),
         "action_id": decision["action_id"],
         "action_label_id": decision["action_label_id"],
         "action_ceiling_applied": decision["ceiling_applied"],

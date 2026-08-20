@@ -2315,6 +2315,9 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
             "tight_trailing_support": r.get("tight_trailing_support"),
             "ema9_slope_pct": r.get("ema9_slope_pct"),
             "trailing_support_undercut_days": r.get("trailing_support_undercut_days"),
+            # PROTOTYPE (user request — riset "lower high" bull flag sbg
+            # kandidat gate HC): murni informational, belum menggating.
+            "bull_flag_pullback": r.get("bull_flag_pullback"),
         }
 
         # MBSS v2 (user request — evaluasi winrate PER BROKER smart money):
@@ -2924,7 +2927,7 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
 # new factors, etc). This makes it visible when a score difference between two runs is
 # due to a real formula change vs. genuine day-to-day market movement — comparing scores
 # across different versions isn't apples-to-apples.
-SCORING_FORMULA_VERSION = "3.17.4"  # v3.17.4: HC (compute_high_conviction_score) sekarang punya hard floor value_traded (Rp3B, REUSE dari compute_activity_score_v5's floor) di AWAL -- real case MSIN/PPRE lolos HC walau volume kering karena kriteria volume cuma 1-2 vote dari 7-8, bisa diabaikan; v3.17.3: tambah field tight_trailing_support/ema9_slope_pct/trailing_support_undercut_days (informational/bonus only, real observasi live intraday bandar "menjaga" support yang naik bareng harga -- proxy dari OHLCV, bukan order-book asli); v3.17.2: compute_high_conviction_score sekarang menerima action_id, is_high_conviction dipaksa False kalau AVOID_SELL (real case RAJA: HC badge ticker yang core blend-nya sudah bilang HINDARI/JUAL); v3.17.1: tambah field macd_line_above_zero (dipakai TRUE EXPLOSIVE /consensus) di compute_factor_scoring; v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
+SCORING_FORMULA_VERSION = "3.17.5"  # v3.17.5: tambah compute_bull_flag_pullback_signal (PROTOTYPE, informational only) -- deteksi pola bull flag (pole+lower-high pullback terkontrol+reclaim), dari riset "lower high sebagai kandidat gate HC"; v3.17.4: HC (compute_high_conviction_score) sekarang punya hard floor value_traded (Rp3B, REUSE dari compute_activity_score_v5's floor) di AWAL -- real case MSIN/PPRE lolos HC walau volume kering karena kriteria volume cuma 1-2 vote dari 7-8, bisa diabaikan; v3.17.3: tambah field tight_trailing_support/ema9_slope_pct/trailing_support_undercut_days (informational/bonus only, real observasi live intraday bandar "menjaga" support yang naik bareng harga -- proxy dari OHLCV, bukan order-book asli); v3.17.2: compute_high_conviction_score sekarang menerima action_id, is_high_conviction dipaksa False kalau AVOID_SELL (real case RAJA: HC badge ticker yang core blend-nya sudah bilang HINDARI/JUAL); v3.17.1: tambah field macd_line_above_zero (dipakai TRUE EXPLOSIVE /consensus) di compute_factor_scoring; v3.17.0: Bollinger Band band-touch adjustment ke sentiment_score (+-1.5, digate ADX/EMA21 biar band walking di trend kuat tidak salah dibaca sebagai reversal) — lihat compute_factor_scoring di engine/scoring.py.
 
 
 # NOTE (MBSS v2 refactor, Sprint 2 Tier 1.1): compute_factor_scoring moved to

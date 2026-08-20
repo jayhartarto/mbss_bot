@@ -289,6 +289,15 @@ async def check_stock(update, context):
     # only, belum ada bukti forward, jangan dibaca sebagai konfirmasi kuat.
     if result.get("tight_trailing_support"):
         bb_line += f"\n🛡️ Trailing support rapi (LOW mengikuti EMA9 naik {result.get('ema9_slope_pct', '-')}%/10hr, {result.get('trailing_support_undercut_days', '-')} hari undercut) — indikasi dijaga, belum tervalidasi forward"
+    # PROTOTYPE (user request — riset "lower high" bull flag sbg kandidat
+    # gate HC): murni informational, belum menggating apa pun, belum ada
+    # bukti forward.
+    bull_flag = result.get("bull_flag_pullback") or {}
+    if bull_flag.get("is_bull_flag_breakout"):
+        bb_line += (
+            f"\n🚩 Bull flag reclaim (PROTOTYPE): pullback {bull_flag.get('retracement_pct', '-')}% dari pole, "
+            f"{bull_flag.get('flag_bars', '-')} bar, close reklaim flag high {bull_flag.get('flag_high', '-')} — belum tervalidasi forward"
+        )
 
     # AB-RC1 backbone (MBSS v2, user request — "bisa dibandingkan posisi
     # dengan entry lainnya"): angka rank yang SAMA dipakai konsisten di
