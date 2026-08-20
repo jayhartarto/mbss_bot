@@ -400,7 +400,53 @@ async def screen_daytrade(update, context):
             f"{core.format_fast_candidate_tag(r)}"
         )
 
-    buttons = core.build_check_buttons([r["ticker"] for r in top_candidates])
+    # MBSS v2 (user request — "ini harus keluar ke rekomendasi SDT",
+    # positioning SDT = cari setup SEBELUM breakout vs HC = follow breakout
+    # yang SUDAH terjadi): section TERPISAH, BUKAN dicampur ke ranking
+    # FRESH/CONT di atas — kandidat pre-breakout secara struktural akan
+    # gagal kriteria breakout/continuation lane (sama alasan PRIORITY
+    # ACCUMULATION jadi lane sendiri). Sumber: SELURUH pool Danger Gate
+    # survivor malam ini (`results`, bukan cuma top_candidates yang sudah
+    # dipersempit V5), supaya tidak kehilangan kandidat yang secara
+    # definisi belum breakout. Backtest OHLCV lokal saja (n=24.727, 3
+    # iterasi — lihat compute_factor_scoring), BELUM ada histori /winrate
+    # LIVE — dikunci TERPISAH (source="screendaytrade_macd_approach")
+    # supaya validasi forward bisa mulai, TIDAK dicampur ke skor/lane
+    # FRESH/CONT yang sudah tervalidasi live.
+    macd_approach_candidates = [
+        r for r in results
+        if r.get("macd_approach_tier") in ("SWEET_SPOT", "SQUEEZE_RESCUE")
+    ]
+    if macd_approach_candidates:
+        def _macd_bb_prob(r):
+            bb = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            return bb.get("probability_score", 0) if bb else 0
+        macd_approach_candidates.sort(key=_macd_bb_prob, reverse=True)
+        macd_approach_candidates = macd_approach_candidates[:8]
+
+        await asyncio.to_thread(
+            core.lock_daily_daytrade_picks, macd_approach_candidates, "screendaytrade_macd_approach",
+            (backbone_result or {}).get("all_scored", {})
+        )
+
+        lines.append(
+            "\n📐 SETUP PRA-BREAKOUT — MACD approach (BACKTEST OHLCV lokal, BELUM ada histori /winrate live — watchlist, bukan entry final)"
+        )
+        for r in macd_approach_candidates:
+            tier = r.get("macd_approach_tier")
+            tier_label = "SWEET SPOT" if tier == "SWEET_SPOT" else "SQUEEZE RESCUE"
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            backbone_note = (
+                f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
+                if bb_info and "entry_rank" in bb_info else ""
+            )
+            lines.append(
+                f"  • {r['ticker']} — {tier_label}, cross bullish {r.get('macd_cross_days_ago', '-')} hari lalu"
+                f"{' + squeeze aktif' if tier == 'SQUEEZE_RESCUE' else ''} | Harga {r.get('price')}{backbone_note}"
+                f"{market_engine.format_sector_tag(r.get('sector'))}"
+            )
+
+    buttons = core.build_check_buttons([r["ticker"] for r in top_candidates] + [r["ticker"] for r in macd_approach_candidates])
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
     # Tombol upload Broker Summary ALL 3 hari untuk 12 saham hasil radar.

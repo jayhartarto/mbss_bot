@@ -1593,6 +1593,60 @@ def compute_factor_scoring(ticker, include_quote_check=True):
             if bb_adjustment:
                 sentiment_score = max(1.0, min(10.0, sentiment_score + bb_adjustment))
 
+    # MBSS v2 (user request — riset "macd centerline approach" sbg sinyal
+    # SETUP SDT, positioning SDT = cari kandidat SEBELUM breakout vs HC =
+    # follow breakout yang SUDAH terjadi): backtest lokal 3 iterasi
+    # (backtest/research_macd_approach_score_v1/v2/v3.py, OHLCV lokal,
+    # n=24.727 ticker-hari, TANPA fetch tambahan) -- kesimpulan:
+    # - Composite skor "makin baru cross + makin dekat centerline" (v1)
+    #   TERBALIK arah: skor tertinggi (cross 1 hari lalu) justru forward
+    #   return PALING JELEK (fwd3d -0.01%, di bawah baseline pasar acak
+    #   +0.22%) -- momentum yang membawa MACD nyaris ke centerline sudah
+    #   "kepakai", classic sell-the-news.
+    # - Forward return di-bucket PER cross_days_ago (v2/v3, window
+    #   diperpanjang sampai 40 hari): NAIK dari bin 0-3 hari (di bawah
+    #   baseline) -> PUNCAK di bin 16-19/20-23 hari (fwd10d +2.13%/+1.59%,
+    #   jelas di atas baseline +1.29%) -> TURUN lagi setelah ~24 hari
+    #   (kembali ke/bawah baseline, makin noisy krn n mengecil). Plateau
+    #   genuine, BUKAN "makin lama makin baik" tanpa batas.
+    # - Cross-tab squeeze x rentang cross_days_ago: squeeze itu efek KUAT
+    #   TAPI TIDAK SERAGAM -- margin besar di rentang AWAL (0-13 hari:
+    #   +2.02% dengan squeeze vs +0.40% tanpa, n=5875/14610) tapi nyaris
+    #   hilang di rentang TENGAH/sweet-spot (14-26 hari: +1.69% vs +1.51%,
+    #   n=2047/1509) -- squeeze "menyelamatkan" cross yang masih terlalu
+    #   baru jadi setara sweet spot, tapi tidak menambah nilai lagi begitu
+    #   sudah masuk sweet spot (timing itu sendiri sudah cukup selektif).
+    #
+    # TIER (informational SDT tag, BELUM masuk skor/gate apa pun -- sama
+    # disiplin tag-and-track dengan bollinger_squeeze/bull_flag_pullback,
+    # backtest OHLCV retrospektif saja, BELUM ada histori /winrate LIVE):
+    #   SWEET_SPOT: cross bullish 14-23 hari lalu, MACD line masih di
+    #     bawah centerline TAPI slope 3-hari POSITIF (syarat wajib -- fix
+    #     kasus ASGR: histogram menyusut tapi MACD line-nya sendiri masih
+    #     turun -> gagal syarat ini, TIDAK dapat tag).
+    #   SQUEEZE_RESCUE: cross bullish 0-11 hari lalu (masih "AWAL", lemah
+    #     sendirian) TAPI bollinger_squeeze aktif -- setara performa sweet
+    #     spot (data di atas).
+    #   None (field tetap disimpan, tag kosong): cross 12-13/24+ hari lalu,
+    #     atau AWAL tanpa squeeze -- zona transisi/lemah, sengaja tanpa tag.
+    # Reuse macd_cross_days_ago/macd_cross_direction yang SUDAH dihitung di
+    # atas (loop identik dengan backtest scripts) -- TIDAK re-derive.
+    macd_approach_tier = None
+    macd_line_slope_3d = None
+    if len(macd_line) >= 4:
+        macd_line_slope_3d = round(float(macd_line.iloc[-1] - macd_line.iloc[-4]), 4)
+    if (
+        macd_cross_direction == "bullish"
+        and macd_cross_days_ago is not None
+        and not macd_line_above_zero
+        and macd_line_slope_3d is not None
+        and macd_line_slope_3d > 0
+    ):
+        if 14 <= macd_cross_days_ago <= 23:
+            macd_approach_tier = "SWEET_SPOT"
+        elif macd_cross_days_ago <= 11 and bollinger_squeeze:
+            macd_approach_tier = "SQUEEZE_RESCUE"
+
     # OBV divergence: the key check for "price looks fine but volume flow disagrees"
     obv_series = core.calculate_obv(close_prices, volumes)
     obv_divergence = core.detect_obv_divergence(close_prices, obv_series)
@@ -1771,6 +1825,8 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "bb_signal_note": bb_signal_note,  # near_lower_band_bounce_candidate / near_upper_band_caution / band_walking_up / band_walking_down / None
         "macd_cross_days_ago": macd_cross_days_ago,
         "macd_cross_direction": macd_cross_direction,
+        "macd_line_slope_3d": macd_line_slope_3d,
+        "macd_approach_tier": macd_approach_tier,  # SWEET_SPOT / SQUEEZE_RESCUE / None -- lihat catatan riset di atas, informational only
         "is_new_high_20d": is_new_high_20d,
         "relative_strength_vs_ihsg": relative_strength_vs_ihsg,
         "consecutive_low_volume_days": consecutive_low_volume_days,

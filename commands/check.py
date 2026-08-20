@@ -298,6 +298,20 @@ async def check_stock(update, context):
             f"\n🚩 Bull flag reclaim (PROTOTYPE): pullback {bull_flag.get('retracement_pct', '-')}% dari pole, "
             f"{bull_flag.get('flag_bars', '-')} bar, close reklaim flag high {bull_flag.get('flag_high', '-')} — belum tervalidasi forward"
         )
+    # MBSS v2 (user request — setup pre-breakout SDT via MACD centerline
+    # approach): backtest OHLCV lokal (n=24.727), belum ada histori
+    # /winrate LIVE — informational, sama disiplin dengan bull_flag_pullback.
+    macd_approach_tier = result.get("macd_approach_tier")
+    if macd_approach_tier == "SWEET_SPOT":
+        bb_line += (
+            f"\n📐 MACD approach SWEET SPOT (BACKTEST): cross bullish {result.get('macd_cross_days_ago', '-')} hari lalu, "
+            f"masih di bawah centerline, MACD line masih naik — backtest historis fwd10d rata-rata di atas baseline"
+        )
+    elif macd_approach_tier == "SQUEEZE_RESCUE":
+        bb_line += (
+            f"\n📐 MACD approach + squeeze (BACKTEST): cross bullish {result.get('macd_cross_days_ago', '-')} hari lalu (masih awal) "
+            f"TAPI bollinger squeeze aktif — backtest historis setara performa sweet spot"
+        )
 
     # AB-RC1 backbone (MBSS v2, user request — "bisa dibandingkan posisi
     # dengan entry lainnya"): angka rank yang SAMA dipakai konsisten di
