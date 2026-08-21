@@ -1656,12 +1656,67 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     macd_line_slope_3d = None
     if len(macd_line) >= 4:
         macd_line_slope_3d = round(float(macd_line.iloc[-1] - macd_line.iloc[-4]), 4)
+
+    # MBSS v2 (user request — kurangi noise SDT, bagian 1: "slope>0 recehan
+    # tidak cukup"): backtest research_macd_approach_depth_and_range.py
+    # Report D (quintile magnitude slope) menunjukkan slope yang cuma
+    # SEDIKIT positif (Q1, ~0-0.18%/3hari) forward return-nya jauh lebih
+    # lemah (fwd10d +0.60%) dari slope yang MEANINGFUL (Q4, +1.52%) --
+    # syarat lama (`slope>0`, biner) meloloskan kedua-duanya sama rata.
+    # Diganti jadi PERCENTILE ADAPTIF vs trailing histori TICKER INI SENDIRI
+    # (pola SAMA dengan bollinger_squeeze di atas -- house style "adaptive
+    # percentile vs fixed threshold"), bukan angka mentah cross-sectional
+    # dari satu backtest run (yang scale-nya beda tiap ticker/harga).
+    # Ambang 50 (median historinya sendiri) placeholder KONSERVATIF, perlu
+    # direvalidasi forward.
+    MACD_SLOPE_MEANINGFUL_PERCENTILE = 50.0
+    macd_slope_percentile = None
+    _macd_slope_pct_series = (macd_line.diff(3) / close_prices) * 100
+    _macd_slope_pct_history = _macd_slope_pct_series.dropna().tail(core.MIN_HISTORY_FOR_ADAPTIVE)
+    if len(_macd_slope_pct_history) >= 20:
+        macd_slope_percentile = round(
+            core.percentile_rank(_macd_slope_pct_history.iloc[:-1], _macd_slope_pct_history.iloc[-1]) * 100, 1
+        )
+
+    # MBSS v2 (user request — kurangi noise SDT, bagian 2: "histogram
+    # bearish masih tebal parabolic"): BUKAN buang histori bearish yang
+    # dalam (user eksplisit itu boleh) -- exclude HANYA kombinasi spesifik
+    # yang backtest (research_macd_histogram_thin_before_flip.py, Report B,
+    # n=4927 event) buktikan genuinely jelek: histogram SEHARI SEBELUM flip
+    # masih TEBAL (tercile atas magnitude, adaptif vs histori ticker
+    # sendiri) DAN TIDAK MENYUSUT (belum melandai 3 hari terakhir, "masih
+    # parabolic" sampai detik terakhir) -- sel itu fwd10d cuma +0.19%
+    # (n=372), jauh di bawah sel TEBAL+menyusut (+1.27%) atau kombinasi
+    # lain manapun. Report A (thinness_abs quintile independen) sendiri
+    # noisy/tidak monoton -- BUKAN thinness saja yang menentukan, harus
+    # dikombinasi dengan tren deselerasi.
+    macd_histogram_noise_exclude = False
+    if macd_cross_direction == "bullish" and macd_cross_days_ago is not None:
+        idx_before_flip = -1 - macd_cross_days_ago
+        idx_3d_before_that = idx_before_flip - 3
+        if len(macd_hist) > abs(idx_3d_before_that):
+            price_before_flip = close_prices.iloc[idx_before_flip]
+            price_3d_before = close_prices.iloc[idx_3d_before_that]
+            if price_before_flip and price_3d_before:
+                thinness_now = abs(float(macd_hist.iloc[idx_before_flip]) / price_before_flip * 100)
+                thinness_3d_ago = abs(float(macd_hist.iloc[idx_3d_before_that]) / price_3d_before * 100)
+                decelerating = thinness_now < thinness_3d_ago
+                _hist_mag_series = (macd_hist.abs() / close_prices) * 100
+                _hist_mag_trailing = _hist_mag_series.dropna().tail(core.MIN_HISTORY_FOR_ADAPTIVE)
+                if len(_hist_mag_trailing) >= 20:
+                    value_before_flip = _hist_mag_series.iloc[idx_before_flip]
+                    if pd.notna(value_before_flip):
+                        hist_magnitude_percentile = core.percentile_rank(_hist_mag_trailing, value_before_flip) * 100
+                        is_thick = hist_magnitude_percentile >= 67.0  # tercile atas, cocok temuan backtest
+                        macd_histogram_noise_exclude = bool(is_thick and not decelerating)
+
     if (
         macd_cross_direction == "bullish"
         and macd_cross_days_ago is not None
         and not macd_line_above_zero
-        and macd_line_slope_3d is not None
-        and macd_line_slope_3d > 0
+        and macd_slope_percentile is not None
+        and macd_slope_percentile >= MACD_SLOPE_MEANINGFUL_PERCENTILE
+        and not macd_histogram_noise_exclude
     ):
         if 14 <= macd_cross_days_ago <= 23:
             macd_approach_tier = "SWEET_SPOT"
@@ -1702,6 +1757,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         and macd_line_above_zero
         and dist_to_sma50_pct is not None
         and dist_to_sma50_pct >= MACD_PULLBACK_RESUME_MIN_DIST_SMA50_PCT
+        and not macd_histogram_noise_exclude
     ):
         macd_approach_tier = "PULLBACK_RESUME"
 
@@ -1914,6 +1970,8 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "macd_cross_direction": macd_cross_direction,
         "macd_line_slope_3d": macd_line_slope_3d,
         "macd_approach_tier": macd_approach_tier,  # SWEET_SPOT / SQUEEZE_RESCUE / PULLBACK_RESUME / None -- lihat catatan riset di atas, informational only
+        "macd_slope_percentile": macd_slope_percentile,  # adaptif vs trailing histori ticker sendiri, gate SDT sekarang >=50 (bukan lagi cuma slope>0)
+        "macd_histogram_noise_exclude": macd_histogram_noise_exclude,  # True = histogram sehari sebelum flip masih tebal+belum melandai ("parabolic"), macd_approach_tier di-exclude
         "is_new_high_20d": is_new_high_20d,
         "relative_strength_vs_ihsg": relative_strength_vs_ihsg,
         "consecutive_low_volume_days": consecutive_low_volume_days,
