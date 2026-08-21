@@ -641,25 +641,30 @@ def fetch_zapi_running_trades(ticker: str, action: str = None, min_lot: int = No
 def fetch_zapi_top_movers(mover_type: str = "gainer", result_count: int = 10) -> list | None:
     """
     MBSS v2 (user request, real find — endpoint top-movers Zapi,
-    finance:idx/top-movers, SDK: client.run("finance:idx", "top-movers",
-    {"type": ..., "resultCount": ...})): market-wide top gainer/frequent/
-    volume, DIMAKSUDKAN sebagai FILTER AWAL kandidat "sedang breaking"
-    intraday (deteksi volume-climax + rejection-wick, real case CSMI/BRRC
-    21 Agst 2026) supaya TIDAK perlu scan seluruh universe ~300+ ticker
+    GET /v1/finance:idx/top-movers, DIKONFIRMASI dari dokumentasi resmi
+    Zapi): market-wide top gainer/loser/volume/value/frequent, DIMAKSUDKAN
+    sebagai FILTER AWAL kandidat "sedang breaking" intraday (deteksi
+    volume-climax + histogram-peak MACD 1m, real case CSMI/BRRC/GRIA 21
+    Agst 2026) supaya TIDAK perlu scan seluruh universe ~300+ ticker
     dengan data 1m tiap kali cek -- cukup ambil top movers dulu (murah,
     1 call), baru fetch 1m detail HANYA utk kandidat yang benar-benar aktif.
 
-    BELUM diverifikasi apakah update genuinely real-time saat live trading
-    atau delayed/cache-an -- HARUS ditest manual saat jam bursa berlangsung
-    di SERVER (ZAPI_API_KEY tidak ada di sandbox riset), lihat backtest/
-    test_zapi_top_movers_live_freshness.py. Bentuk respons JUGA belum
-    dikonfirmasi persis (parsing di bawah defensif/fallback, BUKAN final).
+    CACHE 1 MENIT (dari dokumentasi Zapi) -- polling lebih cepat dari itu
+    tidak dapat data lebih segar, sia-sia buang kuota. Ini SUDAH cocok
+    dengan granularitas sistem kita sendiri (semua analisis breaking/fade
+    berbasis bar 1m juga) -- 1m cache bukan keterbatasan buat use-case ini,
+    cuma jadi masalah kalau butuh reaksi sub-menit yang memang di luar
+    jangkauan data 1m manapun.
 
-    mover_type: "gainer" | "frequent" | "volume" (dari observasi user;
-    nilai lain seperti "loser"/"value" belum dikonfirmasi ada/tidak).
+    mover_type (enum resmi dari dokumentasi): "gainer" | "loser" | "volume"
+    | "value" | "frequent" (paling sering ditransaksikan).
 
-    Return list of stock dicts (bentuk field belum pasti), atau None kalau
-    gagal/kuota habis.
+    Bentuk respons DIKONFIRMASI: {"data": {"data": [{"Code", "Price",
+    "Change", "Percent", "Volume", "Value", "Frequency"}, ...]}} -- field
+    PascalCase (beda dari endpoint Zapi lain di file ini yang camelCase/
+    lowercase, dicek langsung, bukan lagi tebakan defensif).
+
+    Return list of stock dicts, atau None kalau gagal/kuota habis.
     """
     if not core._zapi_quota_check_and_increment(f"top-movers:{mover_type}"):
         return None
@@ -676,18 +681,8 @@ def fetch_zapi_top_movers(mover_type: str = "gainer", result_count: int = 10) ->
             print(f"⚠️ Zapi top-movers {mover_type}: HTTP {resp.status_code}")
             return None
         payload = resp.json()
-        # Bentuk respons BELUM dikonfirmasi -- coba beberapa kemungkinan
-        # nesting yang konsisten dengan endpoint Zapi lain di file ini
-        # (stock-summary: data.data; orderbook/running-trades: root langsung).
-        data = payload.get("data", payload)
-        if isinstance(data, dict):
-            for key in ("data", "list", "mover_list", "movers"):
-                if key in data and isinstance(data[key], list):
-                    return data[key]
-            return None
-        if isinstance(data, list):
-            return data
-        return None
+        rows = (payload.get("data") or {}).get("data")
+        return rows if isinstance(rows, list) else None
     except Exception as e:
         print(f"⚠️ Zapi top-movers fetch gagal untuk {mover_type}: {e}")
         return None

@@ -3,24 +3,28 @@ backtest/test_zapi_top_movers_live_freshness.py — MBSS v2, user request:
 sebelum dipakai sebagai filter awal kandidat "sedang breaking" intraday
 (supaya tidak perlu scan seluruh universe ~300+ ticker pakai data 1m),
 endpoint Zapi finance:idx/top-movers (engine/broker.py's
-fetch_zapi_top_movers, REAL FIND user via Zapi SDK snippet) perlu dites DUA
-hal:
-  1. Bentuk respons JSON yang SEBENARNYA (parsing di fetch_zapi_top_movers
-     masih defensif/tebakan, belum dikonfirmasi field-nya persis).
-  2. Apakah datanya genuinely update CEPAT selama jam bursa berlangsung
-     (freshness), atau delayed/cache-an -- kalau delayed, filter awal ini
-     bisa MELEWATKAN saham yang justru sedang breaking SEKARANG.
+fetch_zapi_top_movers) perlu dites: apakah polling di cadence yang cocok
+dengan cache 1-menitnya (dari dokumentasi resmi Zapi) benar-benar
+menangkap saham baru yang mulai breaking, bukan cuma daftar statis.
+
+Bentuk respons & cache 1-menit SUDAH DIKONFIRMASI dari dokumentasi Zapi
+langsung (bukan lagi tebakan) -- field Code/Price/Change/Percent/Volume/
+Value/Frequency, nesting data.data. Script ini TIDAK LAGI menguji "apakah
+datanya live sama sekali" (sudah pasti, dari dokumentasi) -- fokusnya
+sekarang: cadence polling ~70-90 detik (sedikit di atas cache 1 menit,
+supaya tiap ronde genuinely dapat snapshot BARU, bukan cache yang sama
+2x) apakah cukup untuk menangkap perubahan top-mover secara wajar.
 
 WAJIB dijalankan SAAT JAM BURSA BERLANGSUNG (09:00-11:30 atau 13:30-15:49
-WIB) -- di luar itu, top-movers pasti data basi/EOD, tesnya tidak
+WIB) -- di luar itu, top-movers pasti data EOD statis, tesnya tidak
 bermakna. WAJIB dijalankan di SERVER (ZAPI_API_KEY ada di .env server,
 TIDAK ada di sandbox riset Claude).
 
-Biaya: 3 ronde x 2 mover_type (gainer, frequent) = 6 call Zapi, ditambah
-jeda 3 menit antar ronde (total ~6 menit runtime) -- dari kuota Zapi
-600/bulan, 100/menit yang SUDAH ada (shared dengan stock-summary/
-orderbook/running-trades). KECIL, tapi tetap nyata -- jangan dijalankan
-berulang-ulang tanpa perlu.
+Biaya: 5 ronde x 2 mover_type (gainer, frequent) = 10 call Zapi, jeda 75
+detik antar ronde (total ~6 menit runtime) -- dari kuota Zapi 600/bulan,
+100/menit yang SUDAH ada (shared dengan stock-summary/orderbook/
+running-trades). KECIL, tapi tetap nyata -- jangan dijalankan berulang-
+ulang tanpa perlu.
 
 Run di server (SAAT JAM BURSA):
     python backtest/test_zapi_top_movers_live_freshness.py
@@ -34,45 +38,41 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import engine.broker as broker_engine
 
 MOVER_TYPES = ["gainer", "frequent"]
-ROUNDS = 3
-GAP_SECONDS = 180  # 3 menit antar ronde
-
-
-def _extract_code(item: dict) -> str:
-    for key in ("code", "symbol", "ticker", "stock_code"):
-        if key in item:
-            return str(item[key])
-    return "?"
+ROUNDS = 5
+GAP_SECONDS = 75  # sedikit di atas cache 1 menit Zapi -- tiap ronde genuinely snapshot baru
 
 
 def main():
-    print(f"Test freshness Zapi top-movers — {ROUNDS} ronde, jeda {GAP_SECONDS}s, tipe: {MOVER_TYPES}")
+    print(f"Test cadence Zapi top-movers — {ROUNDS} ronde, jeda {GAP_SECONDS}s (>cache 1 menit), tipe: {MOVER_TYPES}")
     print("PASTIKAN ini dijalankan SAAT JAM BURSA BERLANGSUNG, bukan di luar jam bursa.\n")
 
-    history = {mt: [] for mt in MOVER_TYPES}
+    history = {mt: [] for mt in MOVER_TYPES}  # list of {code: (Price, Percent, Frequency)} per ronde
 
     for round_i in range(1, ROUNDS + 1):
-        print("=" * 90)
+        print("=" * 100)
         print(f"RONDE {round_i} — {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 90)
+        print("=" * 100)
         for mt in MOVER_TYPES:
             rows = broker_engine.fetch_zapi_top_movers(mover_type=mt, result_count=10)
             if rows is None:
                 print(f"  [{mt}] ⚠️ Gagal fetch (None) — cek log error di atas, atau kuota habis.")
                 history[mt].append(None)
                 continue
-            if round_i == 1:
-                print(f"  [{mt}] RAW item pertama (buat cek field asli): {rows[0] if rows else '(kosong)'}")
-            codes = [_extract_code(r) for r in rows]
-            print(f"  [{mt}] {len(rows)} item: {codes}")
-            history[mt].append(codes)
+            snapshot = {}
+            for r in rows:
+                code = r.get("Code", "?")
+                snapshot[code] = (r.get("Price"), r.get("Percent"), r.get("Frequency"))
+            print(f"  [{mt}] {len(rows)} item:")
+            for code, (price, pct, freq) in snapshot.items():
+                print(f"     {code:<6} Price={price} Percent={pct}% Frequency={freq}")
+            history[mt].append(snapshot)
         if round_i < ROUNDS:
             print(f"\n(menunggu {GAP_SECONDS} detik sebelum ronde berikutnya...)\n")
             time.sleep(GAP_SECONDS)
 
-    print("\n" + "=" * 90)
-    print("RINGKASAN PERUBAHAN ANTAR RONDE (indikator freshness)")
-    print("=" * 90)
+    print("\n" + "=" * 100)
+    print("RINGKASAN PERUBAHAN ANTAR RONDE")
+    print("=" * 100)
     for mt in MOVER_TYPES:
         print(f"\n[{mt}]")
         for i in range(1, len(history[mt])):
@@ -80,17 +80,24 @@ def main():
             if prev is None or curr is None:
                 print(f"  Ronde {i}->{i+1}: data tidak lengkap, dilewati.")
                 continue
-            same_order = prev == curr
-            same_set = set(prev) == set(curr)
-            print(f"  Ronde {i}->{i+1}: urutan {'SAMA PERSIS' if same_order else 'BERUBAH'}, "
-                  f"anggota {'SAMA' if same_set else 'BERUBAH'} "
-                  f"(masuk baru: {set(curr) - set(prev)}, keluar: {set(prev) - set(curr)})")
+            same_set = set(prev.keys()) == set(curr.keys())
+            new_in = set(curr.keys()) - set(prev.keys())
+            dropped = set(prev.keys()) - set(curr.keys())
+            price_changes = []
+            for code in set(prev.keys()) & set(curr.keys()):
+                p_prev, pct_prev, _ = prev[code]
+                p_curr, pct_curr, _ = curr[code]
+                if p_prev != p_curr or pct_prev != pct_curr:
+                    price_changes.append(f"{code}({p_prev}->{p_curr}, {pct_prev}%->{pct_curr}%)")
+            print(f"  Ronde {i}->{i+1}: anggota {'SAMA' if same_set else 'BERUBAH'} "
+                  f"(masuk baru: {new_in or '-'}, keluar: {dropped or '-'})")
+            print(f"    Perubahan harga pada ticker yang tetap ada: {price_changes or '(tidak ada perubahan)'}")
 
-    print("\nBaca ini: kalau urutan/anggota TIDAK PERNAH berubah sama sekali antar 3 ronde (9 menit)")
-    print("padahal market jelas bergerak (cek manual harga beberapa ticker top gainer) -- data ini")
-    print("KEMUNGKINAN delayed/cache-an, JANGAN dipakai sebagai filter real-time. Kalau berubah wajar")
-    print("(beberapa masuk/keluar, urutan bergeser) -- update-nya cukup hidup, layak dipakai sebagai")
-    print("filter awal.")
+    print("\nBaca ini: kalau Price/Percent tetap SAMA PERSIS terus-menerus antar ronde (padahal cadence")
+    print("sudah di atas cache 1 menit) -- endpoint ini kemungkinan tidak update sesering yang")
+    print("didokumentasikan, JANGAN diandalkan sebagai filter real-time. Kalau Price/Percent bergerak")
+    print("wajar tiap ronde (2 menit lebih) dan kadang ada ticker baru masuk/keluar -- cadence ~75-90")
+    print("detik ini SUDAH cukup untuk filter awal kandidat breaking.")
 
 
 if __name__ == "__main__":
