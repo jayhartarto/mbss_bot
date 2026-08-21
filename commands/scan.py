@@ -481,51 +481,85 @@ async def screen_daytrade(update, context):
             )
 
     # MBSS v2 (user request — "cocoknya menggantikan EXPLOSIVE LANE... untuk
-    # dimunculkan di SDT, pilih TOP 5 dengan probability/momentum dan gain
-    # tertinggi"): section BARU pakai _explosive_score formula v2 (lihat
-    # catatan di situ — backtest research_macd_explosive_gain_profile.py)
-    # atas SELURUH pool Danger Gate survivor malam ini. Diurutkan skor
-    # explosive (gain potential) dulu, backbone probability_score sebagai
-    # tie-breaker kedua -- sesuai instruksi "probability/momentum dan gain".
-    explosive_candidates = []
+    # dimunculkan di SDT, jadi 2 picks terpisah": Pick #1 = pengganti
+    # Explosive Lane (bobot gain tinggi), Pick #2 = pengganti SDT utama
+    # (diurut probability win tertinggi). Keputusan user setelah quintile
+    # sweep + uji Q1 (research_explosive_lane_v2_quintile_sweep.py +
+    # research_explosive_q1_profile_test.py): CUTOFF Q2/Q3 (dead-zone,
+    # ~6.5% explosive-rate — sudah di-reject di _explosive_score), Q1
+    # dapat jatah TERBATAS 1-2 pick (edge real ~13% TAPI arah tidak bisa
+    # diprediksi lebih lanjut dari MACD line/histogram, Cohen's d di dalam
+    # Q1 semua kecil — TIDAK diranking halus, cuma tie-break probability_
+    # score seadanya), Q4/Q5 (arah jelas) jadi pool utama buat KEDUA pick.
+    explosive_candidates = []  # (score, tier, r)
     for r in results:
         score, rejected, _reason = _explosive_score(r, results)
-        if not rejected:
-            explosive_candidates.append((score, r))
-    if explosive_candidates:
-        def _explosive_sort_key(item):
-            score, r = item
-            bb = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
-            prob = bb.get("probability_score", 0) if bb else 0
-            return (score, prob)
-        explosive_candidates.sort(key=_explosive_sort_key, reverse=True)
-        explosive_top5 = explosive_candidates[:5]
+        if rejected:
+            continue
+        tier = _macd_trend_clarity_tier(r, results)
+        if tier is None:
+            continue  # data trend-clarity tidak cukup -- exclude dari kedua pick, bukan ditebak
+        explosive_candidates.append((score, tier, r))
 
+    EXPLOSIVE_Q1_SLOTS = 2
+    EXPLOSIVE_MAIN_SLOTS = 3
+    PROBABILITY_PICKS_COUNT = 5
+
+    def _bb_prob(ticker):
+        bb = (backbone_result or {}).get("all_scored", {}).get(ticker) if backbone_result else None
+        return bb.get("probability_score", 0) if bb else 0
+
+    q45_pool = [item for item in explosive_candidates if item[1] in ("Q4", "Q5")]
+    q1_pool = [item for item in explosive_candidates if item[1] == "Q1"]
+    q45_pool.sort(key=lambda item: (item[0], _bb_prob(item[2]["ticker"])), reverse=True)
+    q1_pool.sort(key=lambda item: _bb_prob(item[2]["ticker"]), reverse=True)
+
+    explosive_picks = q45_pool[:EXPLOSIVE_MAIN_SLOTS] + q1_pool[:EXPLOSIVE_Q1_SLOTS]
+    probability_picks = sorted(q45_pool, key=lambda item: _bb_prob(item[2]["ticker"]), reverse=True)[:PROBABILITY_PICKS_COUNT]
+
+    if explosive_picks:
         await asyncio.to_thread(
-            core.lock_daily_daytrade_picks, [r for _, r in explosive_top5], "screendaytrade_explosive",
+            core.lock_daily_daytrade_picks, [r for _, _, r in explosive_picks], "screendaytrade_explosive",
             (backbone_result or {}).get("all_scored", {})
         )
-
         lines.append(
-            "\n🚀 EXPLOSIVE CANDIDATES — potensi gain besar (BACKTEST: n=53.841 ticker-hari regime MACD bullish, BELUM ada histori /winrate live)"
+            "\n🚀 EXPLOSIVE CANDIDATES — potensi gain besar (Pick #1, pengganti Explosive Lane. BACKTEST research_macd_explosive_gain_profile.py, BELUM ada histori /winrate live)"
         )
-        for score, r in explosive_top5:
+        for score, tier, r in explosive_picks:
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            backbone_note = (
+                f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
+                if bb_info and "entry_rank" in bb_info else ""
+            )
+            tier_note = " ⚠️ Q1 WILDCARD (edge nyata ~13% tapi arah tidak terbaca dari MACD line/histogram)" if tier == "Q1" else f" [{tier}]"
+            lines.append(
+                f"  • {r['ticker']} — Explosive Score {score:.0f}/100{tier_note} | {r.get('dist_to_sma50_pct', '-')}% di atas SMA50, "
+                f"day-range {r.get('day_range_pct_10d', '-')}% | Harga {r.get('price')}{backbone_note}"
+                f"{market_engine.format_sector_tag(r.get('sector'))}"
+            )
+
+    if probability_picks:
+        await asyncio.to_thread(
+            core.lock_daily_daytrade_picks, [r for _, _, r in probability_picks], "screendaytrade_probability",
+            (backbone_result or {}).get("all_scored", {})
+        )
+        lines.append(
+            "\n🎯 HIGH PROBABILITY PICKS — diurut probability_score Backbone (Pick #2, pengganti radar SDT utama), pool MACD trend-clarity Q4/Q5 (arah jelas). BELUM ada histori /winrate live"
+        )
+        for _, _, r in probability_picks:
             bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
             backbone_note = (
                 f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
                 if bb_info and "entry_rank" in bb_info else ""
             )
             lines.append(
-                f"  • {r['ticker']} — Explosive Score {score:.0f}/100 | {r.get('dist_to_sma50_pct', '-')}% di atas SMA50, "
-                f"day-range {r.get('day_range_pct_10d', '-')}% | Harga {r.get('price')}{backbone_note}"
+                f"  • {r['ticker']} — Harga {r.get('price')}{backbone_note}"
                 f"{market_engine.format_sector_tag(r.get('sector'))}"
             )
-    else:
-        explosive_top5 = []
 
     buttons = core.build_check_buttons(
         [r["ticker"] for r in top_candidates] + [r["ticker"] for r in macd_approach_candidates]
-        + [r["ticker"] for _, r in explosive_top5]
+        + [r["ticker"] for _, _, r in explosive_picks] + [r["ticker"] for _, _, r in probability_picks]
     )
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
@@ -2210,6 +2244,66 @@ def _consensus_sdt_hc_selected(pool: list, market_regime: str | None = None) -> 
     return sdt_selected, hc_selected
 
 
+def _macd_slope_pct_raw(r: dict) -> float | None:
+    """macd_line_slope_3d dinormalisasi harga -- versi MENTAH (bukan macd_slope_percentile
+    yang adaptif per-ticker), dipakai supaya persentilnya cross-sectional terhadap `pool`
+    yang SAMA seperti dist_to_sma50_pct/ret_5d_pct, konsisten dengan backtest quintile sweep."""
+    slope = r.get("macd_line_slope_3d")
+    price = r.get("price")
+    if slope is None or not price:
+        return None
+    return float(slope) / float(price) * 100
+
+
+def _macd_trend_clarity_percentile(r: dict, pool: list) -> float | None:
+    """
+    MBSS v2 (user request — quintile sweep research_explosive_lane_v2_
+    quintile_sweep.py menemukan pola U, BUKAN monoton, di 3 dari 4 dimensi
+    Explosive Lane v2: dist_to_sma50_pct/macd_slope_pct/ret_5d_pct. Uji
+    lanjutan (research_explosive_q1_profile_test.py) buktikan Q1 (ekstrem
+    RENDAH) itu REAL edge (13% explosive-rate, 2x Q2/Q3) TAPI arahnya tidak
+    bisa diprediksi lebih lanjut dari MACD line/histogram (Cohen's d di
+    dalam Q1 semua kecil, |d|<0.3) -- beda dari Q4/Q5 yang arahnya jelas.
+    User keputusan: cutoff Q2/Q3 (dead zone, ~6.5% explosive-rate, tidak
+    ada nilai tebus), Q1 dapat jatah TERBATAS (1-2 pick, TIDAK diranking
+    halus di dalamnya), Q4/Q5 jadi pool utama buat dua lensa (explosive
+    score DAN probability_score).
+
+    Komposit = rata-rata persentil cross-sectional ketiga dimensi (day_
+    range_pct_10d TIDAK diikutkan -- itu satu-satunya yang monoton bersih,
+    tetap persentil linear apa adanya di skor eksplosif). Return None kalau
+    data tidak cukup (ticker ini ATAU pool-nya).
+    """
+    dist_sma50 = r.get("dist_to_sma50_pct")
+    slope_raw = _macd_slope_pct_raw(r)
+    ret5d = r.get("ret_5d_pct")
+    if dist_sma50 is None or slope_raw is None or ret5d is None:
+        return None
+
+    dist_values = [x.get("dist_to_sma50_pct") for x in pool if x.get("dist_to_sma50_pct") is not None]
+    slope_values = [v for v in (_macd_slope_pct_raw(x) for x in pool) if v is not None]
+    ret5d_values = [x.get("ret_5d_pct") for x in pool if x.get("ret_5d_pct") is not None]
+    if not dist_values or not slope_values or not ret5d_values:
+        return None
+
+    dist_pctl = backbone_engine.percentile_rank_list(dist_values, dist_sma50) * 100
+    slope_pctl = backbone_engine.percentile_rank_list(slope_values, slope_raw) * 100
+    ret5d_pctl = backbone_engine.percentile_rank_list(ret5d_values, ret5d) * 100
+    return (dist_pctl + slope_pctl + ret5d_pctl) / 3
+
+
+def _macd_trend_clarity_tier(r: dict, pool: list) -> str | None:
+    """Q1 (0-20 persentil) / Q2 (20-40) / Q3 (40-60) / Q4 (60-80) / Q5 (80-100), atau None kalau data kurang."""
+    pctl = _macd_trend_clarity_percentile(r, pool)
+    if pctl is None:
+        return None
+    if pctl < 20: return "Q1"
+    if pctl < 40: return "Q2"
+    if pctl < 60: return "Q3"
+    if pctl < 80: return "Q4"
+    return "Q5"
+
+
 def _explosive_score(r: dict, pool: list) -> tuple[float, bool, str]:
     """
     MBSS v2 (user request — GANTI formula lama, dari backtest research_
@@ -2274,6 +2368,12 @@ def _explosive_score(r: dict, pool: list) -> tuple[float, bool, str]:
     # -- di luar itu, formula ini extrapolasi tanpa dasar data.
     if r.get("macd_state") != "bullish":
         return score, True, "MACD histogram belum bullish — di luar cakupan backtest formula ini"
+    # MBSS v2 (user request — cutoff Q2/Q3, lihat catatan _macd_trend_
+    # clarity_percentile): dead-zone, explosive-rate ~6.5% (setengah dari
+    # Q1, sepertiga dari Q5), tidak ada nilai tebus dibanding tier lain.
+    _tier = _macd_trend_clarity_tier(r, pool)
+    if _tier in ("Q2", "Q3"):
+        return score, True, f"trend clarity {_tier} — zona lemah/dead-zone (explosive-rate ~6.5%, backtest research_explosive_lane_v2_quintile_sweep.py)"
     if r.get("is_near_price_floor"):
         return score, True, "dekat batas bawah harga IDX"
     if rr_now < 0.30:
