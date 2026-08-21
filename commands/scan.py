@@ -502,7 +502,7 @@ async def screen_daytrade(update, context):
         explosive_candidates.append((score, tier, r))
 
     EXPLOSIVE_Q1_SLOTS = 2
-    EXPLOSIVE_MAIN_SLOTS = 3
+    EXPLOSIVE_MAIN_SLOTS = 5  # MBSS v2 (user request): expand Q4/Q5 main slots 3->5 kalau memang ada kandidatnya, tetap urut skor explosive tertinggi dulu
     PROBABILITY_PICKS_COUNT = 5
 
     def _bb_prob(ticker):
@@ -1397,33 +1397,37 @@ async def high_conviction_command(update, context):
         sdt_wr = core.get_winrate_for_label(sdt_lane) if sdt_lane else ""
         sdt_lane_note = f"\n   📊 Lane {sdt_lane} (WR {sdt_wr})" if sdt_lane and sdt_wr else (f"\n   📊 Lane {sdt_lane}" if sdt_lane else "")
 
-        # MBSS v2 (user request — HC-appropriate MACD confirmation, beda dari
-        # macd_approach_tier SDT): konfirmasi breakout centerline HARI INI +
-        # timing 4-11 hari dari signal cross awal (backtest research_macd_
-        # centerline_breakout_validation.py) -- informational, TIDAK
-        # menggating is_high_conviction/kriteria HC.
-        macd_fresh_note = ""
-        if r.get("macd_fresh_breakout_confirmed"):
-            macd_fresh_note = (
-                f"\n   📈 MACD fresh breakout confirmed (BACKTEST): centerline cross hari ini, "
-                f"{r.get('macd_cross_days_ago', '-')} hari dari signal cross awal — backtest historis follow-through terbaik"
+        # MBSS v2 (user request — "HC boleh pakai data dari SDT dari study
+        # macd... bisa masuk HC untuk diproduksi sebagai sedang breaking
+        # ataupun continuation, ataupun watch for pullback"): 3-state
+        # lifecycle (macd_lifecycle_state, engine/scoring.py), GANTI dari
+        # note flat macd_fresh_breakout_confirmed sebelumnya. Cross-
+        # reference ke tag SDT sebelumnya (find_recent_sdt_macd_tag)
+        # berlaku utk BREAKING & CONTINUATION (dua-duanya bisa jadi
+        # kelanjutan dari kandidat yang SDT tandai lebih dulu).
+        macd_lifecycle_note = ""
+        lifecycle = r.get("macd_lifecycle_state")
+        if lifecycle == "BREAKING":
+            macd_lifecycle_note = (
+                f"\n   📈 MACD BREAKING (BACKTEST): centerline cross hari ini, "
+                f"{r.get('macd_cross_days_ago', '-')} hari dari signal cross awal — follow-through terbaik secara historis"
             )
-            # MBSS v2 (user request — "iriskan tagging ini dengan SDT dan
-            # pra_breakout yang muncul lewat /hc"): cek apakah ticker ini
-            # SUDAH ditandai SDT (screendaytrade_macd_approach) sebelum HC
-            # sekarang mengonfirmasi breakout-nya — narasi "SDT panggil
-            # duluan, HC konfirmasi belakangan" jadi eksplisit.
+        elif lifecycle == "CONTINUATION":
+            macd_lifecycle_note = "\n   📊 MACD CONTINUATION: sudah di atas centerline, momentum terjaga"
+        elif lifecycle == "WATCH_PULLBACK":
+            macd_lifecycle_note = "\n   ⏳ MACD WATCH PULLBACK: masih di atas centerline tapi histogram melemah 3 hari terakhir — pertimbangkan tunggu pullback"
+        if lifecycle in ("BREAKING", "CONTINUATION"):
             sdt_prior = core.find_recent_sdt_macd_tag(r["ticker"], pick_date_today, history_for_streak)
             if sdt_prior:
-                macd_fresh_note += (
-                    f"\n   🔗 SDT sudah tandai {sdt_prior['tier']} {sdt_prior['days_gap']} hari lalu — sekarang HC konfirmasi breakout-nya"
+                macd_lifecycle_note += (
+                    f"\n   🔗 SDT sudah tandai {sdt_prior['tier']} {sdt_prior['days_gap']} hari lalu — sekarang HC konfirmasi lanjutannya"
                 )
 
         lines.append(
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f}{daytrade_note}{streak_str} "
             f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
             f"   {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)} kriteria | "
-            f"RR {rr_str} | {label_str}{backbone_note}{sdt_lane_note}{macd_fresh_note}\n"
+            f"RR {rr_str} | {label_str}{backbone_note}{sdt_lane_note}{macd_lifecycle_note}\n"
             f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}{breakout_alert_note}"
             f"{core.format_fast_candidate_tag(r)}"
         )
@@ -1466,33 +1470,16 @@ async def high_conviction_command(update, context):
             )
         lines.append("⚠️ Belum ada konfirmasi harga — risiko timing lebih tinggi dari kandidat HC di atas.")
 
-    # MBSS v2 (user request — diskusi Bollinger Bands): blok TAMBAHAN lain,
-    # independen juga dari 8-kriteria HC — kandidat squeeze (bandwidth BB di
-    # persentil rendah, lihat compute_factor_scoring) sering kali BELUM
-    # breakout_close_confirmed/near_high sama sekali (masih konsolidasi di
-    # tengah), jadi kalau ditunggu sampai lolos kriteria HC penuh, momennya
-    # sering sudah lewat (user observation: pick yang muncul dari scanner
-    # sering kali memang sudah terlanjur naik). Murni baca field yang sudah
-    # dihitung di /eodscan, tidak fetch/hitung ulang apa pun.
-    squeeze_candidates = [
-        r for r in scored.values()
-        if r.get("ticker") not in hc_tickers and r.get("bollinger_squeeze")
-    ]
-    squeeze_candidates.sort(key=lambda r: r.get("bollinger_bandwidth_percentile", 100))
-    squeeze_candidates = squeeze_candidates[:5]
-
-    if squeeze_candidates:
-        lines.append(f"\n🎯 SQUEEZE / PRA-BREAKOUT — {len(squeeze_candidates)} kandidat (volatilitas terkompresi, belum tentu breakout)\n")
-        for i, r in enumerate(squeeze_candidates, 1):
-            s = r.get("scores", {})
-            lines.append(
-                f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f} | "
-                f"bandwidth BB persentil {r.get('bollinger_bandwidth_percentile', '-')}"
-            )
-        lines.append("⚠️ Squeeze cuma tanda volatilitas lagi rendah — TIDAK menjamin arah breakout (bisa naik atau turun), risiko timing lebih tinggi dari kandidat HC di atas.")
-
-    lines.append("\nDetail lengkap: /check TICKER")
-    all_tickers = [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates] + [r["ticker"] for r in squeeze_candidates]
+    # MBSS v2 (user request — "rapihkan HC, banyak section": section SQUEEZE
+    # / PRA-BREAKOUT lama DIHAPUS -- REDUNDAN sejak SDT punya macd_approach_
+    # tier="SQUEEZE_RESCUE" (engine/scoring.py) yang mensyaratkan bollinger_
+    # squeeze DENGAN backtest kualitas jauh lebih kuat (n=24.727 ticker-hari,
+    # dikombinasi cross_days_ago) dibanding section ini yang cuma filter
+    # bollinger_squeeze mentah tanpa validasi forward apa pun. Pointer
+    # singkat ke situ, bukan duplikasi coverage di dua tempat.
+    lines.append("\nKandidat squeeze pra-breakout (backtest tervalidasi): lihat /screendaytrade, lane SQUEEZE RESCUE.")
+    lines.append("Detail lengkap: /check TICKER")
+    all_tickers = [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates]
     buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 

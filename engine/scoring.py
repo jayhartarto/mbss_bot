@@ -1787,6 +1787,32 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         and MACD_FRESH_BREAKOUT_MIN_DAYS <= macd_cross_days_ago <= MACD_FRESH_BREAKOUT_MAX_DAYS
     )
 
+    # MBSS v2 (user request — "HC boleh pakai data dari SDT dari study macd...
+    # bisa masuk HC untuk diproduksi sebagai sedang breaking ataupun
+    # continuation, ataupun watch for pullback"): klasifikasi 3-state
+    # lifecycle HC-appropriate, murah (MACD-only, TIDAK baca pick history --
+    # cross-reference ke tag SDT sebelumnya tetap di command layer/commands/
+    # scan.py, karena butuh load_daytrade_picks_history yang mahal kalau
+    # dipanggil per-ticker di sini untuk SELURUH universe tiap malam):
+    #   BREAKING: reuse macd_fresh_breakout_confirmed persis (centerline
+    #     cross HARI INI, 4-11 hari dari signal cross awal -- backtest
+    #     research_macd_centerline_breakout_validation.py).
+    #   WATCH_PULLBACK: sudah di atas centerline (bukan hari ini) TAPI
+    #     histogram MENYUSUT 3 hari terakhir -- momentum melemah, bukan
+    #     hard-reject, cuma peringatan (belum divalidasi backtest terpisah,
+    #     REUSE pola "decelerating" yang sudah dipakai macd_histogram_noise_
+    #     exclude, cuma diterapkan ke sisi histogram POSITIF di sini).
+    #   CONTINUATION: sudah di atas centerline, histogram TIDAK menyusut --
+    #     default sehat, tidak ada tanda pelemahan.
+    macd_lifecycle_state = None
+    if macd_line_above_zero:
+        if macd_fresh_breakout_confirmed:
+            macd_lifecycle_state = "BREAKING"
+        elif len(macd_hist) >= 4 and float(macd_hist.iloc[-1]) < float(macd_hist.iloc[-4]):
+            macd_lifecycle_state = "WATCH_PULLBACK"
+        else:
+            macd_lifecycle_state = "CONTINUATION"
+
     # OBV divergence: the key check for "price looks fine but volume flow disagrees"
     obv_series = core.calculate_obv(close_prices, volumes)
     obv_divergence = core.detect_obv_divergence(close_prices, obv_series)
@@ -1955,6 +1981,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "macd_line_above_zero": macd_line_above_zero,
         "macd_centerline_cross_today": macd_centerline_cross_today,
         "macd_fresh_breakout_confirmed": macd_fresh_breakout_confirmed,  # HC-appropriate: konfirmasi breakout SUDAH terjadi, cross 4-11 hari dari signal cross -- lihat catatan riset di atas
+        "macd_lifecycle_state": macd_lifecycle_state,  # BREAKING / CONTINUATION / WATCH_PULLBACK / None -- lihat catatan di atas
         "tight_trailing_support": tight_trailing_support,  # informational/bonus only, TIDAK menggating apa pun -- lihat catatan di atas
         "ema9_slope_pct": ema9_slope_pct,
         "trailing_support_undercut_days": trailing_support_undercut_days,
