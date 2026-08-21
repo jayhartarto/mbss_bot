@@ -328,6 +328,15 @@ async def check_stock(update, context):
             f"\n📈 MACD fresh breakout confirmed (BACKTEST): centerline cross HARI INI, "
             f"{result.get('macd_cross_days_ago', '-')} hari dari signal cross awal — cocok untuk follow FRESH breakout (positioning HC)"
         )
+        # MBSS v2 (user request — iriskan tagging SDT dgn pra-breakout /hc)
+        try:
+            sdt_prior = core.find_recent_sdt_macd_tag(
+                ticker, core.get_current_trading_day_close_marker(), core.load_daytrade_picks_history()
+            )
+        except Exception:
+            sdt_prior = None
+        if sdt_prior:
+            bb_line += f"\n🔗 SDT sudah tandai {sdt_prior['tier']} {sdt_prior['days_gap']} hari lalu — sekarang HC konfirmasi breakout-nya"
 
     # AB-RC1 backbone (MBSS v2, user request — "bisa dibandingkan posisi
     # dengan entry lainnya"): angka rank yang SAMA dipakai konsisten di

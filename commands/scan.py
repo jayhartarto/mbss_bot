@@ -1322,11 +1322,22 @@ async def high_conviction_command(update, context):
         # timing 4-11 hari dari signal cross awal (backtest research_macd_
         # centerline_breakout_validation.py) -- informational, TIDAK
         # menggating is_high_conviction/kriteria HC.
-        macd_fresh_note = (
-            f"\n   📈 MACD fresh breakout confirmed (BACKTEST): centerline cross hari ini, "
-            f"{r.get('macd_cross_days_ago', '-')} hari dari signal cross awal — backtest historis follow-through terbaik"
-            if r.get("macd_fresh_breakout_confirmed") else ""
-        )
+        macd_fresh_note = ""
+        if r.get("macd_fresh_breakout_confirmed"):
+            macd_fresh_note = (
+                f"\n   📈 MACD fresh breakout confirmed (BACKTEST): centerline cross hari ini, "
+                f"{r.get('macd_cross_days_ago', '-')} hari dari signal cross awal — backtest historis follow-through terbaik"
+            )
+            # MBSS v2 (user request — "iriskan tagging ini dengan SDT dan
+            # pra_breakout yang muncul lewat /hc"): cek apakah ticker ini
+            # SUDAH ditandai SDT (screendaytrade_macd_approach) sebelum HC
+            # sekarang mengonfirmasi breakout-nya — narasi "SDT panggil
+            # duluan, HC konfirmasi belakangan" jadi eksplisit.
+            sdt_prior = core.find_recent_sdt_macd_tag(r["ticker"], pick_date_today, history_for_streak)
+            if sdt_prior:
+                macd_fresh_note += (
+                    f"\n   🔗 SDT sudah tandai {sdt_prior['tier']} {sdt_prior['days_gap']} hari lalu — sekarang HC konfirmasi breakout-nya"
+                )
 
         lines.append(
             f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f}{daytrade_note}{streak_str} "

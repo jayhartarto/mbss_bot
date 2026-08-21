@@ -2150,6 +2150,46 @@ def get_previous_trading_day_marker(date_str: str) -> str:
     return d.strftime("%Y-%m-%d")
 
 
+def find_recent_sdt_macd_tag(ticker: str, before_date: str, history: list, lookback_days: int = 30) -> dict | None:
+    """
+    MBSS v2 (user request — "iriskan tagging ini dengan SDT dan pra_breakout
+    yang muncul lewat /hc"): cari pick SDT ter-BARU untuk ticker ini
+    (source="screendaytrade_macd_approach", lihat rank_screendaytrade_
+    refactor's macd_approach_candidates di commands/scan.py) SEBELUM
+    before_date, dalam lookback_days kalender terakhir. Dipakai HC's
+    macd_fresh_breakout_confirmed display supaya kelihatan kalau SDT sudah
+    menandai ticker ini duluan (SWEET_SPOT/SQUEEZE_RESCUE/PULLBACK_RESUME)
+    sebelum HC sekarang mengonfirmasi breakout-nya beneran terjadi —
+    narasi "SDT panggil duluan, HC konfirmasi belakangan" jadi kelihatan
+    eksplisit, bukan dua tool yang keliatan tidak nyambung.
+
+    Perbandingan tanggal kalender sederhana (bukan hari bursa persis) —
+    cukup untuk "belum terlalu lama", bukan presisi tinggi (sama simplifikasi
+    dengan compute_consecutive_appearance_streak). Return None kalau tidak
+    ada match dalam window, atau tanggal tidak terbaca.
+    """
+    candidates = [
+        p for p in history
+        if p.get("ticker") == ticker
+        and p.get("source") == "screendaytrade_macd_approach"
+        and p.get("pick_date") and p["pick_date"] < before_date
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p["pick_date"], reverse=True)
+    latest = candidates[0]
+    try:
+        days_gap = (
+            datetime.date.fromisoformat(before_date) - datetime.date.fromisoformat(latest["pick_date"])
+        ).days
+    except Exception:
+        return None
+    if days_gap > lookback_days:
+        return None
+    tier = (latest.get("feature_snapshot") or {}).get("macd_approach_tier")
+    return {"pick_date": latest["pick_date"], "tier": tier, "days_gap": days_gap}
+
+
 def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrade", backbone_lookup: dict | None = None):
     """
     Kunci picks hari ini (IMMUTABLE begitu tersimpan) — dipakai untuk uji winrate
