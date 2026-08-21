@@ -480,7 +480,53 @@ async def screen_daytrade(update, context):
                 f"{market_engine.format_sector_tag(r.get('sector'))}"
             )
 
-    buttons = core.build_check_buttons([r["ticker"] for r in top_candidates] + [r["ticker"] for r in macd_approach_candidates])
+    # MBSS v2 (user request — "cocoknya menggantikan EXPLOSIVE LANE... untuk
+    # dimunculkan di SDT, pilih TOP 5 dengan probability/momentum dan gain
+    # tertinggi"): section BARU pakai _explosive_score formula v2 (lihat
+    # catatan di situ — backtest research_macd_explosive_gain_profile.py)
+    # atas SELURUH pool Danger Gate survivor malam ini. Diurutkan skor
+    # explosive (gain potential) dulu, backbone probability_score sebagai
+    # tie-breaker kedua -- sesuai instruksi "probability/momentum dan gain".
+    explosive_candidates = []
+    for r in results:
+        score, rejected, _reason = _explosive_score(r, results)
+        if not rejected:
+            explosive_candidates.append((score, r))
+    if explosive_candidates:
+        def _explosive_sort_key(item):
+            score, r = item
+            bb = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            prob = bb.get("probability_score", 0) if bb else 0
+            return (score, prob)
+        explosive_candidates.sort(key=_explosive_sort_key, reverse=True)
+        explosive_top5 = explosive_candidates[:5]
+
+        await asyncio.to_thread(
+            core.lock_daily_daytrade_picks, [r for _, r in explosive_top5], "screendaytrade_explosive",
+            (backbone_result or {}).get("all_scored", {})
+        )
+
+        lines.append(
+            "\n🚀 EXPLOSIVE CANDIDATES — potensi gain besar (BACKTEST: n=53.841 ticker-hari regime MACD bullish, BELUM ada histori /winrate live)"
+        )
+        for score, r in explosive_top5:
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            backbone_note = (
+                f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
+                if bb_info and "entry_rank" in bb_info else ""
+            )
+            lines.append(
+                f"  • {r['ticker']} — Explosive Score {score:.0f}/100 | {r.get('dist_to_sma50_pct', '-')}% di atas SMA50, "
+                f"day-range {r.get('day_range_pct_10d', '-')}% | Harga {r.get('price')}{backbone_note}"
+                f"{market_engine.format_sector_tag(r.get('sector'))}"
+            )
+    else:
+        explosive_top5 = []
+
+    buttons = core.build_check_buttons(
+        [r["ticker"] for r in top_candidates] + [r["ticker"] for r in macd_approach_candidates]
+        + [r["ticker"] for _, r in explosive_top5]
+    )
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
     # Tombol upload Broker Summary ALL 3 hari untuk 12 saham hasil radar.
@@ -2166,26 +2212,68 @@ def _consensus_sdt_hc_selected(pool: list, market_regime: str | None = None) -> 
 
 def _explosive_score(r: dict, pool: list) -> tuple[float, bool, str]:
     """
-    AB-RC1 doc section 15.4: 32% Room + 30% RR (percentile, at CURRENT
-    price — see backbone_engine.compute_rr_at_current_price) + 23% Activity
-    + 15% Controlled Volatility (peaks at the pool's OWN median day-range
-    percentile, penalized toward either extreme — "controlled", not
-    "high"). Returns (score, hard_rejected, reject_reason).
-    """
-    v5 = core.compute_daytrade_v5_summary(r)
-    room, activity = v5["room"]["score"], v5["activity"]["score"]
+    MBSS v2 (user request — GANTI formula lama, dari backtest research_
+    macd_explosive_gain_profile.py, n=53.841 ticker-hari "dalam regime MACD
+    bullish aktif"): formula lama (Room 32% + RR 30% + Activity 23% +
+    Controlled-Vol 15%, doc AB-RC1 15.4) TIDAK dikondisikan pada state MACD
+    sama sekali, dan volatilitas diperlakukan sebagai "controlled/moderate"
+    (dihukum kalau terlalu ekstrem) -- backtest baru justru buktikan
+    SEBALIKNYA: day_range_pct_10d yang makin TINGGI makin baik (d=0.563 utk
+    >=10% gain, NAIK ke d=0.779 utk >=20%/proxy-ARA -- BUKAN "puncak di
+    tengah" seperti formula lama asumsikan).
 
+    EMPAT dimensi baru, SEMUA scale makin kuat dari EXPLOSIVE (>=10% dlm
+    5hr) ke proxy-ARA (>=20%) -- pola paling konsisten dari seluruh riset
+    MACD sesi ini (REUSE cuma 4 dari 10+ fitur signifikan yang SANGAT
+    berkorelasi satu sama lain -- dist_to_ema9/21/sma20 semua ukur hal yang
+    sama dengan dist_to_sma50, tidak ditambah semua sekaligus, hindari
+    redundansi struktural persis pelajaran kriteria HC 2&7):
+      - dist_to_sma50_pct (trend extension): d 0.408 -> 0.705
+      - day_range_pct_10d (aktivitas/volatilitas): d 0.563 -> 0.779
+      - macd_slope_percentile (momentum MACD, SUDAH adaptif per-ticker vs
+        histori sendiri, reuse field yang sama dipakai gate macd_approach_
+        tier): versi mentahnya (macd_slope_pct) d 0.497 -> 0.677
+      - ret_5d_pct (momentum harga): d 0.471 -> 0.747
+
+    Bobot 30/25/25/20 -- trend extension & aktivitas paling kuat, momentum
+    MACD & harga PELENGKAP (secara struktural berkorelasi tapi cukup beda
+    buat dipertahankan berdua). SEMUA dipersentilkan cross-sectional
+    terhadap `pool` (SAMA konvensi dengan RR-percentile formula lama),
+    KECUALI macd_slope_percentile yang SUDAH persentil (adaptif per-ticker).
+
+    Hard-reject list DIPERTAHANKAN APA ADANYA (safety checks, tidak terkait
+    pertanyaan "seberapa besar potensi gain", tidak ada alasan diubah).
+    Returns (score, hard_rejected, reject_reason).
+    """
     rr_now = backbone_engine.compute_rr_at_current_price(r)
-    rr_values = [backbone_engine.compute_rr_at_current_price(x) for x in pool]
-    rr_percentile = backbone_engine.percentile_rank_list(rr_values, rr_now) * 100
 
     drp = r.get("day_range_pct_10d")
     drp_values = [x.get("day_range_pct_10d") for x in pool if x.get("day_range_pct_10d") is not None]
     drp_percentile = (backbone_engine.percentile_rank_list(drp_values, drp) * 100) if drp is not None and drp_values else 50.0
-    controlled_vol = max(0.0, 100.0 - abs(drp_percentile - 50.0) * 2.0)
 
-    score = room * 0.32 + rr_percentile * 0.30 + activity * 0.23 + controlled_vol * 0.15
+    dist_sma50 = r.get("dist_to_sma50_pct")
+    dist_sma50_values = [x.get("dist_to_sma50_pct") for x in pool if x.get("dist_to_sma50_pct") is not None]
+    dist_sma50_percentile = (backbone_engine.percentile_rank_list(dist_sma50_values, dist_sma50) * 100) if dist_sma50 is not None and dist_sma50_values else 50.0
 
+    ret5d = r.get("ret_5d_pct")
+    ret5d_values = [x.get("ret_5d_pct") for x in pool if x.get("ret_5d_pct") is not None]
+    ret5d_percentile = (backbone_engine.percentile_rank_list(ret5d_values, ret5d) * 100) if ret5d is not None and ret5d_values else 50.0
+
+    macd_slope_pctl = r.get("macd_slope_percentile")
+    macd_slope_component = float(macd_slope_pctl) if macd_slope_pctl is not None else 50.0
+
+    score = (
+        dist_sma50_percentile * 0.30
+        + drp_percentile * 0.25
+        + macd_slope_component * 0.25
+        + ret5d_percentile * 0.20
+    )
+
+    # Precondition SESUAI cakupan backtest (research_macd_explosive_gain_
+    # profile.py): populasi yang diuji SELALU histogram MACD bullish aktif
+    # -- di luar itu, formula ini extrapolasi tanpa dasar data.
+    if r.get("macd_state") != "bullish":
+        return score, True, "MACD histogram belum bullish — di luar cakupan backtest formula ini"
     if r.get("is_near_price_floor"):
         return score, True, "dekat batas bawah harga IDX"
     if rr_now < 0.30:

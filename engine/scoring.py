@@ -1994,6 +1994,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "action_component_spread": decision["component_spread"],
         "rsi": round(current_rsi, 1),
         "ret_1d_pct": round(float(stock_return_today), 2) if 'stock_return_today' in locals() else None,
+        "ret_5d_pct": round(float((current_price - close_prices.iloc[-6]) / close_prices.iloc[-6] * 100), 2) if len(close_prices) >= 6 else None,  # momentum harga 5-hari, dipakai Explosive Lane v2 -- lihat catatan _explosive_score
         "intraday_range_pct": round(float((high_prices.iloc[-1] - low_prices.iloc[-1]) / max(current_price, 1e-9) * 100), 2),
         "close_pos_day": round(float((current_price - low_prices.iloc[-1]) / max(high_prices.iloc[-1] - low_prices.iloc[-1], 1e-9)), 3),
         "value_traded": int(float(current_price * current_vol)),
