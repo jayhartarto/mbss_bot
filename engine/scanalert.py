@@ -128,6 +128,14 @@ def _get_alert_universe() -> list[str]:
         return []
     with open(core.WHITELIST_CACHE_FILE) as f:
         wl = json.load(f)
+    current_month = datetime.datetime.now(core.WIB).strftime("%Y-%m")
+    generated_month = wl.get("generated_month")
+    if generated_month != current_month:
+        # Tampilkan TETAP (bukan tolak total) -- konsisten dgn konvensi
+        # "show stale data with a note" di seluruh codebase -- tapi user
+        # perlu tahu ini bukan whitelist bulan ini.
+        print(f"⚠️ ticker_whitelist.json basi (dari {generated_month}, sekarang {current_month}) -- "
+              f"jalankan /eodscan untuk refresh. Tetap dipakai apa adanya utk scan ini.")
     return wl.get("eligible_tickers", [])
 
 
