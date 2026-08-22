@@ -40,6 +40,7 @@ logger = logging.getLogger("mbss.bootstrap")
 from engine import legacy_core as core  # noqa: E402
 from engine.cache import cache_manager  # noqa: E402
 import engine.nightly as nightly_engine  # noqa: E402
+import engine.scanalert as scanalert_engine  # noqa: E402
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -63,6 +64,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument(
         "--repairthin", dest="repairthin", action="store_true",
         help="One-time repair: find tickers stuck with too-few OHLCV bars (pre-fix bug) and force a full 2y backfill, then exit.",
+    )
+    mode.add_argument(
+        "--scanalert", dest="scanalert", action="store_true",
+        help="One-shot intraday breaking-alert scan (Alert A/B), then exit. Meant to be invoked "
+             "every 5 minutes by an external cron during trading hours (09:00-15:55 WIB).",
     )
     return parser.parse_args(argv)
 
@@ -136,6 +142,19 @@ def run_repairthin() -> None:
         sys.exit(1)
 
 
+def run_scanalert() -> None:
+    """One-shot intraday breaking-alert scan (CLI). Meant to run every 5
+    minutes via external cron during trading hours — see engine/scanalert.py."""
+    logger.info("Scan-alert starting (CLI mode) — Alert A/B intraday breaking scan")
+    t0 = time.time()
+    try:
+        summary = asyncio.run(scanalert_engine.run_scan_alert_once())
+        logger.info("Scan-alert finished in %.1fs: %s", time.time() - t0, summary)
+    except Exception:
+        logger.exception("Scan-alert failed after %.1fs", time.time() - t0)
+        sys.exit(1)
+
+
 def run_polling() -> None:
     """Start the Telegram bot in polling mode, with startup retries in case
     network isn't ready yet (common right after launching on mobile)."""
@@ -175,6 +194,8 @@ def main(argv: list[str] | None = None) -> None:
         run_dbstats()
     elif args.repairthin:
         run_repairthin()
+    elif args.scanalert:
+        run_scanalert()
     else:
         run_polling()
 

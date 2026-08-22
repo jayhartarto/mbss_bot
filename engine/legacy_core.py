@@ -406,6 +406,7 @@ from engine.cache import cache_manager
 import engine.nightly as nightly_engine
 import engine.market as market_engine
 import engine.broker as broker_engine
+import engine.scanalert as scanalert_engine
 # NOTE (MBSS v2 refactor, Phase 5a): first Command Layer module. build_app()
 # below needs these handler functions to register them; commands/scan.py
 # needs core.xxx for the deep scoring/ranking helpers it calls. Same
@@ -3748,7 +3749,8 @@ def get_intraday_session_bars(ticker: str, interval: str = "5m", period: str = "
 
 
 def detect_intraday_explosion(
-    ticker: str, lookback_bars: int = 3, volume_ratio_threshold: float = 3.0, price_spike_pct_threshold: float = 1.5
+    ticker: str, lookback_bars: int = 3, baseline_bars: int = 3,
+    volume_ratio_threshold: float = 3.0, price_spike_pct_threshold: float = 1.5,
 ) -> dict | None:
     """
     MBSS v2 (user request — "/fastscan", chase produktif di 08:50-09:30 dan
@@ -3758,18 +3760,28 @@ def detect_intraday_explosion(
     dimaksudkan buat 1m (lihat docstring get_intraday_session_bars di
     atas: "1m dipakai hanya untuk shortlist/check").
 
-    Kriteria PLACEHOLDER, BELUM ADA data forward sama sekali (beda dari
-    FAST tag EOD yang setidaknya sudah lewat 1-2 revisi observasi) —
-    volume_ratio (N bar terakhir vs baseline N bar sebelumnya) >= 3.0x DAN
-    price_spike_pct (perubahan N bar terakhir) >= 1.5%. User jalankan
-    MANUAL, bukan auto/cron — jadi tidak butuh presisi sempurna, cukup
-    jadi sinyal awal buat diverifikasi manual sebelum entry.
+    Kriteria PLACEHOLDER untuk volume_ratio_threshold/price_spike_pct_threshold
+    itu sendiri (BELUM ada data forward, beda dari FAST tag EOD yang setidaknya
+    sudah lewat 1-2 revisi observasi) — tapi baseline_bars=3 (dulu hardcoded 15)
+    SUDAH divalidasi backtest 1m riil (5 hari, 344 ticker harga 60-600, real
+    case CSMI/BRRC 21 Agst 2026): baseline 15 bar butuh lookback_bars+15=18 bar
+    histori sebelum cek pertama bisa jalan — di jam buka (09:00 onward, bar
+    08:55-08:59 nihil volume karena pre-market), itu artinya cek pertama baru
+    bisa ~09:18, PERSIS melewatkan window paling bernilai (CSMI spike 09:04-
+    09:09, BRRC 09:06-09:11) yang justru jadi alasan /fastscan disarankan
+    dijalankan 08:50-09:30. baseline_bars=3 (min_bars=6) membuat cek pertama
+    bisa mulai ~09:06 — menangkap CSMI SEBELUM entry riil user (09:07) dan
+    BRRC 2 menit sebelum entry riil (09:11).
+
+    volume_ratio = (N bar terakhir / baseline_bars bar sebelumnya). User
+    jalankan MANUAL, bukan auto/cron — jadi tidak butuh presisi sempurna,
+    cukup jadi sinyal awal buat diverifikasi manual sebelum entry.
 
     Returns None kalau data tidak cukup (di luar jam bursa, API gagal, bar
     kurang dari baseline minimum) — bukan exception, caller cukup skip.
     """
     bars = get_intraday_session_bars(ticker, interval="1m", period="1d")
-    min_bars = lookback_bars + 15  # perlu baseline yang cukup, bukan cuma 1-2 bar
+    min_bars = lookback_bars + baseline_bars
     if bars is None or bars.empty or len(bars) < min_bars:
         return None
 
@@ -3777,8 +3789,8 @@ def detect_intraday_explosion(
     closes = bars["Close"].astype(float)
 
     recent_vol = volumes.tail(lookback_bars).sum()
-    baseline_bars = volumes.iloc[:-lookback_bars].tail(15)
-    baseline_vol = baseline_bars.mean() * lookback_bars if not baseline_bars.empty else 0
+    baseline_window = volumes.iloc[:-lookback_bars].tail(baseline_bars)
+    baseline_vol = baseline_window.mean() * lookback_bars if not baseline_window.empty else 0
     if baseline_vol <= 0:
         return None
     volume_ratio = recent_vol / baseline_vol
@@ -7335,6 +7347,22 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
         print(f"❌ Also failed to notify user of error: {notify_error}")
 
 
+async def run_scanalert_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback (tiap 5 menit, lihat build_app()) — panggil scan-alert
+    intraday (Alert A/B, engine/scanalert.py). Fungsi ini sendiri no-op
+    murah di luar jam bursa/weekend (dicek di dalam run_scan_alert_once,
+    bukan di sini, supaya CLI --scanalert dan job ini pakai guard yg sama).
+    Try/except sendiri krn JobQueue TIDAK lewat global_error_handler biasa
+    (itu cuma utk update-handler) -- exception di sini kalau tak ditangkap
+    akan diam-diam menghentikan job berulang ini tanpa pemberitahuan.
+    """
+    try:
+        await scanalert_engine.run_scan_alert_once()
+    except Exception as e:
+        print(f"⚠️ Scan-alert job gagal: {e}")
+
+
 async def send_startup_notice(app: Application):
     """Sent once automatically when the bot process starts — the person's cue that
     it's alive, and the one place the disclaimer appears instead of every message."""
@@ -7367,6 +7395,7 @@ def build_app():
     app.add_handler(CommandHandler("whitelist", commands_misc.show_whitelist_status))
     app.add_handler(CommandHandler(["glossary", "istilah"], commands_misc.show_glossary))
     app.add_handler(CommandHandler("rebuildwhitelist", commands_misc.rebuild_whitelist_command))
+    app.add_handler(CommandHandler("scanalert", commands_misc.scanalert_toggle_command))
     app.add_handler(CommandHandler(["check", "cek"], commands_check.check_stock))
     app.add_handler(CommandHandler("tanya", commands_chat.tanya_command))
     app.add_handler(CommandHandler("tanyareset", commands_chat.tanya_reset_command))
@@ -7418,10 +7447,22 @@ def build_app():
     app.add_handler(CommandHandler("testopening", commands_misc.test_opening_dynamics))
     app.add_error_handler(global_error_handler)
 
-    # No automatic scheduling — hosted on a request-driven webhook (PythonAnywhere
-    # free web app) with no persistent background process to run a JobQueue.
-    # Morning brief / nightly scan / opening dynamics are triggered manually via
-    # /testbrief, /screendaytrade, /testopening instead.
+    # NOTE (MBSS v2, user request — deploy pindah ke server GCP persisten,
+    # bukan lagi PythonAnywhere request-driven): morning brief / nightly scan
+    # / opening dynamics MASIH manual via /testbrief, /screendaytrade,
+    # /testopening (tidak diubah). Scan-alert intraday (Alert A/B) BEDA --
+    # butuh polling tiap 5 menit sepanjang jam bursa, jadi ini satu-satunya
+    # job otomatis lewat JobQueue. interval=300s (5 menit), first=10 (mulai
+    # 10 detik setelah proses hidup, bukan nunggu interval penuh pertama).
+    # Guard hari-bursa/jam-bursa ada DI DALAM run_scan_alert_once (dipakai
+    # bareng CLI --scanalert), bukan di sini -- job ini boleh terus jalan
+    # 24/7, dia sendiri yg no-op murah di luar jam bursa.
+    if app.job_queue is not None:
+        app.job_queue.run_repeating(run_scanalert_job, interval=300, first=10)
+    else:
+        print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
+              "scan-alert intraday TIDAK akan jalan otomatis. Install dgn: "
+              "pip install \"python-telegram-bot[job-queue]\"")
 
     return app
 

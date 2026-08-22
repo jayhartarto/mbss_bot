@@ -569,6 +569,9 @@ def fetch_zapi_orderbook(ticker: str) -> dict | None:
     /v1/finance:pluang/orderbook): langsung menjawab keterbatasan yang
     berkali-kali disebut sepanjang sesi ini ("bot TIDAK punya akses
     order-book bid/ask asli") — ini BENERAN order book, bukan proxy OHLCV.
+    CACHE 15 DETIK (dikonfirmasi dari dokumentasi Zapi) -- jauh lebih segar
+    dari top-movers (1 menit), cocok dipakai SETELAH alert breaking untuk
+    rekomendasi harga entry real-time, bukan buat polling market-wide.
 
     Dipakai HANYA on-demand (flag "zapi" di /check), TIDAK PERNAH di-bulk-
     scan — kuota Zapi 600/bulan, 100/menit, SHARED semua endpoint termasuk
@@ -723,6 +726,112 @@ def compute_orderflow_snapshot_zapi(ticker: str, big_print_min_lot: int = 300) -
             result["big_buy_print_min_lot_threshold"] = big_print_min_lot
 
     return result
+
+
+# MBSS v2 (user request — push alert intraday "breaking", 2 tahap: Stage 1
+# trigger harga+volume [gratis, tanpa Zapi] SELALU langsung fire begitu
+# threshold tercapai; Stage 2 konfirmasi orderbook Zapi HANYA dicek setelah
+# Stage 1 fire, dan HANYA diluncurkan sebagai alert kedua kalau confirmed --
+# kalau tidak confirmed, tidak ada alert kedua sama sekali, Stage 1 berdiri
+# sendiri). Threshold di bawah ini divalidasi backtest 1m riil (5 hari, 344
+# ticker 60-600): spike>=3% + volume>=5x baseline mengangkat win-rate delayed-
+# entry dari ~17% (threshold longgar 1.5%/3x) ke ~39% di +2 menit -- masih
+# jauh dari tinggi, makanya Stage 1 sendiri TIDAK dianggap sinyal beli, cuma
+# "worth checking".
+BREAKING_ALERT_PRICE_SPIKE_PCT_MIN = 3.0
+BREAKING_ALERT_VOLUME_RATIO_MIN = 5.0
+
+# Kriteria "buy tebal di atas, sell cenderung kalah" -- SAMA SEKALI belum
+# divalidasi (beda dari threshold Stage 1 di atas): endpoint orderbook Zapi
+# cuma snapshot live 15 detik cache, TIDAK ADA history/replay endpoint, jadi
+# tidak bisa dibacktest di sandbox riset sama sekali. Ini starting point yang
+# masuk akal (bid dominan >=60%, dan margin ke ask >=20pp), BUKAN angka
+# tervalidasi -- sesuaikan setelah ada observasi live forward, sama disiplin
+# dengan bobot _explosive_score yang juga placeholder.
+ORDERBOOK_CONFIRM_BID_PERCENT_MIN = 60.0
+ORDERBOOK_CONFIRM_IMBALANCE_MIN = 20.0
+
+
+def check_orderbook_solid_buy_zapi(ticker: str) -> dict | None:
+    """
+    Stage 2 dari breaking-alert sequence: pakai compute_orderflow_snapshot_zapi
+    (sudah ada, 2 call Zapi: orderbook + running-trades BUY big-print) dan
+    tambahkan keputusan go/no-go eksplisit -- "confirmed" kalau bid_percent
+    dominan DAN marginnya ke ask_percent cukup lebar (lihat konstanta
+    ORDERBOOK_CONFIRM_* di atas untuk disclaimer belum-tervalidasi).
+
+    Return None kalau data orderbook tidak tersedia sama sekali (gagal fetch/
+    kuota habis) -- caller cukup treat sebagai "Stage 2 tidak bisa dicek",
+    BUKAN sebagai "tidak confirmed" (beda makna: unavailable vs confirmed=False).
+    """
+    snapshot = compute_orderflow_snapshot_zapi(ticker)
+    if not snapshot or not snapshot.get("available"):
+        return None
+    bid_pct = snapshot.get("bid_percent")
+    ask_pct = snapshot.get("ask_percent")
+    if bid_pct is None or ask_pct is None:
+        return {**snapshot, "confirmed": None}
+    confirmed = bid_pct >= ORDERBOOK_CONFIRM_BID_PERCENT_MIN and (bid_pct - ask_pct) >= ORDERBOOK_CONFIRM_IMBALANCE_MIN
+    return {**snapshot, "confirmed": confirmed}
+
+
+def build_breaking_alert_messages(ticker: str, detection: dict, orderbook_check: dict | None) -> list[str]:
+    """
+    Bangun sequence pesan untuk 1x scan: pesan Stage 1 SELALU ada (dipanggil
+    hanya setelah caller sudah pastikan detection["is_explosion"] True), pesan
+    Stage 2 HANYA ditambahkan kalau orderbook_check["confirmed"] True -- kalau
+    unavailable (None) atau confirmed False/None, list cuma berisi 1 pesan.
+    """
+    price = detection.get("price")
+    spike = detection.get("price_spike_pct")
+    vol_ratio = detection.get("volume_ratio")
+    messages = [
+        f"⚡ {ticker} bergerak cepat — {price:,.0f} ({spike:+.2f}% dari beberapa menit lalu)\n"
+        f"Volume {vol_ratio}x rata-rata.\n"
+        f"Cek chart & orderbook sebelum entry — bukan sinyal beli otomatis."
+    ]
+    if orderbook_check and orderbook_check.get("confirmed"):
+        bid_pct = orderbook_check.get("bid_percent")
+        ask_pct = orderbook_check.get("ask_percent")
+        big_buy_count = orderbook_check.get("big_buy_print_count")
+        extra = f", {big_buy_count} cetakan beli besar" if big_buy_count else ""
+        messages.append(
+            f"✅ {ticker} — ORDERBOOK SOLID BUY\n"
+            f"Bid {bid_pct}% vs Ask {ask_pct}%{extra}\n"
+            f"Buy tebal di atas, sell cenderung kalah."
+        )
+    return messages
+
+
+def check_breaking_alert_sequence(ticker: str) -> dict:
+    """
+    Orkestrasi 1x scan penuh untuk 1 ticker: Stage 1 (core.detect_intraday_
+    explosion, gratis, threshold BREAKING_ALERT_*) dulu -- kalau tidak fire,
+    berhenti di situ (stage2 tidak pernah dicek, 0 kuota Zapi terpakai). Kalau
+    fire, baru Stage 2 (check_orderbook_solid_buy_zapi, 2 kuota Zapi) dicek,
+    dan messages berisi 1 atau 2 pesan sesuai hasil Stage 2 (lihat
+    build_breaking_alert_messages).
+
+    BELUM dipanggil oleh scheduler/cron apa pun -- infrastruktur live-polling
+    untuk push alert intraday belum dibangun, ini baru fungsi inti yang siap
+    dipakai begitu scheduler-nya ada.
+    """
+    detection = core.detect_intraday_explosion(
+        ticker,
+        volume_ratio_threshold=BREAKING_ALERT_VOLUME_RATIO_MIN,
+        price_spike_pct_threshold=BREAKING_ALERT_PRICE_SPIKE_PCT_MIN,
+    )
+    if not detection or not detection.get("is_explosion"):
+        return {"stage1_fired": False}
+
+    orderbook_check = check_orderbook_solid_buy_zapi(ticker)
+    messages = build_breaking_alert_messages(ticker, detection, orderbook_check)
+    return {
+        "stage1_fired": True,
+        "detection": detection,
+        "orderbook_check": orderbook_check,
+        "messages": messages,
+    }
 
 
 def compute_brokersum_metrics_zapi(ticker: str, cmf=None, obv_divergence=None) -> dict:

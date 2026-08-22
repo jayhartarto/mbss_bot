@@ -2604,8 +2604,9 @@ async def fast_scan_command(update, context):
 
     lines = [f"🔥 FASTSCAN 1m — {len(exploded)} dari {len(union_picks)} kandidat (FAST∪Explosive∪HC∪LiveSpike) menunjukkan ledakan live"]
     lines.append(
-        "Kriteria PLACEHOLDER, BELUM ada data forward sama sekali: volume_ratio>=3.0x (3 bar terakhir vs "
-        "baseline 15 bar sebelumnya) DAN price spike>=1.5% (3 bar terakhir). Paling efektif dijalankan manual "
+        "Kriteria PLACEHOLDER (threshold-nya), BELUM ada data forward sama sekali: volume_ratio>=3.0x (3 bar terakhir vs "
+        "baseline 3 bar sebelumnya, divalidasi backtest 1m riil supaya cek pertama bisa mulai ~menit ke-6 sesi, bukan "
+        "~menit ke-18) DAN price spike>=1.5% (3 bar terakhir). Paling efektif dijalankan manual "
         "08:50-09:30 (chase opening) atau menjelang tutup Sesi 1 (chase carry-over ke Sesi 2). "
         "Verifikasi manual sebelum entry — ini sinyal awal, bukan konfirmasi final.\n"
     )

@@ -27,6 +27,7 @@ import json
 import os
 
 import engine.legacy_core as core
+import engine.scanalert as scanalert_engine
 
 
 GLOSSARY_TEXT = """📖 KAMUS ISTILAH BOT
@@ -183,6 +184,35 @@ async def show_whitelist_status(update, context):
         )
     except Exception as e:
         await core.safe_reply(update.message, f"⚠️ Gagal membaca whitelist: {e}")
+
+
+async def scanalert_toggle_command(update, context):
+    """
+    /scanalert [on|off] -- manual toggle utk alert scalping intraday (Alert
+    A/B, lihat engine/scanalert.py). Tanpa argumen = tampilkan status.
+    Default ON tiap hari bursa baru (reset otomatis di scan pertama hari
+    itu) -- toggle OFF di sini cuma berlaku SAMPAI hari bursa berikutnya,
+    supaya tidak lupa nyalain lagi dan kehilangan alert berhari-hari kalau
+    di-OFF krn market lagi jelek.
+    """
+    args = context.args or []
+    if not args:
+        status = "🟢 ON" if scanalert_engine.is_scan_alert_enabled() else "🔴 OFF"
+        await core.safe_reply(
+            update.message,
+            f"Scan-alert intraday: {status}\nPakai /scanalert on atau /scanalert off untuk ubah "
+            f"(otomatis balik ON lagi di hari bursa berikutnya)."
+        )
+        return
+    choice = args[0].strip().lower()
+    if choice == "on":
+        scanalert_engine.set_scan_alert_enabled(True)
+        await core.safe_reply(update.message, "🟢 Scan-alert intraday: ON")
+    elif choice == "off":
+        scanalert_engine.set_scan_alert_enabled(False)
+        await core.safe_reply(update.message, "🔴 Scan-alert intraday: OFF (sampai hari bursa berikutnya)")
+    else:
+        await core.safe_reply(update.message, "Pakai /scanalert on atau /scanalert off.")
 
 
 async def rebuild_whitelist_command(update, context):
