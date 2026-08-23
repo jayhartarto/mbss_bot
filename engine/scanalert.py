@@ -65,6 +65,9 @@ ALERT_B_PULLBACK_DEPTH_PCT = -4.0    # dari peak (harga tertinggi hari itu SETEL
 ALERT_B_REBOUND_TARGET_PCT = -1.0    # rebound ke >=-1% dari peak dianggap "solid"
 ALERT_B_REBOUND_WINDOW_MINUTES = 15
 
+MIN_VWAP_BARS = 3  # dibawah ini VWAP nyaris = typical price bar itu sendiri, belum representatif (temuan riset session ini)
+SESSION2_START_TIME = datetime.time(12, 0)  # cutoff sederhana S1/S2 -- VWAP HARUS reset tiap sesi, tidak nyambung lewat jeda istirahat
+
 SCAN_WINDOW_START = datetime.time(9, 0)
 SCAN_WINDOW_END = datetime.time(15, 55)
 
@@ -172,6 +175,35 @@ def _fetch_today_1m(tickers: list[str]):
     return yf.download(symbols, period="1d", interval="1m", group_by="ticker", threads=True, progress=False)
 
 
+def _compute_current_session_vwap(bars: pd.DataFrame) -> float | None:
+    """
+    VWAP LIVE (as of bar TERAKHIR yg tersedia) -- dipakai user utk menilai
+    "harga sekarang aman entry atau tidak" begitu alert diterima, BUKAN vwap
+    di titik historis deteksi terjadi. Reset per sesi (S1 vs S2, cutoff
+    12:00) -- VWAP tidak boleh nyambung lewat jeda istirahat. Return None
+    kalau bar sesi-berjalan masih <MIN_VWAP_BARS (di bar-bar pertama sesi,
+    VWAP nyaris = typical price bar itu sendiri, bukan rata-rata yg berarti
+    -- match temuan user sendiri soal ini di riset backtest sebelumnya).
+    """
+    if bars.empty:
+        return None
+    now_ts = bars.index[-1]
+    is_s2 = now_ts.time() >= SESSION2_START_TIME
+    session_mask = (bars.index.time >= SESSION2_START_TIME) if is_s2 else (bars.index.time < SESSION2_START_TIME)
+    session_bars = bars[session_mask]
+    if len(session_bars) < MIN_VWAP_BARS:
+        return None
+    highs = session_bars["High"].astype(float)
+    lows = session_bars["Low"].astype(float)
+    closes = session_bars["Close"].astype(float)
+    vols = session_bars["Volume"].fillna(0).astype(float)
+    total_vol = vols.sum()
+    if total_vol <= 0:
+        return None
+    typical = (highs + lows + closes) / 3.0
+    return float((typical * vols).sum() / total_vol)
+
+
 # ── Deteksi (reuse persis logika riset — first-touch, bukan snapshot terakhir) ──
 
 def _detect_alert_a(bars: pd.DataFrame, prev_close: float) -> dict | None:
@@ -270,20 +302,31 @@ def _detect_alert_b(bars: pd.DataFrame, prev_close: float) -> dict | None:
 
 # ── Pesan (ringkas, sengaja tanpa banyak keterangan — user baca cepat & amati live) ──
 
-def _build_alert_a_message(ticker: str, detection: dict, ret_3d: float | None) -> str:
+def _vwap_segment(current_price: float | None, vwap: float | None) -> str:
+    """" | VWAP 1.180 (+1.8%)" -- kosong total kalau VWAP belum tersedia (bukan dipaksa tampil placeholder)."""
+    if vwap is None or current_price is None or vwap <= 0:
+        return ""
+    dist_pct = (current_price - vwap) / vwap * 100
+    return f" | VWAP {vwap:,.0f} ({dist_pct:+.1f}%)"
+
+
+def _build_alert_a_message(ticker: str, detection: dict, ret_3d: float | None,
+                            current_price: float | None, vwap: float | None) -> str:
     tag = " ⚠️lari kencang" if ret_3d is not None and ret_3d >= RET_3D_WARN_THRESHOLD else ""
     return (
         f"⚡ {ticker} +{detection['spike_pct']:.1f}% | vol {detection['volume_ratio']:.1f}x | "
-        f"{detection['time']}{tag} | amati"
+        f"{detection['time']}{tag}{_vwap_segment(current_price, vwap)} | amati"
     )
 
 
 def _build_alert_b_messages(ticker: str, detection: dict, ret_3d: float | None,
-                             orderbook_check: dict | None) -> list[str]:
+                             orderbook_check: dict | None,
+                             current_price: float | None, vwap: float | None) -> list[str]:
     tag = " ⚠️lari kencang" if ret_3d is not None and ret_3d >= RET_3D_WARN_THRESHOLD else ""
     messages = [
         f"✅ {ticker} PULLBACK REBOUND dari +{detection['peak_tier']}% | "
-        f"skrg {detection['gain_at_rebound_pct']:+.1f}% | {detection['rebound_time']}{tag} | entry candidate"
+        f"skrg {detection['gain_at_rebound_pct']:+.1f}% | {detection['rebound_time']}"
+        f"{tag}{_vwap_segment(current_price, vwap)} | entry candidate"
     ]
     if orderbook_check and orderbook_check.get("confirmed"):
         bid_pct = orderbook_check.get("bid_percent")
@@ -359,6 +402,9 @@ async def run_scan_alert_once() -> dict:
             continue
         summary["scanned"] += 1
 
+        current_price = float(bars["Close"].astype(float).iloc[-1])
+        vwap_now = _compute_current_session_vwap(bars)
+
         t_state = tickers_state.setdefault(t, {"excluded_no_room": False, "alert_a_sent": False, "alert_b_sent": False})
 
         if not t_state["excluded_no_room"] and not t_state["alert_a_sent"] and not t_state["alert_b_sent"]:
@@ -372,7 +418,7 @@ async def run_scan_alert_once() -> dict:
         if not t_state["alert_a_sent"]:
             det_a = _detect_alert_a(bars, prev_close)
             if det_a:
-                msg = _build_alert_a_message(t, det_a, ret_3d)
+                msg = _build_alert_a_message(t, det_a, ret_3d, current_price, vwap_now)
                 if bot is not None:
                     await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
                 else:
@@ -386,7 +432,7 @@ async def run_scan_alert_once() -> dict:
                 orderbook_check = await asyncio.to_thread(
                     broker_engine.check_orderbook_solid_buy_zapi, t
                 )
-                for msg in _build_alert_b_messages(t, det_b, ret_3d, orderbook_check):
+                for msg in _build_alert_b_messages(t, det_b, ret_3d, orderbook_check, current_price, vwap_now):
                     if bot is not None:
                         await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
                     else:
