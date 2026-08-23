@@ -301,22 +301,27 @@ async def check_stock(update, context):
     # MBSS v2 (user request — setup pre-breakout SDT via MACD centerline
     # approach): backtest OHLCV lokal (n=24.727), belum ada histori
     # /winrate LIVE — informational, sama disiplin dengan bull_flag_pullback.
+    # MBSS v2 (user request — macd_approach_tier GANTI TOTAL ke lane Brights-
+    # compatible, research/mbss_macd_production_research_bundle/): SWEET_
+    # SPOT/SQUEEZE_RESCUE/PULLBACK_RESUME diganti FAST_RECOVERY/EARLY_
+    # RECOVERY/ABOVE_MOMENTUM. Angka Hit+6%/+10% D5 sama dgn yg ditampilkan
+    # di /screendaytrade (LANE_INFO, commands/scan.py) -- EARLY_RECOVERY
+    # derivasi (BELOW_FAST3 - BELOW_NEAR_FAST3), lihat catatan di sana.
     macd_approach_tier = result.get("macd_approach_tier")
-    if macd_approach_tier == "SWEET_SPOT":
+    if macd_approach_tier == "FAST_RECOVERY":
         bb_line += (
-            f"\n📐 MACD approach SWEET SPOT (BACKTEST): cross bullish {result.get('macd_cross_days_ago', '-')} hari lalu, "
-            f"masih di bawah centerline, MACD line masih naik — backtest historis fwd10d rata-rata di atas baseline"
+            f"\n📐 MACD FAST RECOVERY (BACKTEST): pre-cross, BELOW centerline, gap ke Signal menyempit cepat & sudah dekat — "
+            f"historis Hit+6% ~62% / Hit+10% ~39% dlm 5 hari (n=85)"
         )
-    elif macd_approach_tier == "SQUEEZE_RESCUE":
+    elif macd_approach_tier == "EARLY_RECOVERY":
         bb_line += (
-            f"\n📐 MACD approach + squeeze (BACKTEST): cross bullish {result.get('macd_cross_days_ago', '-')} hari lalu (masih awal) "
-            f"TAPI bollinger squeeze aktif — backtest historis setara performa sweet spot"
+            f"\n📐 MACD EARLY RECOVERY (BACKTEST): pre-cross, BELOW centerline, gap menyempit cepat tapi belum dekat — "
+            f"historis Hit+6% ~59% / Hit+10% ~43% dlm 5 hari (derivasi, n≈262)"
         )
-    elif macd_approach_tier == "PULLBACK_RESUME":
+    elif macd_approach_tier == "ABOVE_MOMENTUM":
         bb_line += (
-            f"\n📐 MACD pullback-resume (BACKTEST): signal-line cross HARI INI SAMBIL MACD line sudah di atas centerline "
-            f"({result.get('dist_to_sma50_pct', '-')}% di atas SMA50) — pola pullback dalam uptrend mapan, "
-            f"backtest historis win-rate tertinggi dari 3 tier MACD approach"
+            f"\n📐 MACD ABOVE MOMENTUM (BACKTEST): pre-cross, ABOVE centerline, momentum menguat — "
+            f"historis Hit+6% ~41% / Hit+10% ~28% dlm 5 hari (n=61)"
         )
     # MBSS v2 (user request — HC-appropriate, BEDA dari macd_approach_tier di
     # atas yang untuk SDT pre-breakout): konfirmasi centerline cross yang

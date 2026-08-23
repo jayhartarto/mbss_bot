@@ -356,218 +356,122 @@ async def screen_daytrade(update, context):
         await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons_live)
         return
 
-    lines = ["⚡ SCREENING DAY TRADE - RADAR BREAKOUT V5 ACTIVITY\n"]
-    if backbone_staleness:
-        lines.insert(0, backbone_staleness)
-    lines.append(f"Kriteria: {filter_tier_note}\n")
-    lines.append("Catatan: Ini RADAR, bukan entry final. Entry live wajib lewat /executiongate atau /check.\n")
-    lines.append("Legend: B=Breakout, C=Continuation, Act=Activity/Liquidity, VolQ=Volume Breakout Quality, Room=Entry Room, Risk=risiko teknikal.\n")
-
-    for i, r in enumerate(top_candidates, 1):
-        v5 = core.compute_daytrade_v5_summary(r)
-        ab = r.get("active_breakout", {})
-        src_live = ""
-        if ab.get("available"):
-            src_live = f" | Active {ab.get('score')}/100 {ab.get('label')}"
-        room = v5["room"]
-        cont = v5["continuation"]
-        risk = v5["risk"]
-        br = v5["breakout"]
-        volq = v5["volq"]
-
-        # MBSS v2 (user request — inline winrate per label): "Lane" ini
-        # PERSIS field yang tersimpan sebagai signal_label buat winrate
-        # (r["_positive_lane"], lihat lock_daily_daytrade_picks) — lookup
-        # langsung pakai nilai yang sama, tidak ada celah mismatch.
-        lane = r.get("_positive_lane", "-")
-        wr = core.get_winrate_for_label(lane)
-        lane_str = f"{lane} (WR {wr})" if wr else lane
-
-        # AB-RC1 backbone (MBSS v2, user backtest) — angka UNIVERSAL yang
-        # sama tampil di /hc & /consensus juga, biar konsisten lintas-tool.
-        bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
-        backbone_note = (
-    f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
-    if bb_info and "entry_rank" in bb_info else ""
-)
-
-        lines.append(
-            f"{i}. {r['ticker']} — {v5['label']}\n"
-            f"   Total {v5['total']}/100 | Bias {r.get('_positive_bias', '-')}/100 | Lane {lane_str} | B {br['score']} | C {cont['score']} | Act {v5['activity']['score']} | VolQ {volq['score']} | Room {room['score']} | Safety {risk['score']}{src_live}{backbone_note}\n"
-            f"   Harga {r.get('price')} | Valid >{v5['valid_level']} | Ideal {v5['ideal']} | Invalid <{v5['invalid']}\n"
-            f"   Room: {room['label']} ({room['dist_high_pct']}% ke high, upside TP1 {room['upside_tp1_pct']}%) | VolQ: {volq['label']} | Continuation: {cont['label']}\n"
-            f"   Note: {v5['note']}{market_engine.format_sector_tag(r.get('sector'))}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}{nightly_engine.format_breakout_alert_tag(r['ticker'])}"
-            f"{core.format_fast_candidate_tag(r)}"
-        )
-
-    # MBSS v2 (user request — "ini harus keluar ke rekomendasi SDT",
-    # positioning SDT = cari setup SEBELUM breakout vs HC = follow breakout
-    # yang SUDAH terjadi): section TERPISAH, BUKAN dicampur ke ranking
-    # FRESH/CONT di atas — kandidat pre-breakout secara struktural akan
-    # gagal kriteria breakout/continuation lane (sama alasan PRIORITY
-    # ACCUMULATION jadi lane sendiri). Sumber: SELURUH pool Danger Gate
-    # survivor malam ini (`results`, bukan cuma top_candidates yang sudah
-    # dipersempit V5), supaya tidak kehilangan kandidat yang secara
-    # definisi belum breakout. Backtest OHLCV lokal saja (n=24.727, 3
-    # iterasi — lihat compute_factor_scoring), BELUM ada histori /winrate
-    # LIVE — dikunci TERPISAH (source="screendaytrade_macd_approach")
-    # supaya validasi forward bisa mulai, TIDAK dicampur ke skor/lane
-    # FRESH/CONT yang sudah tervalidasi live.
-    macd_approach_candidates = [
-        r for r in results
-        if r.get("macd_approach_tier") in ("SWEET_SPOT", "SQUEEZE_RESCUE", "PULLBACK_RESUME")
-    ]
-    if macd_approach_candidates:
-        # BUGFIX (user report, ditemukan lewat cek chart manual — real case
-        # MNCN/BMTR/PTBA: urutan lama pakai probability_score backbone,
-        # yang sama sekali TIDAK mengukur seberapa matang/dekat setup MACD
-        # ini ke centerline — MNCN (cross 1 hari lalu, paling MENTAH) malah
-        # tampil #1 karena probability_score-nya kebetulan tinggi, sementara
-        # PTBA (cross 11 hari lalu, PALING DEKAT ke centerline saat dicek
-        # manual di chart) malah tampil TERAKHIR). Urutan baru: tier dulu,
-        # lalu KEMATANGAN spesifik-MACD di dalam tier:
-        # - PULLBACK_RESUME: sinyal PALING SEGAR (signal-line cross HARI
-        #   INI, bukan sedang berkembang seperti dua tier lain) dengan
-        #   evidence win-rate tertinggi di antara ketiganya (backtest
-        #   research_macd_cross_winner_profile_v2.py + research_macd_
-        #   pullback_resume_threshold.py) -- diprioritaskan PALING ATAS.
-        #   Di dalam tier ini, dist_to_sma50_pct makin besar makin
-        #   diprioritaskan (quintile teratas = win-rate tertinggi).
-        # - SWEET_SPOT: makin dekat ke bin puncak backtest (16-19 hari,
-        #   tengah ~17) makin diprioritaskan -- lihat catatan riset di
-        #   compute_factor_scoring.
-        # - SQUEEZE_RESCUE: cross_days_ago PALING BESAR (paling lama sejak
-        #   cross, dalam rentang 0-11) diprioritaskan duluan -- proxy
-        #   "paling jauh sudah berkembang menuju centerline", PERSIS urutan
-        #   yang cocok dengan cek manual user (PTBA 11 > BMTR 10 > MNCN 1).
-        # probability_score backbone TETAP ditampilkan di tiap baris (info),
-        # cuma bukan lagi kunci pengurutan section ini.
-        SWEET_SPOT_PEAK_DAY = 17  # tengah bin 16-19 hari, bucket backtest terbaik (fwd10d +2.13%)
-        def _macd_maturity_key(r):
-            tier = r.get("macd_approach_tier")
-            days = r.get("macd_cross_days_ago") or 0
-            if tier == "PULLBACK_RESUME":
-                return (0, -(r.get("dist_to_sma50_pct") or 0))
-            if tier == "SWEET_SPOT":
-                return (1, abs(days - SWEET_SPOT_PEAK_DAY))
-            return (2, -days)  # SQUEEZE_RESCUE: days makin besar (0..11) makin diprioritaskan
-        macd_approach_candidates.sort(key=_macd_maturity_key)
-        macd_approach_candidates = macd_approach_candidates[:8]
-
-        await asyncio.to_thread(
-            core.lock_daily_daytrade_picks, macd_approach_candidates, "screendaytrade_macd_approach",
-            (backbone_result or {}).get("all_scored", {})
-        )
-
-        lines.append(
-            "\n📐 SETUP PRA-BREAKOUT — MACD approach (BACKTEST OHLCV lokal, BELUM ada histori /winrate live — watchlist, bukan entry final)"
-        )
-        MACD_TIER_LABELS = {"SWEET_SPOT": "SWEET SPOT", "SQUEEZE_RESCUE": "SQUEEZE RESCUE", "PULLBACK_RESUME": "PULLBACK RESUME"}
-        for r in macd_approach_candidates:
-            tier = r.get("macd_approach_tier")
-            tier_label = MACD_TIER_LABELS.get(tier, tier)
-            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
-            backbone_note = (
-                f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
-                if bb_info and "entry_rank" in bb_info else ""
-            )
-            if tier == "PULLBACK_RESUME":
-                detail = f"cross bullish HARI INI, {r.get('dist_to_sma50_pct', '-')}% di atas SMA50"
-            else:
-                detail = f"cross bullish {r.get('macd_cross_days_ago', '-')} hari lalu" + (" + squeeze aktif" if tier == "SQUEEZE_RESCUE" else "")
-            lines.append(
-                f"  • {r['ticker']} — {tier_label}, {detail} | Harga {r.get('price')}{backbone_note}"
-                f"{market_engine.format_sector_tag(r.get('sector'))}"
-            )
-
-    # MBSS v2 (user request — "cocoknya menggantikan EXPLOSIVE LANE... untuk
-    # dimunculkan di SDT, jadi 2 picks terpisah": Pick #1 = pengganti
-    # Explosive Lane (bobot gain tinggi), Pick #2 = pengganti SDT utama
-    # (diurut probability win tertinggi). Keputusan user setelah quintile
-    # sweep + uji Q1 (research_explosive_lane_v2_quintile_sweep.py +
-    # research_explosive_q1_profile_test.py): CUTOFF Q2/Q3 (dead-zone,
-    # ~6.5% explosive-rate — sudah di-reject di _explosive_score), Q1
-    # dapat jatah TERBATAS 1-2 pick (edge real ~13% TAPI arah tidak bisa
-    # diprediksi lebih lanjut dari MACD line/histogram, Cohen's d di dalam
-    # Q1 semua kecil — TIDAK diranking halus, cuma tie-break probability_
-    # score seadanya), Q4/Q5 (arah jelas) jadi pool utama buat KEDUA pick.
-    explosive_candidates = []  # (score, tier, r)
-    for r in results:
-        score, rejected, _reason = _explosive_score(r, results)
-        if rejected:
-            continue
-        tier = _macd_trend_clarity_tier(r, results)
-        if tier is None:
-            continue  # data trend-clarity tidak cukup -- exclude dari kedua pick, bukan ditebak
-        explosive_candidates.append((score, tier, r))
-
-    EXPLOSIVE_Q1_SLOTS = 2
-    EXPLOSIVE_MAIN_SLOTS = 5  # MBSS v2 (user request): expand Q4/Q5 main slots 3->5 kalau memang ada kandidatnya, tetap urut skor explosive tertinggi dulu
-    PROBABILITY_PICKS_COUNT = 5
+    # MBSS v2 (user request — SDT redesain total: hapus radar "sudah
+    # breakout" [dulu section 1], fokus 100% pra-breakout; macd_approach_tier
+    # ganti total ke lane Brights-compatible FAST_RECOVERY/EARLY_RECOVERY/
+    # ABOVE_MOMENTUM [lihat compute_factor_scoring]; EXPLOSIVE jadi section
+    # TERPISAH [bukan digabung ke pra-breakout] berisi subset FAST3
+    # [FAST_RECOVERY ∪ EARLY_RECOVERY, BELOW_CENTERLINE] -- tervalidasi
+    # Hit+10% D5 TERTINGGI di antara semua lane fully-specified [BELOW_FAST3
+    # 42.07%, n=347; EARLY_RECOVERY sendiri malah lebih tinggi dari
+    # FAST_RECOVERY -- "near" mempertajam timing bukan conversion mentah,
+    # lihat catatan compute_factor_scoring]; section terpisah "HIGH
+    # PROBABILITY PICKS" [dulu pool sempit Q4/Q5] DIHAPUS -- probability_
+    # score Backbone (sudah termasuk bonus whitelist net-buy smart money)
+    # dipakai sbg tie-break urutan di SEMUA section, bukan list sendiri.
+    # Universe TIDAK di-cap harga (floor only dari whitelist bulanan,
+    # results sudah warisi itu) -- jangan tambah cap baru di sini.
+    LANE_INFO = {
+        # hit6/hit10 = Hit +6%/+10% D5 (n dari research/brights_imminent_
+        # cross_backtest_v1.py + imminent_cross_episode_hypothesis_v2.py,
+        # proper development->calibration->validation split). EARLY_RECOVERY
+        # DERIVED (BELOW_FAST3 dikurangi BELOW_NEAR_FAST3, n=347-85=262) --
+        # bukan langsung dari 1 backtest run terpisah, tapi aljabar murni
+        # dari 2 angka yang SUDAH published (bukan tebakan baru).
+        "FAST_RECOVERY": {"order": 0, "label": "FAST RECOVERY", "hit6": 62.35, "hit10": 38.82, "n": 85, "derived": False},
+        "EARLY_RECOVERY": {"order": 1, "label": "EARLY RECOVERY", "hit6": 59.2, "hit10": 43.1, "n": 262, "derived": True},
+        "ABOVE_MOMENTUM": {"order": 2, "label": "ABOVE MOMENTUM", "hit6": 40.98, "hit10": 27.87, "n": 61, "derived": False},
+    }
 
     def _bb_prob(ticker):
         bb = (backbone_result or {}).get("all_scored", {}).get(ticker) if backbone_result else None
         return bb.get("probability_score", 0) if bb else 0
 
-    q45_pool = [item for item in explosive_candidates if item[1] in ("Q4", "Q5")]
-    q1_pool = [item for item in explosive_candidates if item[1] == "Q1"]
-    q45_pool.sort(key=lambda item: (item[0], _bb_prob(item[2]["ticker"])), reverse=True)
-    q1_pool.sort(key=lambda item: _bb_prob(item[2]["ticker"]), reverse=True)
+    lane_candidates = [r for r in results if r.get("macd_approach_tier") in LANE_INFO]
+    lane_candidates.sort(key=lambda r: (LANE_INFO[r["macd_approach_tier"]]["order"], -_bb_prob(r["ticker"])))
 
-    explosive_picks = q45_pool[:EXPLOSIVE_MAIN_SLOTS] + q1_pool[:EXPLOSIVE_Q1_SLOTS]
-    probability_picks = sorted(q45_pool, key=lambda item: _bb_prob(item[2]["ticker"]), reverse=True)[:PROBABILITY_PICKS_COUNT]
+    if sort_mode:
+        def _bb(r):
+            return (backbone_result or {}).get("all_scored", {}).get(r["ticker"], {})
+        if sort_mode == "rank":
+            lane_candidates.sort(key=lambda r: (_bb(r).get("entry_rank") is None, _bb(r).get("entry_rank") or 0))
+        elif sort_mode == "prob":
+            lane_candidates.sort(key=lambda r: (_bb(r).get("probability_score") is not None, _bb(r).get("probability_score") or -1), reverse=True)
+        else:  # danger
+            lane_candidates.sort(key=lambda r: (_bb(r).get("predicted_danger") is None, _bb(r).get("predicted_danger") or 0))
 
-    if explosive_picks:
-        await asyncio.to_thread(
-            core.lock_daily_daytrade_picks, [r for _, _, r in explosive_picks], "screendaytrade_explosive",
-            (backbone_result or {}).get("all_scored", {})
-        )
-        lines.append(
-            "\n🚀 EXPLOSIVE CANDIDATES — potensi gain besar (Pick #1, pengganti Explosive Lane. BACKTEST research_macd_explosive_gain_profile.py, BELUM ada histori /winrate live)"
-        )
-        for score, tier, r in explosive_picks:
-            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
-            backbone_note = (
-                f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
-                if bb_info and "entry_rank" in bb_info else ""
-            )
-            tier_note = " ⚠️ Q1 WILDCARD (edge nyata ~13% tapi arah tidak terbaca dari MACD line/histogram)" if tier == "Q1" else f" [{tier}]"
-            lines.append(
-                f"  • {r['ticker']} — Explosive Score {score:.0f}/100{tier_note} | {r.get('dist_to_sma50_pct', '-')}% di atas SMA50, "
-                f"day-range {r.get('day_range_pct_10d', '-')}% | Harga {r.get('price')}{backbone_note}"
-                f"{market_engine.format_sector_tag(r.get('sector'))}"
-            )
+    DANGER_WARNING_THRESHOLD = 50.0  # skala 0-100 compute_danger_score, di atas rata-rata malam ini secara kasar
 
-    if probability_picks:
-        await asyncio.to_thread(
-            core.lock_daily_daytrade_picks, [r for _, _, r in probability_picks], "screendaytrade_probability",
-            (backbone_result or {}).get("all_scored", {})
-        )
-        lines.append(
-            "\n🎯 HIGH PROBABILITY PICKS — diurut probability_score Backbone (Pick #2, pengganti radar SDT utama), pool MACD trend-clarity Q4/Q5 (arah jelas). BELUM ada histori /winrate live"
-        )
-        for _, _, r in probability_picks:
-            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
-            backbone_note = (
-                f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
-                if bb_info and "entry_rank" in bb_info else ""
-            )
-            lines.append(
-                f"  • {r['ticker']} — Harga {r.get('price')}{backbone_note}"
-                f"{market_engine.format_sector_tag(r.get('sector'))}"
-            )
+    def _format_candidate_line(r, bullet="  • "):
+        lane = r["macd_approach_tier"]
+        info = LANE_INFO[lane]
+        targets = r.get("targets") or {}
+        price = r.get("price")
+        tp1 = targets.get("tp_1")
+        sl = targets.get("cut_loss")
+        rr_now = backbone_engine.compute_rr_at_current_price(r)
+        bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
 
-    buttons = core.build_check_buttons(
-        [r["ticker"] for r in top_candidates] + [r["ticker"] for r in macd_approach_candidates]
-        + [r["ticker"] for _, _, r in explosive_picks] + [r["ticker"] for _, _, r in probability_picks]
+        extra = []
+        sm_pct = r.get("whitelist_accumulation_net_pct")
+        sm_brokers = r.get("whitelist_num_brokers") or 0
+        if sm_pct is not None and sm_pct >= 15 and sm_brokers >= 2:
+            extra.append(f"\n   💰 Smart money: net-buy {sm_pct:+.0f}% ({sm_brokers} broker whitelist)")
+        if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= DANGER_WARNING_THRESHOLD:
+            extra.append(f"\n   ⚠️ Danger score {bb_info['predicted_danger']:.0f}/100 (di atas rata-rata malam ini)")
+
+        n_note = " (derivasi 2 angka published)" if info["derived"] else ""
+        rr_str = f"{rr_now:.2f}" if rr_now is not None else "-"
+        return (
+            f"{bullet}{r['ticker']} — {info['label']} (potensi +6% ~{info['hit6']:.0f}% / +10% ~{info['hit10']:.0f}% dlm 5 hari, n={info['n']}{n_note})\n"
+            f"   Entry ~{price} (ref: open sesi berikutnya) | TP {tp1} (+6%) | SL {sl} | RR {rr_str}"
+            f"{''.join(extra)}{market_engine.format_sector_tag(r.get('sector'))}"
+        )
+
+    lines = ["🎯 SCREENING DAY TRADE — SETUP PRA-BREAKOUT\n"]
+    if backbone_staleness:
+        lines.insert(0, backbone_staleness)
+    lines.append(
+        "Kriteria: MACD belum cross (pre-cross) tapi gap ke Signal line menyempit -- 3 lane, "
+        "lihat research/mbss_macd_production_research_bundle/. Potensi% = Hit-rate historis lane ini "
+        "(BUKAN skor individual ticker), n = jumlah episode tervalidasi.\n"
     )
+    lines.append("Catatan: Ini RADAR, bukan entry final. Verifikasi live sebelum entry.\n")
+
+    if not lane_candidates:
+        lines.append("Tidak ada kandidat pra-breakout malam ini.")
+    else:
+        for r in lane_candidates:
+            lines.append(_format_candidate_line(r, bullet=""))
+
+        await asyncio.to_thread(
+            core.lock_daily_daytrade_picks, lane_candidates, "screendaytrade_macd_lane",
+            (backbone_result or {}).get("all_scored", {})
+        )
+
+    # EXPLOSIVE -- section TERPISAH (bukan digabung pra-breakout di atas),
+    # subset FAST3 (BELOW_CENTERLINE, gap_slope_3d cepat) yg Hit+10% D5
+    # paling tinggi di antara semua lane fully-specified.
+    explosive_candidates = [r for r in lane_candidates if r["macd_approach_tier"] in ("FAST_RECOVERY", "EARLY_RECOVERY")]
+    lines.append("\n🚀 EXPLOSIVE — konversi ke +10% tertinggi (FAST_RECOVERY ∪ EARLY_RECOVERY, BELOW centerline)\n")
+    if not explosive_candidates:
+        lines.append("Tidak ada kandidat explosive malam ini.")
+    else:
+        for r in explosive_candidates:
+            lines.append(_format_candidate_line(r))
+        await asyncio.to_thread(
+            core.lock_daily_daytrade_picks, explosive_candidates, "screendaytrade_explosive",
+            (backbone_result or {}).get("all_scored", {})
+        )
+
+    buttons = core.build_check_buttons([r["ticker"] for r in lane_candidates])
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
-    # Tombol upload Broker Summary ALL 3 hari untuk 12 saham hasil radar.
+    # Tombol upload Broker Summary ALL 3 hari untuk saham hasil radar.
     try:
         buttons = []
         row = []
-        for r in top_candidates:
+        for r in lane_candidates:
             t = str(r.get("ticker", "")).upper().strip()
             if not t:
                 continue
@@ -587,7 +491,7 @@ async def screen_daytrade(update, context):
                     "• Tab ALL\n"
                     "• Rentang 3 hari bursa\n"
                     "• Mode Net aktif\n\n"
-                    "Prioritas upload: kandidat Fresh / Continuation terbaik."
+                    "Prioritas upload: kandidat EXPLOSIVE terlebih dahulu."
                 ),
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
@@ -2755,41 +2659,15 @@ async def consensus_command(update, context):
             f"masih cooldown ({', '.join(cooldown_blocked)}) — tidak direkomendasikan ulang, kecuali /check konfirmasi reclaim genuine."
         )
 
-    # === EXPLOSIVE LANE ===
-    explosive_pool = [r for r in pool if r["ticker"] not in prime_tickers]
-    min_score = EXPLOSIVE_MIN_SCORE_BY_REGIME.get(market_regime, EXPLOSIVE_MIN_SCORE_BY_REGIME["R0_UNKNOWN"])
-    explosive_scored = []
-    for r in explosive_pool:
-        score, rejected, _reason = _explosive_score(r, pool)
-        if not rejected and score >= min_score:
-            explosive_scored.append((score, r))
-    explosive_scored.sort(key=lambda pair: pair[0], reverse=True)
-    explosive_picks = explosive_scored[:EXPLOSIVE_MAX_NAMES]
-
-    lines.append(f"\n🚀 EXPLOSIVE LANE — {len(explosive_picks)} saham (min score {min_score}, regime {market_regime})")
-    if not explosive_picks:
-        lines.append("Tidak ada kandidat lolos ambang explosive hari ini.")
-    for i, (score, r) in enumerate(explosive_picks, 1):
-        v5 = core.compute_daytrade_v5_summary(r)
-        rr_now = backbone_engine.compute_rr_at_current_price(r)
-        # MBSS v2 (user request — review label "TRUE EXPLOSIVE"): sebelumnya
-        # cuma (RR>=2.0 ATAU Room>=80) -- keduanya sama-sama ukuran "besarnya
-        # potensi upside", jadi OR di sini cuma menguji dimensi yang SAMA dua
-        # kali dengan rumus beda, bukan dua bukti independen. Sekarang wajib
-        # ADA partisipasi volume nyata (Activity>=65, placeholder pending
-        # forward data) DAN regime MACD bullish established (bukan cuma
-        # histogram baru positif tipis) -- macd_state bullish DAN MACD line
-        # di atas 0.
-        activity_score = v5["activity"]["score"]
-        size_signal = rr_now >= 2.0 or v5["room"]["score"] >= 80
-        macd_confirmed = r.get("macd_state") == "bullish" and r.get("macd_line_above_zero")
-        label = "TRUE EXPLOSIVE" if (size_signal and activity_score >= 65 and macd_confirmed) else "FAST MOMENTUM"
-        lines.append(
-            f"{i}. {r['ticker']} — Explosive {score:.0f} [{label}]\n"
-            f"   Room {v5['room']['score']} | RR@now {rr_now} | Activity {activity_score}\n"
-            f"   Action: /check {r['ticker']} sebelum entry"
-            f"{core.format_fast_candidate_tag(r)}"
-        )
+    # MBSS v2 (user request — Explosive Lane DIHAPUS dari /consensus, cukup
+    # muncul di /screendaytrade saja): dulu section "=== EXPLOSIVE LANE ==="
+    # di sini, reuse _explosive_score/EXPLOSIVE_MIN_SCORE_BY_REGIME. Sekarang
+    # Explosive murni section SDT (lane FAST_RECOVERY/EARLY_RECOVERY,
+    # macd_approach_tier baru) -- lihat commands/scan.py screen_daytrade().
+    # explosive_picks dipertahankan sbg list KOSONG (bukan dihapus variabelnya)
+    # supaya referensi di bawah (SMART-MONEY WATCH exclusion, LONG-HORIZON
+    # WATCH "juga di" tag, lock_candidates, all_tickers) tidak perlu diubah satu-satu.
+    explosive_picks = []
 
     # === SMART-MONEY WATCH (akumulasi kuat, belum ke-konfirmasi SDT/HC) ===
     # MBSS v2 (user request — "diurutkan dari top value net buy smartmoney
@@ -2887,15 +2765,14 @@ async def consensus_live_command(update, context):
 
     prime_tickers = [t for t in top8_tickers if t in sdt_selected and t in hc_selected]
 
-    explosive_pool = [r for r in pool if r["ticker"] not in prime_tickers]
-    min_score = EXPLOSIVE_MIN_SCORE_BY_REGIME.get(market_regime, EXPLOSIVE_MIN_SCORE_BY_REGIME["R0_UNKNOWN"])
-    explosive_scored = []
-    for r in explosive_pool:
-        score, rejected, _reason = _explosive_score(r, pool)
-        if not rejected and score >= min_score:
-            explosive_scored.append((score, r))
-    explosive_scored.sort(key=lambda pair: pair[0], reverse=True)
-    explosive_tickers = [r["ticker"] for _, r in explosive_scored[:EXPLOSIVE_MAX_NAMES]]
+    # MBSS v2 (user request — Explosive Lane diganti sistem baru, dipakai
+    # KONSISTEN dengan SDT: lane FAST_RECOVERY/EARLY_RECOVERY, macd_approach_
+    # tier baru — lihat screen_daytrade()). _explosive_score (formula lama)
+    # sudah tidak dipakai di mana pun lagi.
+    explosive_tickers = [
+        r["ticker"] for r in pool
+        if r["ticker"] not in prime_tickers and r.get("macd_approach_tier") in ("FAST_RECOVERY", "EARLY_RECOVERY")
+    ][:EXPLOSIVE_MAX_NAMES]
 
     # MBSS v2 (user request — "consensus live kok tidak tracking top3 entry
     # backbone"): Backbone Top-3 ikut dicek live juga sekarang, reuse

@@ -1710,56 +1710,98 @@ def compute_factor_scoring(ticker, include_quote_check=True):
                         is_thick = hist_magnitude_percentile >= 67.0  # tercile atas, cocok temuan backtest
                         macd_histogram_noise_exclude = bool(is_thick and not decelerating)
 
-    if (
-        macd_cross_direction == "bullish"
-        and macd_cross_days_ago is not None
-        and not macd_line_above_zero
-        and macd_slope_percentile is not None
-        and macd_slope_percentile >= MACD_SLOPE_MEANINGFUL_PERCENTILE
-        and not macd_histogram_noise_exclude
-    ):
-        if 14 <= macd_cross_days_ago <= 23:
-            macd_approach_tier = "SWEET_SPOT"
-        elif macd_cross_days_ago <= 11 and bollinger_squeeze:
-            macd_approach_tier = "SQUEEZE_RESCUE"
+    # MBSS v2 (user request — GANTI TOTAL macd_approach_tier: SWEET_SPOT/
+    # SQUEEZE_RESCUE/PULLBACK_RESUME di atas diganti FAST_RECOVERY/
+    # EARLY_RECOVERY/ABOVE_MOMENTUM, riset research/mbss_macd_production_
+    # research_bundle/ + research/brights_imminent_cross_backtest_v1.py +
+    # macd_cross_price_trend_explore_v1.py's add_lane()). Field NAME
+    # `macd_approach_tier` DIPERTAHANKAN (banyak consumer baca field ini:
+    # check.py, scan.py SDT, legacy_core.py winrate snapshot) -- cuma
+    # NILAINYA yang ganti total. Alasan ganti, bukan gabung: sistem lama
+    # dikalibrasi thd EMA MACD (sudah diganti SMA Brights-compatible hari
+    # ini, calculate_macd()) DAN validasi metodologinya (train/test split)
+    # tidak sejelas sistem baru -- angka lama (win-rate 16-45%, definisi
+    # tidak terdokumentasi persis) jauh di bawah sistem baru (BELOW_FAST3
+    # 59.94% Hit+6%/42.07% Hit+10% D5, n=347, proper development->
+    # calibration->validation split, formula diaudit match Brights persis
+    # di 4 ticker riil BRMS/GPSO/ENRG/DMAS).
+    #
+    # Formula PERSIS dari research/brights_imminent_cross_backtest_v1.py:
+    #   gap = MACD line - Signal line (BUKAN histogram lama -- historigram
+    #     v4/v5 = macd_hist = gap juga secara definisi, tapi field terpisah
+    #     di sini supaya jelas ini basis SISTEM LANE, bukan skor v4/v5)
+    #   gap_pct = gap / close * 100 (signed)
+    #   abs_gap_pct = |gap_pct| -- makin kecil makin dekat cross
+    #   gap_change_1d = gap_pct.diff() -- POSITIF = menyempit (mendekati/
+    #     melewati signal), bukan melebar
+    #   gap_slope_3d/5d = (gap_pct - gap_pct.shift(N)) / N -- laju
+    #     penyempitan gap dinormalisasi harian
+    #   regime: ABOVE_CENTERLINE (macd>0 & signal>0) / BELOW_CENTERLINE
+    #     (macd<0 & signal<0) / MIXED_CENTERLINE (macd & signal beda tanda)
+    #   pre_cross: macd<=signal DAN gap<=0 (belum cross)
+    #
+    # Lane (persis 01_GUIDE_PRODUKSI.md & macd_cross_price_trend_explore_v1.
+    # py's add_lane()), threshold dari discovery-set backtest, TIDAK diubah:
+    #   FAST_RECOVERY : BELOW_CENTERLINE + pre_cross + menyempit hari ini +
+    #     gap_slope_3d>=0.653771 + abs_gap_pct<=0.308084 (dekat cross)
+    #   EARLY_RECOVERY: sama tapi abs_gap_pct>0.308084 (belum dekat) --
+    #     JUSTRU hit10 D5 lebih tinggi (derivasi BELOW_FAST3 minus
+    #     BELOW_NEAR_FAST3: ~43.1% vs FAST_RECOVERY 38.82%) -- "near"
+    #     mempertajam TIMING, bukan menaikkan conversion mentah ke +10%.
+    #   ABOVE_MOMENTUM : ABOVE_CENTERLINE + pre_cross + menyempit hari ini +
+    #     gap_slope_5d>=0.148378 (Hit+10% D5 27.87%, n=61 -- paling lemah
+    #     dari 3 lane, tetap diproduksi sbg pelengkap per keputusan riset)
+    gap_series = macd_line - signal_line
+    gap_pct_series = (gap_series / close_prices * 100) if len(close_prices) else pd.Series(dtype=float)
+    macd_gap_pct = round(float(gap_pct_series.iloc[-1]), 4) if len(gap_pct_series) else None
+    macd_abs_gap_pct = abs(macd_gap_pct) if macd_gap_pct is not None else None
+    macd_gap_change_1d = (
+        round(float(gap_pct_series.iloc[-1] - gap_pct_series.iloc[-2]), 4) if len(gap_pct_series) >= 2 else None
+    )
+    macd_gap_slope_3d = (
+        round(float((gap_pct_series.iloc[-1] - gap_pct_series.iloc[-4]) / 3), 4) if len(gap_pct_series) >= 4 else None
+    )
+    macd_gap_slope_5d = (
+        round(float((gap_pct_series.iloc[-1] - gap_pct_series.iloc[-6]) / 5), 4) if len(gap_pct_series) >= 6 else None
+    )
 
-    # MBSS v2 (user request — eksplorasi pola BARU dari backtest
-    # research_macd_cross_winner_profile_v1/v2.py: populasi SIGNAL_CROSS
-    # PENUH, macd_line_above_zero d=+0.259, winner LEBIH SERING sudah di
-    # atas centerline saat cross, bukan di bawah -- pola pullback-resume
-    # dalam uptrend mapan, di LUAR cakupan SWEET_SPOT/SQUEEZE_RESCUE di
-    # atas (keduanya syarat macd_line<0). Dipecah v2 jadi sub-populasi
-    # ABOVE_CENTERLINE (n=1458): win-rate 24.6% (vs BELOW_CENTERLINE
-    # 16.2%, n=2764) -- effect size jauh lebih besar & lebih bersih di
-    # HAMPIR SEMUA fitur dibanding sub-populasi approach lama.
-    #
-    # research_macd_pullback_resume_threshold.py (quintile sweep DALAM
-    # sub-populasi ABOVE_CENTERLINE itu sendiri, n=1458): TIGA fitur
-    # teratas (dist_to_sma50_pct d=0.717, macd_line_pct_of_price d=0.659,
-    # rsi d=0.570) SEMUA menunjukkan pola sama -- flat Q1-Q4 (9-27%
-    # win-rate), lalu LONCATAN tajam di Q5/kuintil teratas (44.9%/44.5%/
-    # 40.4% win-rate) -- BUKAN kenaikan linear halus, breakpoint nyata di
-    # sekitar quintile atas. Ketiga fitur SANGAT berkorelasi (sama-sama
-    # mengukur "seberapa kuat/established trend-nya") -- REUSE cuma SATU
-    # (dist_to_sma50_pct, d tertinggi + sudah established di codebase via
-    # is_below_sma50) sebagai gate, BUKAN AND ketiganya sekaligus (hindari
-    # redundansi struktural, persis pelajaran dari kasus kriteria HC 2&7
-    # yang matematically coupled).
-    #
-    # Threshold 18% dipilih SEDIKIT DI BAWAH batas kuintil 4/5 riil
-    # (19.192% dari sampel n=1458) -- placeholder dari SATU backtest,
-    # BUKAN angka final, perlu revalidasi forward setelah data /winrate
-    # (source screendaytrade_macd_approach) cukup terkumpul.
-    MACD_PULLBACK_RESUME_MIN_DIST_SMA50_PCT = 18.0
+    macd_now = float(macd_line.iloc[-1])
+    signal_now = float(signal_line.iloc[-1])
+    if macd_now > 0 and signal_now > 0:
+        macd_regime = "ABOVE_CENTERLINE"
+    elif macd_now < 0 and signal_now < 0:
+        macd_regime = "BELOW_CENTERLINE"
+    else:
+        macd_regime = "MIXED_CENTERLINE"
+    macd_pre_cross = bool(macd_now <= signal_now and gap_series.iloc[-1] <= 0)
+
+    MACD_LANE_FAST_SLOPE3_MIN = 0.653771
+    MACD_LANE_NEAR_ABS_GAP_MAX = 0.308084
+    MACD_LANE_ABOVE_SLOPE5_MIN = 0.148378
+    macd_narrowing_today = bool(macd_gap_change_1d is not None and macd_gap_change_1d > 0)
+
     if (
-        macd_approach_tier is None
-        and macd_bullish_cross
-        and macd_line_above_zero
-        and dist_to_sma50_pct is not None
-        and dist_to_sma50_pct >= MACD_PULLBACK_RESUME_MIN_DIST_SMA50_PCT
-        and not macd_histogram_noise_exclude
+        macd_pre_cross and macd_narrowing_today
+        and macd_regime == "BELOW_CENTERLINE" and macd_gap_slope_3d is not None
+        and macd_gap_slope_3d >= MACD_LANE_FAST_SLOPE3_MIN
     ):
-        macd_approach_tier = "PULLBACK_RESUME"
+        if macd_abs_gap_pct is not None and macd_abs_gap_pct <= MACD_LANE_NEAR_ABS_GAP_MAX:
+            macd_approach_tier = "FAST_RECOVERY"
+        else:
+            macd_approach_tier = "EARLY_RECOVERY"
+    elif (
+        macd_pre_cross and macd_narrowing_today
+        and macd_regime == "ABOVE_CENTERLINE" and macd_gap_slope_5d is not None
+        and macd_gap_slope_5d >= MACD_LANE_ABOVE_SLOPE5_MIN
+    ):
+        macd_approach_tier = "ABOVE_MOMENTUM"
+
+    # MBSS v2: PULLBACK_RESUME tier (ABOVE_CENTERLINE fresh-cross, dist_to_
+    # sma50>=18%) DIHAPUS bersama SWEET_SPOT/SQUEEZE_RESCUE di atas -- lihat
+    # catatan lane FAST_RECOVERY/EARLY_RECOVERY/ABOVE_MOMENTUM. ABOVE_MOMENTUM
+    # sekarang meng-cover ruang "sudah di atas centerline, momentum menguat"
+    # yang dulu diisi PULLBACK_RESUME, dengan validasi lebih kuat (Hit+10%
+    # D5 27.87% n=61 vs win-rate lama 24.6% tanpa definisi outcome yang jelas).
 
     # MBSS v2 (user request — reframing HC-appropriate dari temuan
     # macd_line_pct_of_price di atas): BUKAN sinyal SDT pre-breakout (itu
@@ -1996,7 +2038,11 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "macd_cross_days_ago": macd_cross_days_ago,
         "macd_cross_direction": macd_cross_direction,
         "macd_line_slope_3d": macd_line_slope_3d,
-        "macd_approach_tier": macd_approach_tier,  # SWEET_SPOT / SQUEEZE_RESCUE / PULLBACK_RESUME / None -- lihat catatan riset di atas, informational only
+        "macd_approach_tier": macd_approach_tier,  # FAST_RECOVERY / EARLY_RECOVERY / ABOVE_MOMENTUM / None -- lane Brights-compatible, lihat catatan riset di atas
+        "macd_gap_pct": macd_gap_pct, "macd_abs_gap_pct": macd_abs_gap_pct,
+        "macd_gap_change_1d": macd_gap_change_1d, "macd_gap_slope_3d": macd_gap_slope_3d, "macd_gap_slope_5d": macd_gap_slope_5d,
+        "macd_regime": macd_regime,  # ABOVE_CENTERLINE / BELOW_CENTERLINE / MIXED_CENTERLINE
+        "macd_pre_cross": macd_pre_cross,
         "macd_slope_percentile": macd_slope_percentile,  # adaptif vs trailing histori ticker sendiri, gate SDT sekarang >=50 (bukan lagi cuma slope>0)
         "macd_histogram_noise_exclude": macd_histogram_noise_exclude,  # True = histogram sehari sebelum flip masih tebal+belum melandai ("parabolic"), macd_approach_tier di-exclude
         "is_new_high_20d": is_new_high_20d,
