@@ -2427,6 +2427,7 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
             "resolved_date": None,
             "pnl_pct": None,
             "days_checked": 0,
+            "day1_pnl_pct": None,
             "day2_pnl_pct": None,
             "day3_pnl_pct": None,
         })
@@ -2490,12 +2491,19 @@ def resolve_daytrade_picks():
             for _, bar in bars_to_check.iterrows():
                 pick["days_checked"] += 1
 
-                # MBSS v2 (user request): snapshot PnL% di checkpoint hari ke-2
-                # dan ke-3 (dari CLOSE hari itu vs entry_price) — TIDAK
+                # MBSS v2 (user request): snapshot PnL% di checkpoint hari ke-1,
+                # ke-2, dan ke-3 (dari CLOSE hari itu vs entry_price) — TIDAK
                 # menyelesaikan pick, cuma catat "seandainya keluar di sini".
                 # Dipakai nanti buat analisis "exit di hari-3 sebagai trade-off
                 # opportunity vs tunggu sampai selesai (hari-5 atau TP/SL)".
-                if pick["days_checked"] == 2:
+                # day1_pnl_pct (MBSS v2, user request — "riset D1/D2 sudah
+                # bergerak naik, probability >60%", research/brights_imminent_
+                # cross_backtest_v1.py direplikasi: d1_ret>3% -> hit10_d5
+                # 65.10%, n=5054/5y-equivalent riset lokal): dipakai gate
+                # VALIDATION section /screendaytrade.
+                if pick["days_checked"] == 1:
+                    pick["day1_pnl_pct"] = round((float(bar["Close"]) - pick["entry_price"]) / pick["entry_price"] * 100, 2)
+                elif pick["days_checked"] == 2:
                     pick["day2_pnl_pct"] = round((float(bar["Close"]) - pick["entry_price"]) / pick["entry_price"] * 100, 2)
                 elif pick["days_checked"] == 3:
                     pick["day3_pnl_pct"] = round((float(bar["Close"]) - pick["entry_price"]) / pick["entry_price"] * 100, 2)

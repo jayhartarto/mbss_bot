@@ -464,55 +464,62 @@ async def screen_daytrade(update, context):
             (backbone_result or {}).get("all_scored", {})
         )
 
-    # MBSS v2 (user request — "hasil SDT terlalu sedikit dibanding simulasi
-    # mandiri, tambahkan stage validation sebagai kandidat tambahan"):
-    # VALIDATION = POST-cross (bukan pre-cross seperti 3 lane di atas) --
-    # sudah cross bullish, tren naik (di atas EMA21), TAPI belum hit target
-    # utama +6% -- menangkap kandidat yang sudah "lolos" dari pra-breakout
-    # tapi belum masuk radar HC (yang butuh kriteria breakout established).
-    # Window 15 hari dipilih supaya masih relevan (di luar itu terlalu basi
-    # utk disebut "baru cross") -- gain_since_cross dihitung dari harga
-    # AKTUAL di hari cross (macd_gain_since_cross_pct), bukan proksi ret_Nd.
-    MACD_VALIDATION_MAX_CROSS_DAYS = 15
-    validation_candidates = [
-        r for r in results
-        if r.get("macd_cross_direction") == "bullish"
-        and r.get("macd_cross_days_ago") is not None
-        and r["macd_cross_days_ago"] <= MACD_VALIDATION_MAX_CROSS_DAYS
-        and not r.get("is_below_ema21")
-        and r.get("macd_gain_since_cross_pct") is not None
-        and r["macd_gain_since_cross_pct"] < 6.0
-    ]
-    validation_candidates.sort(key=lambda r: -_bb_prob(r["ticker"]))
-
-    lines.append("\n✅ VALIDATION — sudah cross bullish & tren naik, belum hit +6%\n")
-    if not validation_candidates:
-        lines.append("Tidak ada kandidat validation malam ini.")
-    else:
-        for r in validation_candidates:
-            targets = r.get("targets") or {}
-            rr_now = backbone_engine.compute_rr_at_current_price(r)
-            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
-            extra = []
-            sm_pct = r.get("whitelist_accumulation_net_pct")
-            sm_brokers = r.get("whitelist_num_brokers") or 0
-            if sm_pct is not None and sm_pct >= 15 and sm_brokers >= 2:
-                extra.append(f"\n   💰 Smart money: net-buy {sm_pct:+.0f}% ({sm_brokers} broker whitelist)")
-            if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= DANGER_WARNING_THRESHOLD:
-                extra.append(f"\n   ⚠️ Danger score {bb_info['predicted_danger']:.0f}/100 (di atas rata-rata malam ini)")
-            rr_str = f"{rr_now:.2f}" if rr_now is not None else "-"
-            lines.append(
-                f"  • {r['ticker']} — cross bullish {r['macd_cross_days_ago']} hari lalu, "
-                f"+{r['macd_gain_since_cross_pct']:.1f}% sejak cross (target +6%)\n"
-                f"   Entry ~{r.get('price')} | TP {targets.get('tp_1')} (+6%) | SL {targets.get('cut_loss')} | RR {rr_str}"
-                f"{''.join(extra)}{market_engine.format_sector_tag(r.get('sector'))}"
-            )
-        await asyncio.to_thread(
-            core.lock_daily_daytrade_picks, validation_candidates, "screendaytrade_validation",
-            (backbone_result or {}).get("all_scored", {})
+    # MBSS v2 (user request — "yang aku maksud validation itu relate dengan
+    # riset stage D1/D2 yang sudah bergerak naik, probability naik >60%"):
+    # REPLIKASI PERSIS metodologi research/brights_imminent_cross_backtest_
+    # v1.py, dites di 576 ISSI/2 tahun raw OHLC lokal -- kandidat pre-cross
+    # (lane FAST_RECOVERY/EARLY_RECOVERY/ABOVE_MOMENTUM) yang D1 ATAU D2
+    # SETELAH terkunci sudah naik >=3% -> Hit+10% D5 65.10%/67.19% (vs
+    # baseline pre-cross murni 19.88%) -- JAUH di atas klaim user (>60%),
+    # angka riil malah lebih kuat. BUKAN snapshot sesaat (macd_gain_since_
+    # cross yang dipakai sebelumnya) -- pakai infrastruktur pick-history
+    # yang SUDAH ADA (lock_daily_daytrade_picks + resolve_daytrade_picks,
+    # jalan tiap malam via nightly.py) supaya entry_price/day1_pnl_pct/
+    # day2_pnl_pct genuinely dari harga OPEN hari setelah pick (bukan proksi
+    # apa pun) -- REUSE total, bukan bangun tracking paralel baru.
+    VALIDATION_CHECKPOINT_MIN_PCT = 3.0
+    VALIDATION_LOOKBACK_TRADING_DAYS = 5  # picks lebih lama dari ini sudah kadaluarsa utk section "baru saja tervalidasi"
+    pick_history = core.load_daytrade_picks_history()
+    recent_lane_picks = [
+        p for p in pick_history
+        if p.get("source") == "screendaytrade_macd_lane"
+        and p.get("status") == "pending_resolution"
+        and (
+            (p.get("day1_pnl_pct") is not None and p["day1_pnl_pct"] >= VALIDATION_CHECKPOINT_MIN_PCT)
+            or (p.get("day2_pnl_pct") is not None and p["day2_pnl_pct"] >= VALIDATION_CHECKPOINT_MIN_PCT)
         )
+    ]
+    # Batasi ke N hari bursa terakhir (list pick_date string ASC, ambil unique
+    # tanggal, keep kalau pick_date termasuk VALIDATION_LOOKBACK_TRADING_DAYS
+    # tanggal paling baru YANG ADA di history -- bukan asumsi kalender).
+    all_pick_dates = sorted({p["pick_date"] for p in pick_history if p.get("source") == "screendaytrade_macd_lane"})
+    recent_dates = set(all_pick_dates[-VALIDATION_LOOKBACK_TRADING_DAYS:])
+    recent_lane_picks = [p for p in recent_lane_picks if p["pick_date"] in recent_dates]
+    recent_lane_picks.sort(key=lambda p: max(p.get("day1_pnl_pct") or -999, p.get("day2_pnl_pct") or -999), reverse=True)
 
-    buttons = core.build_check_buttons([r["ticker"] for r in lane_candidates] + [r["ticker"] for r in validation_candidates])
+    lines.append(
+        "\n✅ VALIDATION — D1/D2 sudah naik ≥3% sejak entry (Hit+10% D5 historis "
+        "65-67% pada checkpoint ini, vs baseline pre-cross 19.88%)\n"
+    )
+    if not recent_lane_picks:
+        lines.append("Tidak ada kandidat validation dalam 5 hari bursa terakhir.")
+    else:
+        for p in recent_lane_picks:
+            checkpoint_day = "D1" if (p.get("day1_pnl_pct") or -999) >= VALIDATION_CHECKPOINT_MIN_PCT else "D2"
+            checkpoint_pct = p.get("day1_pnl_pct") if checkpoint_day == "D1" else p.get("day2_pnl_pct")
+            r = next((x for x in results if x["ticker"] == p["ticker"]), None)
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(p["ticker"]) if backbone_result else None
+            danger_note = ""
+            if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= DANGER_WARNING_THRESHOLD:
+                danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
+            price_now = r.get("price") if r else "-"
+            lines.append(
+                f"  • {p['ticker']} — {checkpoint_day} +{checkpoint_pct:.1f}% sejak entry {p['entry_price']} "
+                f"({p['entry_date']}) | Harga sekarang {price_now} | TP {p['tp1']} (+6%) | SL {p['cut_loss']}{danger_note}"
+                f"{broker_engine.format_smart_money_tag(p['ticker'], broksum_data)}"
+            )
+
+    buttons = core.build_check_buttons([r["ticker"] for r in lane_candidates] + [p["ticker"] for p in recent_lane_picks])
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
     # Tombol upload Broker Summary ALL 3 hari untuk saham hasil radar.
@@ -1441,11 +1448,20 @@ async def high_conviction_command(update, context):
     # Cocok utk positioning HC (follow breakout yg SUDAH terjadi, bukan
     # pra-breakout). Sumber SELURUH pool Danger Gate survivor (`scored`),
     # exclude yg sudah tampil di top10/akumulasi di atas.
+    #
+    # MBSS v2 (user correction — "continuation harus dalam episode yang
+    # sama, kalau cross 20d lalu harusnya tidak masuk"): tambah batas
+    # MACD_CONTINUATION_MAX_CROSS_DAYS=5, PERSIS "Window observasi maksimum:
+    # D5" di 01_GUIDE_PRODUKSI.md -- cross yg sudah lewat window evaluasi
+    # bukan lagi episode yg sama, sudah basi utk disebut "continuation".
+    MACD_CONTINUATION_MAX_CROSS_DAYS = 5
     excluded_tickers = hc_tickers | {r["ticker"] for r in accumulation_candidates}
     continuation_candidates = [
         r for r in scored.values()
         if r.get("ticker") not in excluded_tickers
         and r.get("macd_cross_direction") == "bullish"
+        and r.get("macd_cross_days_ago") is not None
+        and r["macd_cross_days_ago"] <= MACD_CONTINUATION_MAX_CROSS_DAYS
         and r.get("macd_gain_since_cross_pct") is not None
         and 6.0 <= r["macd_gain_since_cross_pct"] < 10.0
     ]
