@@ -464,7 +464,55 @@ async def screen_daytrade(update, context):
             (backbone_result or {}).get("all_scored", {})
         )
 
-    buttons = core.build_check_buttons([r["ticker"] for r in lane_candidates])
+    # MBSS v2 (user request — "hasil SDT terlalu sedikit dibanding simulasi
+    # mandiri, tambahkan stage validation sebagai kandidat tambahan"):
+    # VALIDATION = POST-cross (bukan pre-cross seperti 3 lane di atas) --
+    # sudah cross bullish, tren naik (di atas EMA21), TAPI belum hit target
+    # utama +6% -- menangkap kandidat yang sudah "lolos" dari pra-breakout
+    # tapi belum masuk radar HC (yang butuh kriteria breakout established).
+    # Window 15 hari dipilih supaya masih relevan (di luar itu terlalu basi
+    # utk disebut "baru cross") -- gain_since_cross dihitung dari harga
+    # AKTUAL di hari cross (macd_gain_since_cross_pct), bukan proksi ret_Nd.
+    MACD_VALIDATION_MAX_CROSS_DAYS = 15
+    validation_candidates = [
+        r for r in results
+        if r.get("macd_cross_direction") == "bullish"
+        and r.get("macd_cross_days_ago") is not None
+        and r["macd_cross_days_ago"] <= MACD_VALIDATION_MAX_CROSS_DAYS
+        and not r.get("is_below_ema21")
+        and r.get("macd_gain_since_cross_pct") is not None
+        and r["macd_gain_since_cross_pct"] < 6.0
+    ]
+    validation_candidates.sort(key=lambda r: -_bb_prob(r["ticker"]))
+
+    lines.append("\n✅ VALIDATION — sudah cross bullish & tren naik, belum hit +6%\n")
+    if not validation_candidates:
+        lines.append("Tidak ada kandidat validation malam ini.")
+    else:
+        for r in validation_candidates:
+            targets = r.get("targets") or {}
+            rr_now = backbone_engine.compute_rr_at_current_price(r)
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            extra = []
+            sm_pct = r.get("whitelist_accumulation_net_pct")
+            sm_brokers = r.get("whitelist_num_brokers") or 0
+            if sm_pct is not None and sm_pct >= 15 and sm_brokers >= 2:
+                extra.append(f"\n   💰 Smart money: net-buy {sm_pct:+.0f}% ({sm_brokers} broker whitelist)")
+            if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= DANGER_WARNING_THRESHOLD:
+                extra.append(f"\n   ⚠️ Danger score {bb_info['predicted_danger']:.0f}/100 (di atas rata-rata malam ini)")
+            rr_str = f"{rr_now:.2f}" if rr_now is not None else "-"
+            lines.append(
+                f"  • {r['ticker']} — cross bullish {r['macd_cross_days_ago']} hari lalu, "
+                f"+{r['macd_gain_since_cross_pct']:.1f}% sejak cross (target +6%)\n"
+                f"   Entry ~{r.get('price')} | TP {targets.get('tp_1')} (+6%) | SL {targets.get('cut_loss')} | RR {rr_str}"
+                f"{''.join(extra)}{market_engine.format_sector_tag(r.get('sector'))}"
+            )
+        await asyncio.to_thread(
+            core.lock_daily_daytrade_picks, validation_candidates, "screendaytrade_validation",
+            (backbone_result or {}).get("all_scored", {})
+        )
+
+    buttons = core.build_check_buttons([r["ticker"] for r in lane_candidates] + [r["ticker"] for r in validation_candidates])
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
     # Tombol upload Broker Summary ALL 3 hari untuk saham hasil radar.
@@ -1380,10 +1428,53 @@ async def high_conviction_command(update, context):
     # squeeze DENGAN backtest kualitas jauh lebih kuat (n=24.727 ticker-hari,
     # dikombinasi cross_days_ago) dibanding section ini yang cuma filter
     # bollinger_squeeze mentah tanpa validasi forward apa pun. Pointer
-    # singkat ke situ, bukan duplikasi coverage di dua tempat.
-    lines.append("\nKandidat squeeze pra-breakout (backtest tervalidasi): lihat /screendaytrade, lane SQUEEZE RESCUE.")
+    # singkat ke situ, bukan duplikasi coverage di dua tempat -- lane lama
+    # SQUEEZE_RESCUE sudah diganti FAST_RECOVERY/EARLY_RECOVERY, lihat
+    # /screendaytrade, section SETUP PRA-BREAKOUT.
+    lines.append("\nKandidat pra-breakout (backtest tervalidasi): lihat /screendaytrade, section SETUP PRA-BREAKOUT.")
     lines.append("Detail lengkap: /check TICKER")
-    all_tickers = [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates]
+
+    # MBSS v2 (user request — "tambahkan stage continuation di HC: sudah
+    # cross, sudah hit 6%, masih potensi hit 10%"): pelengkap VALIDATION di
+    # /screendaytrade -- di sana POST-cross tapi BELUM hit +6%, di sini
+    # POST-cross DAN SUDAH hit +6% tapi belum +10% (extension target).
+    # Cocok utk positioning HC (follow breakout yg SUDAH terjadi, bukan
+    # pra-breakout). Sumber SELURUH pool Danger Gate survivor (`scored`),
+    # exclude yg sudah tampil di top10/akumulasi di atas.
+    excluded_tickers = hc_tickers | {r["ticker"] for r in accumulation_candidates}
+    continuation_candidates = [
+        r for r in scored.values()
+        if r.get("ticker") not in excluded_tickers
+        and r.get("macd_cross_direction") == "bullish"
+        and r.get("macd_gain_since_cross_pct") is not None
+        and 6.0 <= r["macd_gain_since_cross_pct"] < 10.0
+    ]
+    continuation_candidates.sort(key=lambda r: r["macd_gain_since_cross_pct"], reverse=True)
+    continuation_candidates = continuation_candidates[:8]
+
+    if continuation_candidates:
+        lines.append(f"\n📈 CONTINUATION — {len(continuation_candidates)} kandidat (sudah cross bullish & sudah hit +6%, masih potensi +10%)\n")
+        for r in continuation_candidates:
+            t = r.get("targets", {})
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            danger_note = ""
+            if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= 50:
+                danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
+            lines.append(
+                f"• {r['ticker']} — cross {r.get('macd_cross_days_ago', '-')} hari lalu, "
+                f"+{r['macd_gain_since_cross_pct']:.1f}% sejak cross (target +10%) | "
+                f"Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
+                f"{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
+            )
+        try:
+            await asyncio.to_thread(
+                core.lock_daily_daytrade_picks, continuation_candidates, "hc_continuation",
+                (backbone_result or {}).get("all_scored", {})
+            )
+        except Exception as e:
+            print(f"⚠️ Gagal mengunci picks /hc continuation untuk /winrate: {e}")
+
+    all_tickers = [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates] + [r["ticker"] for r in continuation_candidates]
     buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 

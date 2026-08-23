@@ -1400,6 +1400,21 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         elif macd_cross_direction == "bullish":
             momentum_score = min(10.0, momentum_score + 1.0 * decay)
 
+    # MBSS v2 (user request — SDT "VALIDATION" stage: sudah cross, tren
+    # naik, TAPI belum hit +6%; HC "CONTINUATION" stage: sudah cross, sudah
+    # hit +6%, masih potensi hit +10%): gain riil sejak hari cross, BUKAN
+    # proksi ret_Nd yang cuma kebetulan mirip window cross_days_ago -- pakai
+    # harga close AKTUAL di hari cross sbg basis, akurat utk cross berapa
+    # hari pun (bukan cuma window ret_3d/5d/10d yang sudah ada).
+    macd_gain_since_cross_pct = None
+    if (
+        macd_cross_direction == "bullish" and macd_cross_days_ago is not None
+        and len(close_prices) > macd_cross_days_ago
+    ):
+        price_at_cross = close_prices.iloc[-1 - macd_cross_days_ago]
+        if price_at_cross and price_at_cross > 0:
+            macd_gain_since_cross_pct = round(float((current_price - price_at_cross) / price_at_cross * 100), 2)
+
     # --- SMA50: medium-term trend filter (swing-relevant horizon, not SMA200/long-term
     # investing horizon) — catches "looks fine short-term but still in a weaker medium-
     # term regime" cases that SMA20 alone (already used above) can miss.
@@ -2043,6 +2058,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "macd_gap_change_1d": macd_gap_change_1d, "macd_gap_slope_3d": macd_gap_slope_3d, "macd_gap_slope_5d": macd_gap_slope_5d,
         "macd_regime": macd_regime,  # ABOVE_CENTERLINE / BELOW_CENTERLINE / MIXED_CENTERLINE
         "macd_pre_cross": macd_pre_cross,
+        "macd_gain_since_cross_pct": macd_gain_since_cross_pct,  # None kalau belum pernah cross bullish / histori kurang -- lihat catatan di atas
         "macd_slope_percentile": macd_slope_percentile,  # adaptif vs trailing histori ticker sendiri, gate SDT sekarang >=50 (bukan lagi cuma slope>0)
         "macd_histogram_noise_exclude": macd_histogram_noise_exclude,  # True = histogram sehari sebelum flip masih tebal+belum melandai ("parabolic"), macd_approach_tier di-exclude
         "is_new_high_20d": is_new_high_20d,
