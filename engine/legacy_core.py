@@ -4104,7 +4104,13 @@ def _score_breakout_drop_risk_v4(scoring: dict) -> dict:
     reasons = []
     score = 40  # neutral baseline
 
-    if macd_hist >= 3.33: score += 22; reasons.append("MACD kuat, drop risk lebih rendah")
+    # MBSS v2 (user request — riset danger-gate lagging/leading conflict,
+    # research/mbss_macd_production_research_bundle/): "macd_hist>=3.33 ->
+    # +22 (drop risk lebih rendah)" DIHAPUS -- dites terhadap stagnant_negative
+    # (D1<1% & D2<1% & D5<0, 576 ISSI raw OHLC 2 tahun) DAN extreme_mae, KEDUA
+    # metrik menunjukkan kondisi ini justru BERKORELASI DENGAN RISIKO LEBIH
+    # TINGGI, bukan lebih rendah (backwards dari klaim aslinya) -- histogram
+    # tebal = momentum sudah kuat/extended, bukan sinyal aman.
     if value_traded >= 4_950_000_000: score += 15; reasons.append("likuiditas kuat")
     if dist20 <= 13.68: score += 12; reasons.append("masih dalam zona high 20D")
     if vol_ratio >= 0.80: score += 8; reasons.append("volume cukup hidup")

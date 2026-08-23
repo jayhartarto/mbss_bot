@@ -21,9 +21,22 @@ compute_daytrade_v5_summary's existing `_score_breakout_drop_risk_v4`
 sub-score (already covers MACD/ADX/liquidity/dist-to-high/vol_ratio/CMF/
 RSI/RR/fade/ret1) — this module adds ONLY the danger inputs the doc lists
 that v5's risk score does NOT already cover (day_range volatility,
-Room, explicit bearish OBV divergence, explicit MACD bearish cross,
-below-SMA50-AND-EMA21 compounding, near-price-floor, regime routing),
+Room, explicit bearish OBV divergence, near-price-floor, regime routing),
 rather than re-deriving all of it from scratch.
+
+MBSS v2 (user request — danger-gate lagging/leading conflict, riset
+research/mbss_macd_production_research_bundle/, lihat BACKBONE_FORMULA_
+VERSION 1.10): "danger" DIREDEFINISI dari extreme-MAE (bisa salah tangkap
+kasus MFE besar juga terjadi -- itu bukan danger kalau exit di TP) jadi
+STAGNANT_NEGATIVE (D1<1% & D2<1% & D5<0 -- benar2 tidak pernah kasih
+kesempatan profit). Diuji ulang di 576 ISSI/2 tahun raw OHLC: explicit
+MACD bearish cross DAN below-SMA50-AND-EMA21 compounding TERNYATA tidak
+punya daya beda sama sekali terhadap stagnant_negative (selisih <2pp,
+malah beberapa kali arah terbalik) -- keduanya DIHAPUS. Sebagai gantinya,
+kombinasi RSI netral [50,70] (BUKAN ekstrim -- RSI ekstrim di kedua arah
+justru risiko LEBIH RENDAH, U-shape) + ret_5d_pct>=15% (sudah lari
+sebelum observasi) + value_traded tercile bawah (likuiditas tipis)
+terbukti prediktif (44-46% vs baseline 37.1%).
 
 Deterministic, unit-testable, versioned — every field this module computes
 gets persisted (see engine/nightly.py's backbone_daily cache partition) so
@@ -46,7 +59,7 @@ import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.9"  # 1.9: (a) liquidity gate Rp3B diterapkan SEKALI di compute_backbone (LIQUIDITY_FLOOR_VALUE_TRADED_IDR, reuse dari legacy_core.py) sebelum danger gate -- sebelumnya cuma HC/SDT yang punya floor sendiri-sendiri, saham tipis bisa lolos Backbone lalu ditolak belakangan; (b) compute_rr_at_current_price dipindah ke core (thin wrapper di sini) supaya Layer-1 room score reuse definisi yang sama, bukan risk_reward_at_max yang understate risiko. 1.8: tambah market_regime ke tiap all_scored[ticker] (supaya /winrate bisa disegmentasi per regime -- "snapshot granular utk walk-forward" user request). 1.7: tambah predicted_danger_vnext/danger_bucket_breakdown_vnext (SHADOW ONLY, tidak dipakai gate/rank) ke all_scored[ticker] -- lihat compute_danger_score_bucketed_vnext, dari mbss_formula_diagnosis_claude_agent.md's double-counting concern. ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.10"  # 1.10: compute_danger_score direvisi -- hapus macd_bearish_cross (+8) & is_below_sma50-AND-is_below_ema21 (+10), keduanya tidak punya daya beda thd stagnant_negative (576 ISSI/2y raw OHLC); tambah value_traded_percentile sbg param baru (cross-sectional, pola sama dgn day_range_percentile) utk penalti baru RSI[50,70]+ret_5d_pct>=15%+value_traded tercile-bawah (+10, tervalidasi 44-46% vs baseline 37.1%); _score_breakout_drop_risk_v4 (legacy_core.py) macd_hist>=3.33 bonus (+22) juga dihapus (backwards, korelasi risiko lebih tinggi bukan lebih rendah). Lihat module docstring & research/mbss_macd_production_research_bundle/ utk detail. 1.9: (a) liquidity gate Rp3B diterapkan SEKALI di compute_backbone (LIQUIDITY_FLOOR_VALUE_TRADED_IDR, reuse dari legacy_core.py) sebelum danger gate -- sebelumnya cuma HC/SDT yang punya floor sendiri-sendiri, saham tipis bisa lolos Backbone lalu ditolak belakangan; (b) compute_rr_at_current_price dipindah ke core (thin wrapper di sini) supaya Layer-1 room score reuse definisi yang sama, bukan risk_reward_at_max yang understate risiko. 1.8: tambah market_regime ke tiap all_scored[ticker] (supaya /winrate bisa disegmentasi per regime -- "snapshot granular utk walk-forward" user request). 1.7: tambah predicted_danger_vnext/danger_bucket_breakdown_vnext (SHADOW ONLY, tidak dipakai gate/rank) ke all_scored[ticker] -- lihat compute_danger_score_bucketed_vnext, dari mbss_formula_diagnosis_claude_agent.md's double-counting concern. ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
@@ -85,11 +98,17 @@ def _f(scoring: dict, key: str, default: float = 0.0) -> float:
         return default
 
 
-def compute_danger_score(scoring: dict, market_regime: str, day_range_percentile: float | None) -> float:
+def compute_danger_score(scoring: dict, market_regime: str, day_range_percentile: float | None,
+                          value_traded_percentile: float | None = None) -> float:
     """
     0-100, HIGHER = MORE DANGEROUS. Base = inverted V5 drop-risk sub-score
     (see module docstring for why this reuses rather than reinvents), then
     additive penalties for the doc's inputs that base doesn't cover.
+
+    value_traded_percentile: cross-sectional percentile vs TONIGHT's universe
+    (same pattern as day_range_percentile — computed once in compute_backbone,
+    passed in). None-safe (skips the new RSI/ret5d/liquidity penalty below
+    rather than treating missing data as danger).
     """
     v5 = core.compute_daytrade_v5_summary(scoring)
     danger = 100.0 - v5["risk"]["score"]  # base: MACD/ADX/liquidity/dist-to-high/vol_ratio/CMF/RSI/RR/fade/ret1
@@ -149,10 +168,22 @@ def compute_danger_score(scoring: dict, market_regime: str, day_range_percentile
     # Explicit flags the v4 risk score doesn't check directly.
     if scoring.get("obv_divergence") == "bearish_divergence":
         danger += 10
-    if scoring.get("macd_bearish_cross"):
-        danger += 8
-    if scoring.get("is_below_sma50") and scoring.get("is_below_ema21"):
-        danger += 10  # compounding weak-trend context, not just one MA
+
+    # MBSS v2 (user request — danger redefinisi ke stagnant_negative, riset
+    # research/mbss_macd_production_research_bundle/): RSI netral [50,70]
+    # (BUKAN ekstrim — RSI ekstrim di kedua arah justru risiko lebih RENDAH,
+    # relasi U-shape, bukan linear) + sudah lari (ret_5d_pct>=15%) + likuiditas
+    # tipis (value_traded tercile bawah, cross-sectional) -> stagnant_negative
+    # 44-46% vs baseline 37.1% (576 ISSI, 2 tahun raw OHLC). Ketiga syarat
+    # harus terpenuhi bersamaan (AND) -- kombinasi ini yang tervalidasi, bukan
+    # tiap komponen sendiri-sendiri (semua lemah kalau berdiri sendiri).
+    rsi_now = scoring.get("rsi")
+    ret_5d_pct = scoring.get("ret_5d_pct")
+    if (rsi_now is not None and 50 <= rsi_now <= 70
+            and ret_5d_pct is not None and ret_5d_pct >= 15
+            and value_traded_percentile is not None and value_traded_percentile <= 33):
+        danger += 10
+
     if scoring.get("is_near_price_floor"):
         danger += 12
     if scoring.get("is_financial_distress_flag"):
@@ -425,6 +456,9 @@ def compute_backbone(results: list, market_regime: str) -> dict:
     ]
 
     day_range_values = [r.get("day_range_pct_10d") for r in candidates if r.get("day_range_pct_10d") is not None]
+    # MBSS v2 (user request — danger redefinisi, lihat compute_danger_score):
+    # sama pola dgn day_range_values, dipakai utk penalti RSI/ret5d/likuiditas baru.
+    value_traded_values = [r.get("value_traded") for r in candidates if r.get("value_traded") is not None]
 
     scored = {}
     for r in candidates:
@@ -437,12 +471,18 @@ def compute_backbone(results: list, market_regime: str) -> dict:
             round(core.percentile_rank(pd.Series(day_range_values), drp) * 100, 1)
             if drp is not None and day_range_values else None
         )
-        danger = compute_danger_score(r, market_regime, day_range_pct)
+        vt = r.get("value_traded")
+        value_traded_pct = (
+            round(core.percentile_rank(pd.Series(value_traded_values), vt) * 100, 1)
+            if vt is not None and value_traded_values else None
+        )
+        danger = compute_danger_score(r, market_regime, day_range_pct, value_traded_pct)
         probability = compute_probability_score(r, market_regime)
         scored[r["ticker"]] = {
             "predicted_danger": danger,
             "probability_score": probability,
             "day_range_percentile": day_range_pct,
+            "value_traded_percentile": value_traded_pct,
             # MBSS v2 (user request — "snapshot seluruh detail sebisa mungkin
             # supaya walk-forward ke depan bisa lebih granular"): market_regime
             # itu sendiri GLOBAL per malam (bukan per-ticker), tapi disimpan DI
