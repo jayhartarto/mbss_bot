@@ -1535,9 +1535,117 @@ async def high_conviction_command(update, context):
         except Exception as e:
             print(f"⚠️ Gagal mengunci picks /hc validation untuk /winrate: {e}")
 
+    # MBSS v2 (user request 2026-08-24 — riset "episode extended": bukan
+    # fresh breakout (itu domain CONTINUATION/VALIDATION di atas, cross<=5
+    # hari), tapi episode yg SUDAH lebih lama (cross 6-10 hari lalu) DAN
+    # sudah pernah volume breakout>=3x (bukan yg tenang2 saja) DAN masih
+    # above_centerline. Dua sub-pola, KEDUANYA post-cross by construction
+    # jadi HANYA muncul di HC (tidak pernah di SDT, yg pre-cross-only) --
+    # persis siklus yg didiskusikan: SDT (pre-cross) -> HC VALIDATION/
+    # CONTINUATION (cross<=5hr) -> HC tier ini (cross 6-10hr).
+    #
+    # Dites 576 ISSI raw OHLC 2 tahun (n=7542 populasi dasar):
+    #   MOMENTUM EXTENDED (prioritas #1): gap_slope_3d>=Q4(0.3106, laju
+    #     pelebaran macd-signal tercepat) + ret_1d_today>2.5% -- hit6=67.9%/
+    #     hit10=55.3% (n=514) di threshold 2.5%. hit6 naik ke 71.95%/59.76%
+    #     di threshold 5% (n=410, "kualitas lebih baik") tapi user pilih
+    #     2.5% utk volume kandidat lebih banyak -- makanya ditag kualitas
+    #     di pesan (>=5% = kualitas tinggi, 2.5-5% = valid tapi lebih lemah)
+    #     bukan disatukan tanpa keterangan. JANGAN filter RSI<70 (dites,
+    #     backwards -- RSI tinggi di kombinasi ini justru lebih baik).
+    #   PULLBACK EXTENDED (prioritas #2, tag higher risk): gap_slope_3d>=Q4
+    #     + pullback dari peak episode>=15% -- hit6=62.85%/hit10=45.51%
+    #     (n=646), stagnant_negative 44.27% (SEDIKIT lebih tinggi dari
+    #     baseline ~39%, bukan makin aman -- upside conversion naik, bukan
+    #     risiko turun, makanya WAJIB tag "risiko lebih tinggi").
+    MACD_EXTENDED_MIN_CROSS_DAYS_AGO = 6   # (5,10] eksklusif thd CONTINUATION/VALIDATION yg <=5
+    MACD_EXTENDED_MAX_CROSS_DAYS_AGO = 10
+    MACD_GAP_SLOPE_Q4_THRESHOLD = 0.3106    # kuartil-75 gap_slope_3d dari populasi backtest, BUKAN cross-sectional live (sama konvensi lane MACD_LANE_FAST_SLOPE3_MIN dkk)
+    MACD_MOMENTUM_RET1D_MIN = 2.5
+    MACD_MOMENTUM_RET1D_HIGH_QUALITY = 5.0  # >= ini ditag kualitas tinggi di pesan
+    MACD_PULLBACK_EXTENDED_DEPTH_MAX = -15.0
+
+    def _in_extended_window(r):
+        return (
+            r.get("macd_regime") == "ABOVE_CENTERLINE"
+            and r.get("macd_episode_had_volume_breakout") is True
+            and r.get("macd_cross_days_ago") is not None
+            and MACD_EXTENDED_MIN_CROSS_DAYS_AGO <= r["macd_cross_days_ago"] <= MACD_EXTENDED_MAX_CROSS_DAYS_AGO
+            and r.get("macd_gap_slope_3d") is not None
+            and r["macd_gap_slope_3d"] >= MACD_GAP_SLOPE_Q4_THRESHOLD
+        )
+
+    extended_excluded = excluded_tickers | {c["ticker"] for c in continuation_candidates} | {c["ticker"] for c in validation_candidates}
+
+    momentum_extended_candidates = [
+        r for r in scored.values()
+        if r.get("ticker") not in extended_excluded
+        and _in_extended_window(r)
+        and r.get("ret_1d_pct") is not None and r["ret_1d_pct"] > MACD_MOMENTUM_RET1D_MIN
+    ]
+    momentum_extended_candidates.sort(key=lambda r: r["ret_1d_pct"], reverse=True)
+    momentum_extended_candidates = momentum_extended_candidates[:8]
+
+    if momentum_extended_candidates:
+        lines.append(f"\n🚀 MOMENTUM EXTENDED — {len(momentum_extended_candidates)} kandidat (episode sudah 6-10 hari, MACD akselerasi + harga konfirmasi hari ini)\n")
+        for r in momentum_extended_candidates:
+            t = r.get("targets", {})
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            danger_note = ""
+            if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= 50:
+                danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
+            quality_tag = " 🥇kualitas tinggi" if r["ret_1d_pct"] >= MACD_MOMENTUM_RET1D_HIGH_QUALITY else ""
+            lines.append(
+                f"• {r['ticker']} — cross {r.get('macd_cross_days_ago', '-')} hari lalu, "
+                f"+{r['ret_1d_pct']:.1f}% hari ini{quality_tag} | "
+                f"Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
+                f"{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
+            )
+        try:
+            await asyncio.to_thread(
+                core.lock_daily_daytrade_picks, momentum_extended_candidates, "hc_momentum_extended",
+                (backbone_result or {}).get("all_scored", {})
+            )
+        except Exception as e:
+            print(f"⚠️ Gagal mengunci picks /hc momentum extended untuk /winrate: {e}")
+
+    pullback_extended_candidates = [
+        r for r in scored.values()
+        if r.get("ticker") not in extended_excluded
+        and r["ticker"] not in {c["ticker"] for c in momentum_extended_candidates}
+        and _in_extended_window(r)
+        and r.get("macd_pullback_from_episode_peak_pct") is not None
+        and r["macd_pullback_from_episode_peak_pct"] <= MACD_PULLBACK_EXTENDED_DEPTH_MAX
+    ]
+    pullback_extended_candidates.sort(key=lambda r: r["macd_pullback_from_episode_peak_pct"])
+    pullback_extended_candidates = pullback_extended_candidates[:8]
+
+    if pullback_extended_candidates:
+        lines.append(f"\n📉 PULLBACK EXTENDED — {len(pullback_extended_candidates)} kandidat (episode 6-10 hari, MACD masih akselerasi, TAPI harga sedang pullback ≥15% dari peak) ⚠️ risiko lebih tinggi dari MOMENTUM EXTENDED\n")
+        for r in pullback_extended_candidates:
+            t = r.get("targets", {})
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            danger_note = ""
+            if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= 50:
+                danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
+            lines.append(
+                f"• {r['ticker']} — cross {r.get('macd_cross_days_ago', '-')} hari lalu, "
+                f"pullback {r['macd_pullback_from_episode_peak_pct']:.1f}% dari peak episode | "
+                f"Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
+                f"{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
+            )
+        try:
+            await asyncio.to_thread(
+                core.lock_daily_daytrade_picks, pullback_extended_candidates, "hc_pullback_extended",
+                (backbone_result or {}).get("all_scored", {})
+            )
+        except Exception as e:
+            print(f"⚠️ Gagal mengunci picks /hc pullback extended untuk /winrate: {e}")
+
     all_tickers = (
         [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates]
         + [r["ticker"] for r in continuation_candidates] + [r["ticker"] for r in validation_candidates]
+        + [r["ticker"] for r in momentum_extended_candidates] + [r["ticker"] for r in pullback_extended_candidates]
     )
     buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)

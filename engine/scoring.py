@@ -1415,6 +1415,28 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         if price_at_cross and price_at_cross > 0:
             macd_gain_since_cross_pct = round(float((current_price - price_at_cross) / price_at_cross * 100), 2)
 
+    # MBSS v2 (user request 2026-08-24 — riset "PULLBACK EXTENDED": episode
+    # MACD sudah lebih lama (>5 hari lalu cross, BUKAN fresh breakout) TAPI
+    # sudah pernah volume breakout (bukan yang tenang2 saja), lalu entry di
+    # titik PULLBACK dlm episode itu -- real case TMPO 5 Agst 2026, cross
+    # 12 hari sebelumnya, breakout vol 10.4x tgl 3 Agst, lalu 2 hari turun
+    # (152->130->127) SEBELUM lanjut kuat lagi). Divalidasi 576 ISSI/2thn:
+    # kombinasi above_centerline+pullback>=8% dari peak episode -> hit6
+    # 52.1%/hit10 33.1% (n=3971) vs baseline extended+breakout 43.6%/28.0%
+    # -- pullback DALAM episode yg SUDAH proven (breakout) justru makin
+    # dalam makin baik (monoton), bukan makin beresiko murni (stagnant_
+    # negative flat ~40% di semua kedalaman, jadi tetap ada risiko, cuma
+    # upside conversion-nya yang naik).
+    MACD_EPISODE_BREAKOUT_VOL_RATIO = 3.0
+    macd_episode_had_volume_breakout = False
+    macd_pullback_from_episode_peak_pct = None
+    if macd_cross_direction == "bullish" and macd_cross_days_ago is not None and len(close_prices) > macd_cross_days_ago:
+        episode_vol_ratios = vol_ratio_full_series.iloc[-1 - macd_cross_days_ago:]
+        macd_episode_had_volume_breakout = bool((episode_vol_ratios >= MACD_EPISODE_BREAKOUT_VOL_RATIO).any())
+        episode_peak = float(high_prices.iloc[-1 - macd_cross_days_ago:].max())
+        if episode_peak > 0:
+            macd_pullback_from_episode_peak_pct = round(float((current_price - episode_peak) / episode_peak * 100), 2)
+
     # --- SMA50: medium-term trend filter (swing-relevant horizon, not SMA200/long-term
     # investing horizon) — catches "looks fine short-term but still in a weaker medium-
     # term regime" cases that SMA20 alone (already used above) can miss.
@@ -2059,6 +2081,8 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "macd_regime": macd_regime,  # ABOVE_CENTERLINE / BELOW_CENTERLINE / MIXED_CENTERLINE
         "macd_pre_cross": macd_pre_cross,
         "macd_gain_since_cross_pct": macd_gain_since_cross_pct,  # None kalau belum pernah cross bullish / histori kurang -- lihat catatan di atas
+        "macd_episode_had_volume_breakout": macd_episode_had_volume_breakout,  # PULLBACK EXTENDED tier -- lihat catatan riset di atas
+        "macd_pullback_from_episode_peak_pct": macd_pullback_from_episode_peak_pct,  # negatif = sedang pullback dari peak episode
         "macd_slope_percentile": macd_slope_percentile,  # adaptif vs trailing histori ticker sendiri, gate SDT sekarang >=50 (bukan lagi cuma slope>0)
         "macd_histogram_noise_exclude": macd_histogram_noise_exclude,  # True = histogram sehari sebelum flip masih tebal+belum melandai ("parabolic"), macd_approach_tier di-exclude
         "is_new_high_20d": is_new_high_20d,
