@@ -1442,12 +1442,11 @@ async def high_conviction_command(update, context):
     lines.append("Detail lengkap: /check TICKER")
 
     # MBSS v2 (user request — "tambahkan stage continuation di HC: sudah
-    # cross, sudah hit 6%, masih potensi hit 10%"): pelengkap VALIDATION di
-    # /screendaytrade -- di sana POST-cross tapi BELUM hit +6%, di sini
-    # POST-cross DAN SUDAH hit +6% tapi belum +10% (extension target).
-    # Cocok utk positioning HC (follow breakout yg SUDAH terjadi, bukan
-    # pra-breakout). Sumber SELURUH pool Danger Gate survivor (`scored`),
-    # exclude yg sudah tampil di top10/akumulasi di atas.
+    # cross, sudah hit 6%, masih potensi hit 10%"): POST-cross DAN SUDAH hit
+    # +6% tapi belum +10% (extension target). Cocok utk positioning HC
+    # (follow breakout yg SUDAH terjadi, bukan pra-breakout). Sumber SELURUH
+    # pool Danger Gate survivor (`scored`), exclude yg sudah tampil di
+    # top10/akumulasi di atas.
     #
     # MBSS v2 (user correction — "continuation harus dalam episode yang
     # sama, kalau cross 20d lalu harusnya tidak masuk"): tambah batas
@@ -1490,7 +1489,56 @@ async def high_conviction_command(update, context):
         except Exception as e:
             print(f"⚠️ Gagal mengunci picks /hc continuation untuk /winrate: {e}")
 
-    all_tickers = [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates] + [r["ticker"] for r in continuation_candidates]
+    # MBSS v2 (user request 2026-08-24 — live case NRCA: cross bullish 3
+    # hari lalu, ABOVE_CENTERLINE, +5.5% sejak cross, TAPI tidak muncul di
+    # lane manapun -- macd_approach_tier PASTI None utk kandidat post-cross
+    # by design (lane cuma utk pre_cross), dan gain 5.5% < 6.0% jadi juga
+    # belum masuk CONTINUATION. Ini celah nyata, bukan Danger Gate: NRCA
+    # invisible di ketiga sinyal sekaligus). Dites thd stagnant metrik yg
+    # sama (576 ISSI raw OHLC 2 tahun, cross<=5hr): bucket gain_since_cross
+    # 3-6% hit6_d5=40.30%/hit10_d5=25.12% (n=2906) -- genuinely elevated vs
+    # bucket 0-3% (31.90%/19.23%), meski masih di bawah bucket 6-10% yg
+    # dipakai CONTINUATION (48.26%/33.95%) -- makanya ditampilkan section
+    # TERPISAH dgn ekspektasi lebih rendah, bukan digabung ke CONTINUATION.
+    validation_candidates = [
+        r for r in scored.values()
+        if r.get("ticker") not in excluded_tickers
+        and r["ticker"] not in {c["ticker"] for c in continuation_candidates}
+        and r.get("macd_cross_direction") == "bullish"
+        and r.get("macd_cross_days_ago") is not None
+        and r["macd_cross_days_ago"] <= MACD_CONTINUATION_MAX_CROSS_DAYS
+        and r.get("macd_gain_since_cross_pct") is not None
+        and 3.0 <= r["macd_gain_since_cross_pct"] < 6.0
+    ]
+    validation_candidates.sort(key=lambda r: r["macd_gain_since_cross_pct"], reverse=True)
+    validation_candidates = validation_candidates[:8]
+
+    if validation_candidates:
+        lines.append(f"\n📊 VALIDATION — {len(validation_candidates)} kandidat (sudah cross bullish, +3-6% sejak cross — hit rate lebih rendah dari CONTINUATION: ~40%/25% vs ~48%/34%)\n")
+        for r in validation_candidates:
+            t = r.get("targets", {})
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            danger_note = ""
+            if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= 50:
+                danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
+            lines.append(
+                f"• {r['ticker']} — cross {r.get('macd_cross_days_ago', '-')} hari lalu, "
+                f"+{r['macd_gain_since_cross_pct']:.1f}% sejak cross | "
+                f"Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
+                f"{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
+            )
+        try:
+            await asyncio.to_thread(
+                core.lock_daily_daytrade_picks, validation_candidates, "hc_validation",
+                (backbone_result or {}).get("all_scored", {})
+            )
+        except Exception as e:
+            print(f"⚠️ Gagal mengunci picks /hc validation untuk /winrate: {e}")
+
+    all_tickers = (
+        [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates]
+        + [r["ticker"] for r in continuation_candidates] + [r["ticker"] for r in validation_candidates]
+    )
     buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 

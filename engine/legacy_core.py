@@ -2923,6 +2923,29 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
             if cache.get("generated_month") == current_month:
                 cached_eligible = [t for t in cache.get("eligible_tickers", []) if t in all_tickers]
                 print(f"📋 Using cached Yahoo whitelist from {current_month}: {len(cached_eligible)} eligible tickers")
+                # MBSS v2 (user request 2026-08-24 — live case: 72/386 saham
+                # non-Sharia bocor ke ticker_whitelist.json, kena ALERT).
+                # Root cause: cabang ini SEBELUMNYA cuma nge-filter
+                # `cached_eligible` DI MEMORY thd `all_tickers` (universe
+                # Sharia terbaru) tapi TIDAK PERNAH nulis balik hasil yg
+                # sudah bersih ke FILE -- jadi konsumen yg baca
+                # WHITELIST_CACHE_FILE LANGSUNG (scanalert.py, /whitelist di
+                # misc.py) tetap dapat daftar KOTOR dari disk, bukan versi
+                # yg sudah difilter fungsi ini. File sekarang di-self-heal:
+                # begitu hasil filter beda dari yg tersimpan (mis. ISSI lock
+                # list ter-update, atau kontaminasi lama), file ditulis
+                # ulang supaya SEMUA konsumen (baik lewat fungsi ini maupun
+                # baca file langsung) selalu lihat versi yg sama-sama bersih.
+                on_disk_eligible = cache.get("eligible_tickers", [])
+                if set(cached_eligible) != set(on_disk_eligible):
+                    cache["eligible_tickers"] = cached_eligible
+                    try:
+                        with open(WHITELIST_CACHE_FILE, "w") as f:
+                            json.dump(cache, f, indent=2)
+                        print(f"🩹 Whitelist cache di-self-heal: {len(on_disk_eligible)} -> "
+                              f"{len(cached_eligible)} (buang ticker di luar universe Sharia terbaru).")
+                    except Exception as e:
+                        print(f"⚠️ Gagal self-heal whitelist cache: {e}")
                 return cached_eligible
         except Exception as e:
             print(f"⚠️ Failed to read whitelist cache: {e}. Rebuilding.")
@@ -4102,7 +4125,6 @@ def _score_breakout_drop_risk_v4(scoring: dict) -> dict:
     value_traded = v("value_traded")
     dist20 = v("dist_to_20d_high_pct", 99)
     vol_ratio = v("vol_ratio")
-    cmf = v("cmf")
     rsi = v("rsi")
     price = v("price")
     high_today = v("intraday_high", price)
@@ -4122,7 +4144,6 @@ def _score_breakout_drop_risk_v4(scoring: dict) -> dict:
     if value_traded >= 4_950_000_000: score += 15; reasons.append("likuiditas kuat")
     if dist20 <= 13.68: score += 12; reasons.append("masih dalam zona high 20D")
     if vol_ratio >= 0.80: score += 8; reasons.append("volume cukup hidup")
-    if cmf >= -0.11: score += 8; reasons.append("CMF tidak distribusi")
     if 20 <= adx <= 28.5: score += 8; reasons.append("ADX belum terlalu matang")
 
     # Risk penalties.
@@ -4130,8 +4151,21 @@ def _score_breakout_drop_risk_v4(scoring: dict) -> dict:
     elif adx > 40: score -= 8; reasons.append("ADX tinggi, cek extended")
     if rsi > 82: score -= 25; reasons.append("penalty: RSI overheat")
     elif rsi > 75: score -= 10; reasons.append("RSI panas")
-    if cmf < -0.15: score -= 18; reasons.append("penalty: distribusi")
-    elif cmf < -0.05: score -= 10; reasons.append("CMF mulai negatif")
+    # MBSS v2 (user request 2026-08-24 — live case FIRE/SSIA/UNTR tergate
+    # Danger padahal momentum lanjut kuat, FIRE eksplosif): "CMF tidak
+    # distribusi -> +8" dan "cmf<-0.15/-0.05 -> penalty distribusi -10/-18"
+    # DIHAPUS -- dites thd stagnant_negative (576 ISSI raw OHLC 2 tahun),
+    # baik dlm konteks bullish-momentum (n=54,662) maupun tanpa gate
+    # (n=169,785): CMF<-0.15 justru SEDIKIT LEBIH RENDAH risikonya dari
+    # baseline (37.3-37.7% vs 38.2-38.5%), CMF>=0 SEDIKIT LEBIH TINGGI
+    # (39.1% vs baseline) -- berlawanan arah dgn asumsi formula lama di
+    # KEDUA sisi (bonus DAN penalty sama-sama salah arah). Juga dites
+    # kombinasi "trend bearish (below SMA50) + macd bearish cross fresh +
+    # slope macd curam (kuartil-25) + likuiditas tipis (<Rp3B)" sekaligus
+    # (usul user, coba selamatkan sinyalnya dgn syarat lebih ketat) -- tetap
+    # TIDAK prediktif (n=453, stagnant_negative 33.1%, tetap di bawah
+    # baseline). Lihat research/mbss_macd_production_research_bundle/ utk
+    # metodologi selengkapnya.
     if value_traded < 3_000_000_000: score -= 10; reasons.append("penalty: likuiditas tipis")
     if rr_max and rr_max < 0.50: score -= 12; reasons.append("RR entry atas tipis")
     elif rr_max and rr_max < 0.80: score -= 7; reasons.append("RR entry atas kurang ideal")

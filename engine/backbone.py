@@ -59,20 +59,29 @@ import pandas as pd
 
 import engine.legacy_core as core
 
-BACKBONE_FORMULA_VERSION = "AB-RC1.10"  # 1.10: compute_danger_score direvisi -- hapus macd_bearish_cross (+8) & is_below_sma50-AND-is_below_ema21 (+10), keduanya tidak punya daya beda thd stagnant_negative (576 ISSI/2y raw OHLC); tambah value_traded_percentile sbg param baru (cross-sectional, pola sama dgn day_range_percentile) utk penalti baru RSI[50,70]+ret_5d_pct>=15%+value_traded tercile-bawah (+10, tervalidasi 44-46% vs baseline 37.1%); _score_breakout_drop_risk_v4 (legacy_core.py) macd_hist>=3.33 bonus (+22) juga dihapus (backwards, korelasi risiko lebih tinggi bukan lebih rendah). Lihat module docstring & research/mbss_macd_production_research_bundle/ utk detail. 1.9: (a) liquidity gate Rp3B diterapkan SEKALI di compute_backbone (LIQUIDITY_FLOOR_VALUE_TRADED_IDR, reuse dari legacy_core.py) sebelum danger gate -- sebelumnya cuma HC/SDT yang punya floor sendiri-sendiri, saham tipis bisa lolos Backbone lalu ditolak belakangan; (b) compute_rr_at_current_price dipindah ke core (thin wrapper di sini) supaya Layer-1 room score reuse definisi yang sama, bukan risk_reward_at_max yang understate risiko. 1.8: tambah market_regime ke tiap all_scored[ticker] (supaya /winrate bisa disegmentasi per regime -- "snapshot granular utk walk-forward" user request). 1.7: tambah predicted_danger_vnext/danger_bucket_breakdown_vnext (SHADOW ONLY, tidak dipakai gate/rank) ke all_scored[ticker] -- lihat compute_danger_score_bucketed_vnext, dari mbss_formula_diagnosis_claude_agent.md's double-counting concern. ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
+BACKBONE_FORMULA_VERSION = "AB-RC1.12"  # 1.12: _score_breakout_drop_risk_v4 (legacy_core.py, dipakai sbg v4 base danger score) -- hapus CMF distribusi (cmf<-0.15/-0.05 -> -18/-10) & bonus CMF tidak-distribusi (cmf>=-0.11 -> +8), tidak prediktif thd stagnant_negative (bahkan sedikit terbalik) di 576 ISSI/2y raw OHLC, dites lagi dgn kombinasi trend+cross+slope+likuiditas (usul user) -- tetap tidak prediktif. Live case: FIRE/SSIA/UNTR tergate gara2 ini padahal momentum lanjut kuat. 1.11: DANGER_GATE_QUANTILE_BY_REGIME dilonggarkan utk R2-R5/R0 (R1 tetap, doc-validated) -- R2 0.40->0.50, R3 0.35->0.45, R4/R0 0.25->0.35, R5 0.15->0.25 (user request, 2026-08-24 funnel diagnostic: R3_SIDEWAYS's 0.35 motong SDT lane candidates 8->1 di hari yg sideways tapi tidak genuinely berbahaya). Global (bukan cuma SDT) per keputusan user eksplisit -- semua consumer gate (/hc, /screendaytrade, /consensus, /check) ikut lebih longgar. Belum forward-validated, lihat komentar di DANGER_GATE_QUANTILE_BY_REGIME. 1.10: compute_danger_score direvisi -- hapus macd_bearish_cross (+8) & is_below_sma50-AND-is_below_ema21 (+10), keduanya tidak punya daya beda thd stagnant_negative (576 ISSI/2y raw OHLC); tambah value_traded_percentile sbg param baru (cross-sectional, pola sama dgn day_range_percentile) utk penalti baru RSI[50,70]+ret_5d_pct>=15%+value_traded tercile-bawah (+10, tervalidasi 44-46% vs baseline 37.1%); _score_breakout_drop_risk_v4 (legacy_core.py) macd_hist>=3.33 bonus (+22) juga dihapus (backwards, korelasi risiko lebih tinggi bukan lebih rendah). Lihat module docstring & research/mbss_macd_production_research_bundle/ utk detail. 1.9: (a) liquidity gate Rp3B diterapkan SEKALI di compute_backbone (LIQUIDITY_FLOOR_VALUE_TRADED_IDR, reuse dari legacy_core.py) sebelum danger gate -- sebelumnya cuma HC/SDT yang punya floor sendiri-sendiri, saham tipis bisa lolos Backbone lalu ditolak belakangan; (b) compute_rr_at_current_price dipindah ke core (thin wrapper di sini) supaya Layer-1 room score reuse definisi yang sama, bukan risk_reward_at_max yang understate risiko. 1.8: tambah market_regime ke tiap all_scored[ticker] (supaya /winrate bisa disegmentasi per regime -- "snapshot granular utk walk-forward" user request). 1.7: tambah predicted_danger_vnext/danger_bucket_breakdown_vnext (SHADOW ONLY, tidak dipakai gate/rank) ke all_scored[ticker] -- lihat compute_danger_score_bucketed_vnext, dari mbss_formula_diagnosis_claude_agent.md's double-counting concern. ...(1.5 history above) + danger-adjusted rank_score (1.6, user request): Entry Rank ordering was pure probability_score, ignoring danger entirely once a survivor passed the gate -- two same-probability survivors with very different danger ranked identically. Added rank_score = probability_score - max(0, danger-30)*0.3 as the sort key (floor=30 deliberately loose, not strict -- backtest already shows the Danger Gate itself keeps dangerous-loss near 0%). Bump (and log the reason) on any threshold/weight/output-shape change; never silently re-tune.
 
 # Regime-specific Danger Gate quantile cutoffs (doc section 15.1) — candidates
 # with predicted_danger ABOVE this percentile of TONIGHT's own cross-sectional
-# danger distribution are rejected. R2/R4/R5 not covered by the doc's forward
-# validation window (all August sim dates were R1) — set conservatively
-# (stricter than R1) rather than guessed loose, until forward-validated.
+# danger distribution are rejected. R1 keeps its doc-validated value (all
+# August sim dates were R1) unchanged. R2-R5/R0 loosened (MBSS v2, user
+# request 2026-08-24 — funnel diagnostic showed R3_SIDEWAYS's 0.35 cutting
+# SDT lane candidates from 8 to 1 on a genuinely sideways-but-not-dangerous
+# day, e.g. rejecting danger=55-56 names sitting right at the universe
+# median): SDT already re-validates every pick via its own D1/D2 checkpoint
+# (VALIDATION_CHECKPOINT_MIN_PCT) before anyone acts further on it, so a
+# looser gate here trades "fewer false negatives" for "SDT's own downstream
+# check absorbs the residual risk" — reasonable ONLY because that check
+# exists. Still deliberately below R1 in every tier (R1 stays the sole
+# validated regime) and still NOT forward-validated itself — track via
+# pick-history winrate segmented by market_regime before tuning further.
 DANGER_GATE_QUANTILE_BY_REGIME = {
     "R1_BULL_STABLE": 0.55,
-    "R2_BULL_HIGH_VOL": 0.40,   # doc: "highly selective until sufficient forward sample exists"
-    "R3_SIDEWAYS": 0.35,
-    "R4_RISK_OFF": 0.25,
-    "R5_STRESS": 0.15,
-    "R0_UNKNOWN": 0.25,          # no regime read -> treat cautiously, same tier as R4
+    "R2_BULL_HIGH_VOL": 0.50,
+    "R3_SIDEWAYS": 0.45,
+    "R4_RISK_OFF": 0.35,
+    "R5_STRESS": 0.25,
+    "R0_UNKNOWN": 0.35,          # no regime read -> treat cautiously, same tier as R4
 }
 
 BACKBONE_TOP_N = 8
