@@ -775,6 +775,117 @@ def check_orderbook_solid_buy_zapi(ticker: str) -> dict | None:
     return {**snapshot, "confirmed": confirmed}
 
 
+# IDX auto-reject-atas (ARA) band, revisi simetris 2023 -- price-tier
+# dependent, bukan flat 1 angka. Dipakai sbg PLAFON riil "seberapa jauh
+# harga BISA naik hari ini", bukan proxy kasar ret_1d>=20% yg sudah dipakai
+# backbone.py's danger score (itu sengaja tetap blunt di sana, ini beda
+# tujuan -- sini butuh angka rupiah aktual utk TP2/covered_pct_of_room).
+ARA_BAND_TIERS = ((200, 0.35), (5000, 0.25), (float("inf"), 0.20))
+
+
+def compute_ara_price(prev_close: float) -> float | None:
+    """Harga ARA (auto-reject-atas) hari ini dari closing kemarin, sesuai tier IDX."""
+    if not prev_close or prev_close <= 0:
+        return None
+    for ceiling, pct in ARA_BAND_TIERS:
+        if prev_close < ceiling:
+            return round(prev_close * (1 + pct))
+    return None
+
+
+# MBSS v2 (user request — "bantu analisa buy power, sejauh mana bisa
+# exhausted/fading atau lanjut ke TP2/ARA"): dominasi bid/ask + cetakan beli
+# besar dari orderbook_check adalah heuristik akal sehat, BUKAN backtested --
+# endpoint orderbook/running-trades Zapi cuma snapshot live (cache 15
+# detik), TIDAK ADA history/replay, jadi TIDAK BISA dibacktest sama sekali
+# (sama batasan yg sudah dicatat di check_orderbook_solid_buy_zapi). Per
+# keputusan user eksplisit: tetap ditampilkan tanpa label "eksperimental" --
+# user akan cross-check orderbook live sendiri saat entry.
+#
+# volume_price_signal (parameter baru, user request lanjutan — "volume-decay
+# buy-power signal, dilanjut"): BEDA dari orderbook -- ini DIBACKTEST thd
+# data 1m riil (344 ticker, 19 hari bursa, n=64,218 kombinasi harga-naik x
+# volume): harga MASIH naik tapi volume 10 menit terakhir menyusut <0.5x
+# dari 10 menit sebelumnya -> median further-gain 30 menit ke depan turun
+# ~35-40% (0.56% vs baseline 0.90%/surge-case 0.85%) -- pola exhaustion
+# klasik "buyer kering", sinyal PALING solid dari semua yg diuji sesi ini
+# (murni price-speed decay TERBUKTI lemah, korelasi cuma 0.04-0.06, TIDAK
+# dipakai). Makanya diberi bobot strength PALING BESAR (±2) dibanding
+# komponen orderbook yg cuma heuristik.
+BUY_POWER_BIG_PRINT_LOTS_STRONG = 500
+
+
+def predict_buy_power_trajectory(prev_close: float, current_price: float, ara_price: float | None,
+                                  orderbook_check: dict | None,
+                                  volume_price_signal: dict | None = None) -> dict:
+    """
+    Kombinasi 3 sumber, TIDAK saling bergantung (masing2 fallback aman kalau
+    salah satu tidak tersedia): (1) volume_price_signal -- TERVALIDASI,
+    bobot terbesar; (2) dominasi bid/ask + cetakan beli besar dari
+    orderbook_check -- heuristik, live-only; (3) jarak yang SUDAH ditempuh
+    menuju ARA -- makin dekat ARA, makin kecil ruang tersisa berapa pun
+    kuat sinyal lain. Return "available": False HANYA kalau KETIGA sumber
+    kosong sama sekali -- caller fallback ke pesan tanpa section buy-power.
+    """
+    covered_pct = None
+    if ara_price and prev_close and ara_price != prev_close:
+        covered_pct = (current_price - prev_close) / (ara_price - prev_close) * 100
+
+    has_orderbook = bool(orderbook_check and orderbook_check.get("available"))
+    has_volume_signal = bool(volume_price_signal and volume_price_signal.get("signal"))
+    if not has_orderbook and not has_volume_signal:
+        return {"available": False, "label": None, "reasons": [], "covered_pct_of_room": covered_pct}
+
+    strength = 0
+    reasons = []
+
+    if has_volume_signal:
+        vp_signal = volume_price_signal["signal"]
+        vol_ratio = volume_price_signal.get("vol_ratio")
+        if vp_signal == "fading":
+            strength -= 2
+            reasons.append(f"volume mengering saat harga masih naik (rasio {vol_ratio:.2f}x — historis further-gain turun ~35-40%)")
+        elif vp_signal == "solid":
+            strength += 1
+            reasons.append(f"volume masih deras mengiringi kenaikan (rasio {vol_ratio:.2f}x)")
+
+    if has_orderbook:
+        bid_pct = orderbook_check.get("bid_percent")
+        ask_pct = orderbook_check.get("ask_percent")
+        big_buy_lots = orderbook_check.get("big_buy_print_total_lots") or 0
+        if bid_pct is not None and ask_pct is not None:
+            imbalance = bid_pct - ask_pct
+            if bid_pct >= 70 and imbalance >= 30:
+                strength += 2
+                reasons.append(f"bid dominan kuat ({bid_pct:.0f}% vs {ask_pct:.0f}%)")
+            elif bid_pct >= ORDERBOOK_CONFIRM_BID_PERCENT_MIN and imbalance >= ORDERBOOK_CONFIRM_IMBALANCE_MIN:
+                strength += 1
+                reasons.append(f"bid dominan ({bid_pct:.0f}% vs {ask_pct:.0f}%)")
+            elif bid_pct < 45:
+                strength -= 1
+                reasons.append(f"ask mulai dominan ({ask_pct:.0f}% vs {bid_pct:.0f}%)")
+        if big_buy_lots >= BUY_POWER_BIG_PRINT_LOTS_STRONG:
+            strength += 1
+            reasons.append(f"cetakan beli besar aktif ({big_buy_lots:,.0f} lot)")
+
+    if covered_pct is not None:
+        if covered_pct >= 85:
+            strength -= 2
+            reasons.append(f"sudah {covered_pct:.0f}% menuju ARA — ruang tersisa tipis")
+        elif covered_pct >= 60:
+            strength -= 1
+            reasons.append(f"sudah {covered_pct:.0f}% menuju ARA")
+
+    if strength >= 2:
+        label = "🚀 Buy power kuat — berpotensi lanjut ke ARA"
+    elif strength >= 0:
+        label = "📈 Buy power cukup — berpotensi ke TP2"
+    else:
+        label = "⚠️ Buy power melemah — waspada fading"
+
+    return {"available": True, "label": label, "strength_score": strength, "reasons": reasons, "covered_pct_of_room": covered_pct}
+
+
 def build_breaking_alert_messages(ticker: str, detection: dict, orderbook_check: dict | None) -> list[str]:
     """
     Bangun sequence pesan untuk 1x scan: pesan Stage 1 SELALU ada (dipanggil

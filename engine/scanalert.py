@@ -16,10 +16,20 @@ MBSS v2 (user request) — push alert intraday "breaking" utk scalping, 2 tahap:
     Zapi Stage 2 (orderbook, `broker.check_orderbook_solid_buy_zapi`) HANYA
     dicek kalau Alert B fire -- bukan di Alert A.
 
-  Exclude-live: ticker yg gain-nya SUDAH >=15% di cek PERTAMA hari itu
-    di-skip total hari itu ("no room to entry" -- median further-gain makin
-    ke 0% seiring gain awal makin besar, backtest n kecil tapi konsisten
-    dgn danger-gate ret_1d_pct>=20% yg sudah ada di backbone.py).
+  Exclude-live: ticker yg gain-nya SUDAH >=15% DARI OPEN HARI INI (BUKAN dari
+    prev_close) di cek PERTAMA hari itu di-skip total hari itu ("no room to
+    entry"). MBSS v2 (user correction 2026-08-24, live case FIRE: gap-up
+    +13.4% di PEMBUKAAN lalu cuma chop ±8% intraday -- excluded to
+    prev_close-based, TAPI intraday room-nya sendiri belum genuinely
+    exhausted): basis diganti ke gain-from-OPEN supaya gap pra-market/auction
+    (08:58-09:00) tidak ikut kehitung sbg "exhaust" -- itu bukan tekanan beli
+    INTRADAY yg genuinely sudah habis. Divalidasi ulang thd basis baru ini
+    (1m riil, 344 ticker, 19 hari bursa): time-to-(-5%-drawdown) within 2
+    menit turun dari 56.4% (basis prev_close) ke 45.8% (basis open) --
+    sinyal lebih bersih, bukan cuma teori. Median further-gain tetap modest
+    (median further gain saat touch 15%: +2.8%) dan risiko downside tetap
+    dominan (86% kasus akhirnya kena -5% drawdown) -- exclude tetap masuk
+    akal, cuma basisnya yg diperbaiki.
 
   Tag ret_3d>=10% ("sudah lari kencang"): relative-risk EOD-negatif 2.2-3.3x
     lebih tinggi, konsisten di semua threshold — ditempel sbg warning label
@@ -125,6 +135,18 @@ def _get_alert_universe() -> list[str]:
     harga 60-600 -- BUKAN daftar riset terpisah. Filter harga pakai
     daily_ref (closing kemarin) yg sudah di-cache per hari, bukan fetch live
     terpisah lagi.
+
+    MBSS v2 (user request 2026-08-24 — live case: saham non-Sharia muncul
+    di ALERT): ticker_whitelist.json BISA mengandung kontaminasi lama (ticker
+    di luar ISSI) -- ditemukan 72/386 saham di file dev ini bukan konstituen
+    ISSI (mis. ASII, BRPT, LPKR, ADHI, PWON, FREN), karena load_or_build_
+    whitelist() dulu HANYA memfilter ulang IN-MEMORY tiap dipanggil, tidak
+    pernah menulis ulang FILE-nya (sudah diperbaiki, self-heal di sana) --
+    tapi fungsi ini baca FILE LANGSUNG (bukan lewat load_or_build_whitelist),
+    jadi tidak boleh menganggap file selalu bersih. Intersect eksplisit thd
+    fetch_online_sharia_list() (baca lokal, murah, aman dipanggil tiap scan
+    5 menit) sebagai lapis pertahanan kedua -- jangan bergantung pada file
+    sudah ter-self-heal duluan.
     """
     if not os.path.exists(core.WHITELIST_CACHE_FILE):
         print("⚠️ ticker_whitelist.json belum ada -- jalankan /eodscan dulu sebelum scan-alert bisa jalan.")
@@ -139,7 +161,17 @@ def _get_alert_universe() -> list[str]:
         # perlu tahu ini bukan whitelist bulan ini.
         print(f"⚠️ ticker_whitelist.json basi (dari {generated_month}, sekarang {current_month}) -- "
               f"jalankan /eodscan untuk refresh. Tetap dipakai apa adanya utk scan ini.")
-    return wl.get("eligible_tickers", [])
+    eligible = wl.get("eligible_tickers", [])
+    try:
+        sharia_universe = set(core.fetch_online_sharia_list())
+        filtered = [t for t in eligible if t in sharia_universe]
+        dropped = len(eligible) - len(filtered)
+        if dropped > 0:
+            print(f"🕌 Scan-alert: {dropped} ticker non-Sharia dibuang dari universe (di luar ISSI terkunci).")
+        return filtered
+    except Exception as e:
+        print(f"⚠️ Gagal memuat daftar Sharia terkunci ({e}) -- pakai whitelist apa adanya, TIDAK di-intersect.")
+        return eligible
 
 
 def _fetch_daily_ref(tickers: list[str]) -> dict:
@@ -202,6 +234,57 @@ def _compute_current_session_vwap(bars: pd.DataFrame) -> float | None:
         return None
     typical = (highs + lows + closes) / 3.0
     return float((typical * vols).sum() / total_vol)
+
+
+# MBSS v2 (user request 2026-08-24, live case FIRE: gap-up +13.4% di
+# pembukaan, TIDAK KETANGKAP Alert A/B karena keduanya cuma bandingkan bar
+# SESAMA hari itu -- gap yg terjadi SEBELUM bar pertama secara struktural
+# tidak pernah terlihat). Informational-only tag, BUKAN alert baru dgn
+# klaim prediktif -- dites thd data 1m riil (344 ticker, 19 hari bursa,
+# n=4003 gap-day event) TAPI per-bucket n KECIL (n=15 holds di sweet spot),
+# jauh di bawah confidence temuan lain sesi ini (puluhan ribu sampel).
+# HANYA bucket 5-12% (gabungan 5-8%+8-12%) yg ditampilkan -- further-gain
+# median +16.5%, 66.7% EOD positif thd open. Di LUAR range ini SENGAJA
+# tidak fire sama sekali (user request -- "kalau >12% masih bahaya spt
+# >15%, drop; <5% no meaningful gain, drop juga"): gap<5% historis lemah
+# (n=85, cuma 29.3% EOD positif bahkan yg holds), gap>=12% (persis kasus
+# FIRE sendiri) JUSTRU paling lemah (+6.3%, cuma 20% EOD positif, n=5) --
+# FIRE profitable hari itu TIDAK berarti gap besar reliably bagus, dan
+# gap>=12% juga cepat mendekati wilayah NO_ROOM_GAIN_PCT (exhaust) yg
+# sudah terbukti berisiko tinggi (lihat catatan no-room di atas). "Holds"
+# = harga tidak jatuh >3% dari open dlm 5 bar pertama yg tersedia (sama
+# persis metodologi backtest-nya).
+GAP_UP_MIN_PCT = 5.0
+GAP_UP_MAX_PCT = 12.0
+GAP_UP_HOLD_CHECK_BARS = 5
+GAP_UP_HOLD_MAX_DROP_PCT = -3.0
+GAP_UP_SWEET_SPOT_NOTE = "🥇 sweet spot historis (further-gain median +16.5%, 66.7% EOD positif — n=15 holds, sample kecil)"
+
+
+def _detect_gap_up(bars: pd.DataFrame, prev_close: float) -> dict | None:
+    if bars.empty or not prev_close or prev_close <= 0:
+        return None
+    day_open = float(bars["Open"].astype(float).iloc[0])
+    if day_open <= 0:
+        return None
+    gap_pct = (day_open - prev_close) / prev_close * 100
+    if gap_pct < GAP_UP_MIN_PCT or gap_pct >= GAP_UP_MAX_PCT:
+        return None  # di luar sweet spot 5-12% -- sengaja tidak fire, bukan cuma diberi catatan lemah
+    check_bars = bars.iloc[:GAP_UP_HOLD_CHECK_BARS]
+    if len(check_bars) < GAP_UP_HOLD_CHECK_BARS:
+        return None  # tunggu cukup bar dulu sebelum menilai "holds" -- first-touch tetap terjaga via state gap_checked
+    low_so_far = float(check_bars["Low"].astype(float).min())
+    holds = (low_so_far - day_open) / day_open * 100 >= GAP_UP_HOLD_MAX_DROP_PCT
+    return {"gap_pct": gap_pct, "day_open": day_open, "holds": holds, "bucket_note": GAP_UP_SWEET_SPOT_NOTE}
+
+
+def _build_gap_up_message(ticker: str, detection: dict) -> str:
+    hold_txt = "bertahan" if detection["holds"] else "belum jelas bertahan (sempat turun >3% dari open)"
+    note = f"\n{detection['bucket_note']}" if detection["bucket_note"] else ""
+    return (
+        f"🌅 {ticker} GAP-UP +{detection['gap_pct']:.1f}% di pembukaan ({hold_txt}) | open {detection['day_open']:,.0f}"
+        f"{note}\nInformational — sample historis kecil, bukan sinyal beli."
+    )
 
 
 # ── Deteksi (reuse persis logika riset — first-touch, bukan snapshot terakhir) ──
@@ -300,6 +383,46 @@ def _detect_alert_b(bars: pd.DataFrame, prev_close: float) -> dict | None:
     return None
 
 
+# MBSS v2 (user request — "prediksi TP sehat dari speed harga, resiko
+# fading kalau speed melandai"): pure price-speed decay (rasio kecepatan
+# window 5m/5m atau 10m/10m) DITES DULU thd data 1m riil (344 ticker, 19
+# hari bursa) -- korelasi cuma 0.04-0.06, TERLALU LEMAH utk dipakai (lihat
+# riset sesi ini). Yang genuinely bermakna: harga MASIH naik TAPI volume 10
+# menit terakhir menyusut <0.5x dari 10 menit sebelumnya -- median further-
+# gain 30 menit ke depan turun ~35-40% (0.56% vs baseline 0.90%, n=5669) --
+# klasik pola "buyer kering". Dipanggil HANYA saat Alert B fire (bukan
+# bulk-scan), pakai bars 1m yg SUDAH di-fetch scan ini, TIDAK ada fetch
+# tambahan.
+VOLUME_PRICE_SIGNAL_WINDOW_MINUTES = 10
+VOLUME_PRICE_FADING_RATIO_MAX = 0.5
+VOLUME_PRICE_SOLID_RATIO_MIN = 1.5
+
+
+def _compute_volume_price_signal(bars: pd.DataFrame, window_minutes: int = VOLUME_PRICE_SIGNAL_WINDOW_MINUTES) -> dict | None:
+    closes = bars["Close"].astype(float)
+    vols = bars["Volume"].fillna(0).astype(float)
+    n = len(closes)
+    if n < 2 * window_minutes + 1:
+        return None
+    c_now = float(closes.iloc[-1])
+    c_w = float(closes.iloc[-1 - window_minutes])
+    if c_w <= 0:
+        return None
+    price_change_pct = (c_now - c_w) / c_w * 100
+    vol_recent = float(vols.iloc[-window_minutes:].sum())
+    vol_prior = float(vols.iloc[-2 * window_minutes:-window_minutes].sum())
+    if vol_prior <= 0:
+        return None
+    vol_ratio = vol_recent / vol_prior
+    if price_change_pct > 0 and vol_ratio < VOLUME_PRICE_FADING_RATIO_MAX:
+        signal = "fading"
+    elif price_change_pct > 0 and vol_ratio > VOLUME_PRICE_SOLID_RATIO_MIN:
+        signal = "solid"
+    else:
+        signal = "neutral"
+    return {"signal": signal, "price_change_pct": price_change_pct, "vol_ratio": vol_ratio}
+
+
 # ── Pesan (ringkas, sengaja tanpa banyak keterangan — user baca cepat & amati live) ──
 
 def _vwap_segment(current_price: float | None, vwap: float | None) -> str:
@@ -308,6 +431,58 @@ def _vwap_segment(current_price: float | None, vwap: float | None) -> str:
         return ""
     dist_pct = (current_price - vwap) / vwap * 100
     return f" | VWAP {vwap:,.0f} ({dist_pct:+.1f}%)"
+
+
+# MBSS v2 (user request — "bantu analisa entry candidate: macd position,
+# arah harga, TP1/TP2 selain VWAP, prediksi buy power"): dipanggil HANYA
+# saat Alert B fire (bukan bulk-scan), pakai daily OHLC yg SUDAH ada di
+# SQLite lokal (core.get_ohlcv_smart, DB-first, TIDAK nambah kuota Zapi) --
+# reuse calculate_macd Brights-compatible yg sama dgn seluruh scoring
+# harian, supaya "posisi MACD" di alert konsisten dgn makna yg sama di
+# /check, /hc, /screendaytrade, BUKAN definisi terpisah.
+def _compute_macd_position_label(ticker: str) -> str | None:
+    try:
+        hist_daily = core.get_ohlcv_smart(ticker, limit=40)
+    except Exception as e:
+        print(f"⚠️ Gagal fetch daily OHLC utk MACD position {ticker}: {e}")
+        return None
+    if hist_daily is None or hist_daily.empty or len(hist_daily) < 30:
+        return None
+    closes = hist_daily["Close"].astype(float)
+    macd_line, signal_line, macd_hist = core.calculate_macd(closes)
+    macd_now, signal_now = float(macd_line.iloc[-1]), float(signal_line.iloc[-1])
+    hist_now = float(macd_hist.iloc[-1])
+    hist_prev = float(macd_hist.iloc[-3]) if len(macd_hist) >= 3 else hist_now
+    if macd_now > 0 and signal_now > 0:
+        regime = "atas centerline"
+    elif macd_now < 0 and signal_now < 0:
+        regime = "bawah centerline"
+    else:
+        regime = "sekitar centerline"
+    direction = "bullish" if macd_now > signal_now else "bearish"
+    momentum = "menguat" if hist_now > hist_prev else "melemah"
+    return f"MACD {direction} ({regime}), histogram {momentum}"
+
+
+# TP1 = +10% dari prev_close -- KONSISTEN dgn milestone +10% yg sama yg
+# dipakai lane/CONTINUATION/VALIDATION seharian ini (bukan definisi TP
+# terpisah), bukan target baru yg diciptakan khusus alert. TP2 = titik 75%
+# dari jarak prev_close->ARA -- waypoint SEBELUM plafon keras ARA (biar beda
+# dari ARA itu sendiri, sesuai permintaan user "TP2 selain ARA").
+ALERT_TP1_PCT = 10.0
+ALERT_TP2_ARA_FRACTION = 0.75
+
+
+def _compute_tp_targets(prev_close: float, ara_price: float | None) -> tuple[float | None, float | None]:
+    if not prev_close or prev_close <= 0:
+        return None, None
+    tp1 = round(prev_close * (1 + ALERT_TP1_PCT / 100.0))
+    tp2 = None
+    if ara_price and ara_price > tp1:
+        tp2_candidate = round(prev_close + (ara_price - prev_close) * ALERT_TP2_ARA_FRACTION)
+        if tp2_candidate > tp1:
+            tp2 = tp2_candidate
+    return tp1, tp2
 
 
 def _build_alert_a_message(ticker: str, detection: dict, ret_3d: float | None,
@@ -321,17 +496,38 @@ def _build_alert_a_message(ticker: str, detection: dict, ret_3d: float | None,
 
 def _build_alert_b_messages(ticker: str, detection: dict, ret_3d: float | None,
                              orderbook_check: dict | None,
-                             current_price: float | None, vwap: float | None) -> list[str]:
+                             current_price: float | None, vwap: float | None,
+                             macd_label: str | None = None, tp1: float | None = None,
+                             tp2: float | None = None, ara_price: float | None = None,
+                             buy_power: dict | None = None) -> list[str]:
     tag = " ⚠️lari kencang" if ret_3d is not None and ret_3d >= RET_3D_WARN_THRESHOLD else ""
     messages = [
         f"✅ {ticker} PULLBACK REBOUND dari +{detection['peak_tier']}% | "
         f"skrg {detection['gain_at_rebound_pct']:+.1f}% | {detection['rebound_time']}"
         f"{tag}{_vwap_segment(current_price, vwap)} | entry candidate"
     ]
+    if macd_label:
+        messages.append(f"📊 {ticker} {macd_label}")
+
+    tp_parts = []
+    if tp1:
+        tp_parts.append(f"TP1 {tp1:,.0f}")
+    if tp2:
+        tp_parts.append(f"TP2 {tp2:,.0f}")
+    if ara_price:
+        tp_parts.append(f"ARA {ara_price:,.0f}")
+    if tp_parts:
+        messages.append(f"🎯 {ticker} target: " + " | ".join(tp_parts))
+
     if orderbook_check and orderbook_check.get("confirmed"):
         bid_pct = orderbook_check.get("bid_percent")
         ask_pct = orderbook_check.get("ask_percent")
         messages.append(f"✅ {ticker} ORDERBOOK SOLID BUY | bid {bid_pct}% vs ask {ask_pct}%")
+
+    if buy_power and buy_power.get("available") and buy_power.get("label"):
+        reason_str = ", ".join(buy_power.get("reasons") or [])
+        messages.append(f"{buy_power['label']}" + (f" ({reason_str})" if reason_str else ""))
+
     return messages
 
 
@@ -343,7 +539,7 @@ async def run_scan_alert_once() -> dict:
     ticker, kirim ke Telegram (kalau ada & belum dikirim hari ini), simpan
     state. Return summary dict (utk logging CLI).
     """
-    summary = {"skipped_reason": None, "alert_a_sent": 0, "alert_b_sent": 0, "scanned": 0, "excluded_no_room": 0}
+    summary = {"skipped_reason": None, "alert_a_sent": 0, "alert_b_sent": 0, "scanned": 0, "excluded_no_room": 0, "gap_up_sent": 0}
 
     now_wib = datetime.datetime.now(core.WIB)
     if now_wib.weekday() >= 5:  # Sabtu/Minggu -- no-op murah, cek ini SEBELUM network call apapun
@@ -405,13 +601,29 @@ async def run_scan_alert_once() -> dict:
         current_price = float(bars["Close"].astype(float).iloc[-1])
         vwap_now = _compute_current_session_vwap(bars)
 
-        t_state = tickers_state.setdefault(t, {"excluded_no_room": False, "alert_a_sent": False, "alert_b_sent": False})
+        t_state = tickers_state.setdefault(
+            t, {"excluded_no_room": False, "alert_a_sent": False, "alert_b_sent": False, "gap_up_sent": False}
+        )
+        t_state.setdefault("gap_up_sent", False)  # ticker lama di state file blm punya field ini
+
+        if not t_state["gap_up_sent"]:
+            det_gap = _detect_gap_up(bars, prev_close)
+            if det_gap:
+                msg = _build_gap_up_message(t, det_gap)
+                if bot is not None:
+                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                else:
+                    print(f"[NO TELEGRAM TOKEN] {msg}")
+                t_state["gap_up_sent"] = True
+                summary["gap_up_sent"] = summary.get("gap_up_sent", 0) + 1
 
         if not t_state["excluded_no_room"] and not t_state["alert_a_sent"] and not t_state["alert_b_sent"]:
-            first_gain = float((bars["High"].astype(float).max() - prev_close) / prev_close * 100)
-            if first_gain >= NO_ROOM_GAIN_PCT:
-                t_state["excluded_no_room"] = True
-                summary["excluded_no_room"] += 1
+            day_open = float(bars["Open"].astype(float).iloc[0])
+            if day_open > 0:
+                gain_from_open = float((bars["High"].astype(float).max() - day_open) / day_open * 100)
+                if gain_from_open >= NO_ROOM_GAIN_PCT:
+                    t_state["excluded_no_room"] = True
+                    summary["excluded_no_room"] += 1
         if t_state["excluded_no_room"]:
             continue
 
@@ -429,10 +641,25 @@ async def run_scan_alert_once() -> dict:
         if not t_state["alert_b_sent"]:
             det_b = _detect_alert_b(bars, prev_close)
             if det_b:
+                # MBSS v2 (user request — enrich Alert B: MACD position, TP1/
+                # TP2/ARA, prediksi buy power). Semua fallback aman ke None
+                # kalau fetch gagal (DB lokal utk MACD, Zapi utk orderbook) --
+                # _build_alert_b_messages sudah skip section yg None/kosong,
+                # jadi Alert B TETAP terkirim (pesan inti) walau enrichment gagal.
                 orderbook_check = await asyncio.to_thread(
                     broker_engine.check_orderbook_solid_buy_zapi, t
                 )
-                for msg in _build_alert_b_messages(t, det_b, ret_3d, orderbook_check, current_price, vwap_now):
+                macd_label = await asyncio.to_thread(_compute_macd_position_label, t)
+                ara_price = broker_engine.compute_ara_price(prev_close)
+                tp1, tp2 = _compute_tp_targets(prev_close, ara_price)
+                volume_price_signal = _compute_volume_price_signal(bars)
+                buy_power = broker_engine.predict_buy_power_trajectory(
+                    prev_close, current_price, ara_price, orderbook_check, volume_price_signal
+                )
+                for msg in _build_alert_b_messages(
+                    t, det_b, ret_3d, orderbook_check, current_price, vwap_now,
+                    macd_label=macd_label, tp1=tp1, tp2=tp2, ara_price=ara_price, buy_power=buy_power,
+                ):
                     if bot is not None:
                         await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
                     else:
