@@ -1437,6 +1437,32 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         if episode_peak > 0:
             macd_pullback_from_episode_peak_pct = round(float((current_price - episode_peak) / episode_peak * 100), 2)
 
+    # MBSS v2 (user request 2026-08-24, dari research/macd_research_complete/
+    # research_bundle/ -- "Entry = close on MACD bullish-cross day"): trailing
+    # return 10 hari SEBELUM cross (bukan sesudah) -- proxy "sudah lari kencang
+    # menjelang cross" sbg konfirmasi kualitas cross itu sendiri. Divalidasi
+    # mandiri thd 576 ISSI raw OHLC 2 tahun, gated PERSIS di hari cross
+    # (n=7816 fresh-cross event): hubungan MONOTON bersih, tidak ada sweet-
+    # spot/plateau -- ret10_pre>=30% -> hit6=80.6%, n=314, vs bucket 10-12%
+    # cuma 58.3%. Ambang produksi >15% dipilih user (n gabungan lebih besar,
+    # msh solid: hit6 61-81% tergantung sub-bucket). MAE selama hold (utk
+    # trade yg EVENTUALLY hit +6%): median cuma -4.01%, TAPI closing di hari
+    # low terdalam rata2 SUDAH +2.32% (53.1% kasus closing hari itu positif)
+    # -- intraday low sering cuma "kaget" sehari, bukan breakdown genuine.
+    # cross_days_ago<=1 (bukan window besar spt CONTINUATION/VALIDATION) --
+    # ini sinyal "act TODAY", ditempatkan di SDT bukan HC (beda dari
+    # CONTINUATION/VALIDATION yg butuh gain PASCA-cross, ini justru
+    # konfirmasi SEBELUM/SAAT cross).
+    macd_ret10_pre_cross_pct = None
+    if (
+        macd_cross_direction == "bullish" and macd_cross_days_ago is not None
+        and len(close_prices) > macd_cross_days_ago + 10
+    ):
+        price_at_cross = close_prices.iloc[-1 - macd_cross_days_ago]
+        price_10d_before_cross = close_prices.iloc[-1 - macd_cross_days_ago - 10]
+        if price_10d_before_cross and price_10d_before_cross > 0:
+            macd_ret10_pre_cross_pct = round(float((price_at_cross - price_10d_before_cross) / price_10d_before_cross * 100), 2)
+
     # --- SMA50: medium-term trend filter (swing-relevant horizon, not SMA200/long-term
     # investing horizon) — catches "looks fine short-term but still in a weaker medium-
     # term regime" cases that SMA20 alone (already used above) can miss.
@@ -2083,6 +2109,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "macd_gain_since_cross_pct": macd_gain_since_cross_pct,  # None kalau belum pernah cross bullish / histori kurang -- lihat catatan di atas
         "macd_episode_had_volume_breakout": macd_episode_had_volume_breakout,  # PULLBACK EXTENDED tier -- lihat catatan riset di atas
         "macd_pullback_from_episode_peak_pct": macd_pullback_from_episode_peak_pct,  # negatif = sedang pullback dari peak episode
+        "macd_ret10_pre_cross_pct": macd_ret10_pre_cross_pct,  # FRESH CROSS MOMENTUM tier (SDT) -- lihat catatan riset di atas
         "macd_slope_percentile": macd_slope_percentile,  # adaptif vs trailing histori ticker sendiri, gate SDT sekarang >=50 (bukan lagi cuma slope>0)
         "macd_histogram_noise_exclude": macd_histogram_noise_exclude,  # True = histogram sehari sebelum flip masih tebal+belum melandai ("parabolic"), macd_approach_tier di-exclude
         "is_new_high_20d": is_new_high_20d,

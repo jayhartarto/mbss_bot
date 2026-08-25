@@ -464,6 +464,64 @@ async def screen_daytrade(update, context):
             (backbone_result or {}).get("all_scored", {})
         )
 
+    # MBSS v2 (user request 2026-08-24, dari research/macd_research_complete/
+    # research_bundle/ -- "Entry = close on MACD bullish-cross day"): fresh
+    # cross (hari ini/kemarin) DENGAN konfirmasi pre-cross momentum kuat
+    # (trailing 10 hari SEBELUM cross >15%) -- sinyal "act TODAY", beda dari
+    # lane pra-breakout di atas (yg justru BELUM cross) dan beda dari HC
+    # CONTINUATION/VALIDATION (yg butuh gain PASCA-cross). Divalidasi mandiri
+    # 576 ISSI/2thn, n=7816 fresh-cross event gated persis di hari cross:
+    # hubungan MONOTON bersih thd ret10_pre_cross, tidak ada plateau/sweet-
+    # spot -- >15% jadi ambang produksi (hit6 61-81% tergantung sub-bucket,
+    # vs baseline fresh-cross murni 36.28%). MAE selama hold (trade yg
+    # eventually hit +6%): median cuma -4.01%, closing di hari low terdalam
+    # rata2 SUDAH +2.32% (53% kasus closing hari itu positif) -- pullback
+    # intraday sering cuma kaget sehari, bukan breakdown genuine. Kandidat
+    # di sini kandidat alami utk live intraday pullback-alert (belum
+    # dibangun, diskusi terpisah).
+    #
+    # cross_days_ago<=2 (bukan <=1) -- user request, dites: evaluated persis
+    # di hari 0/1/2 pasca-cross (bukan cuma cross_days_ago==2 sendirian),
+    # performa STABIL tanpa decay (hit6 71.1%/69.3%/70.0% di hari 0/1/2,
+    # n=890 masing2) -- window gabungan <=2 kasih +50% volume (n=2670 vs
+    # 1780) nyaris tanpa kehilangan kualitas (hit6 70.15% vs 70.22%, hit10
+    # 56.67% vs 57.02%).
+    MACD_FRESH_CROSS_MOMENTUM_MAX_DAYS_AGO = 2
+    MACD_FRESH_CROSS_MOMENTUM_RET10_PRE_MIN = 15.0
+    fresh_cross_momentum_candidates = [
+        r for r in results
+        if r.get("macd_cross_direction") == "bullish"
+        and r.get("macd_cross_days_ago") is not None
+        and r["macd_cross_days_ago"] <= MACD_FRESH_CROSS_MOMENTUM_MAX_DAYS_AGO
+        and r.get("macd_ret10_pre_cross_pct") is not None
+        and r["macd_ret10_pre_cross_pct"] > MACD_FRESH_CROSS_MOMENTUM_RET10_PRE_MIN
+    ]
+    fresh_cross_momentum_candidates.sort(key=lambda r: r["macd_ret10_pre_cross_pct"], reverse=True)
+    fresh_cross_momentum_candidates = fresh_cross_momentum_candidates[:8]
+
+    lines.append("\n🔥 FRESH CROSS MOMENTUM — cross MACD hari ini/kemarin, momentum kuat sebelum cross (>15% dlm 10 hari) — sinyal 'act hari ini'\n")
+    if not fresh_cross_momentum_candidates:
+        lines.append("Tidak ada kandidat fresh cross momentum malam ini.")
+    else:
+        for r in fresh_cross_momentum_candidates:
+            targets = r.get("targets") or {}
+            price = r.get("price")
+            tp1 = targets.get("tp_1")
+            sl = targets.get("cut_loss")
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            danger_note = ""
+            if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= DANGER_WARNING_THRESHOLD:
+                danger_note = f"\n   ⚠️ Danger score {bb_info['predicted_danger']:.0f}/100 (di atas rata-rata malam ini)"
+            lines.append(
+                f"  {r['ticker']} — cross {r.get('macd_cross_days_ago', 0)} hari lalu, momentum pre-cross +{r['macd_ret10_pre_cross_pct']:.1f}% (10 hari)\n"
+                f"   Entry ~{price} (ref: open sesi berikutnya) | TP {tp1} (+6%) | SL {sl}"
+                f"{danger_note}{market_engine.format_sector_tag(r.get('sector'))}"
+            )
+        await asyncio.to_thread(
+            core.lock_daily_daytrade_picks, fresh_cross_momentum_candidates, "screendaytrade_fresh_cross_momentum",
+            (backbone_result or {}).get("all_scored", {})
+        )
+
     # MBSS v2 (user request — "yang aku maksud validation itu relate dengan
     # riset stage D1/D2 yang sudah bergerak naik, probability naik >60%"):
     # REPLIKASI PERSIS metodologi research/brights_imminent_cross_backtest_
@@ -519,7 +577,10 @@ async def screen_daytrade(update, context):
                 f"{broker_engine.format_smart_money_tag(p['ticker'], broksum_data)}"
             )
 
-    buttons = core.build_check_buttons([r["ticker"] for r in lane_candidates] + [p["ticker"] for p in recent_lane_picks])
+    buttons = core.build_check_buttons(
+        [r["ticker"] for r in lane_candidates] + [p["ticker"] for p in recent_lane_picks]
+        + [r["ticker"] for r in fresh_cross_momentum_candidates]
+    )
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
     # Tombol upload Broker Summary ALL 3 hari untuk saham hasil radar.
