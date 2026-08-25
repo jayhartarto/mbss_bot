@@ -650,8 +650,37 @@ async def run_nightly_full_scan(context):
         # Resolusi picks winrate — dijalankan SETELAH scan malam, supaya data EOD
         # yang dipakai untuk cek TP/SL sudah mencakup hari ini.
         try:
-            resolved_count = await asyncio.to_thread(core.resolve_daytrade_picks)
+            resolve_result = await asyncio.to_thread(core.resolve_daytrade_picks)
+            resolved_count = resolve_result["changed"]
+            newly_disconfirmed = resolve_result["newly_disconfirmed"]
             print(f"🎯 Resolusi winrate: {resolved_count} pick diperbarui.")
+
+            # MBSS v2 (user request 2026-08-24 -- riset cut-loss disconfirm,
+            # research/macd_research_complete/): push PROAKTIF malam itu juga
+            # (bukan pull/nunggu user buka command) -- timing-sensitif, tujuan
+            # "cut lebih awal" sebelum market buka besok. Dites mandiri n=7905
+            # fresh-cross event: D1 disconfirm -> hit6 turun ke 24.28%/loss_at_
+            # d5 67.36% (vs baseline 36.28%/49.69%); D1+D2 disconfirm -> makin
+            # parah, 18.27%/77.06%. Cakupan SEMUA sumber pick (SDT lane, HC
+            # CONTINUATION/VALIDATION/MOMENTUM EXTENDED/PULLBACK EXTENDED, dll)
+            # -- bukan cuma satu tool, krn resolve_daytrade_picks() jalan atas
+            # seluruh daytrade_picks_history.json.
+            if newly_disconfirmed:
+                d2_picks = [p for p in newly_disconfirmed if p["tier"] == "d2_negative"]
+                d1_picks = [p for p in newly_disconfirmed if p["tier"] == "d1_negative"]
+                lines = ["⚠️ CUT LOSS WATCH — pick berikut belum terkonfirmasi:"]
+                if d2_picks:
+                    lines.append("\n🔴 D1+D2 negatif (risiko tinggi -- historis 77% berakhir rugi, hit6 cuma 18%):")
+                    for p in d2_picks:
+                        lines.append(f"• {p['ticker']} ({p.get('source') or '-'}) — D1 {p['day1_pnl_pct']:+.1f}% / D2 {p['day2_pnl_pct']:+.1f}%")
+                if d1_picks:
+                    lines.append("\n⚠️ D1 negatif (waspada -- historis 67% berakhir rugi, hit6 cuma 24%):")
+                    for p in d1_picks:
+                        lines.append(f"• {p['ticker']} ({p.get('source') or '-'}) — D1 {p['day1_pnl_pct']:+.1f}%")
+                try:
+                    await context.bot.send_message(chat_id=core.TELEGRAM_CHAT_ID, text="\n".join(lines))
+                except Exception as notify_error:
+                    print(f"⚠️ Gagal kirim notifikasi cut-loss watch: {notify_error}")
         except Exception as e:
             print(f"⚠️ Resolusi daytrade picks gagal: {e}")
     except asyncio.TimeoutError:

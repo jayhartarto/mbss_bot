@@ -129,8 +129,8 @@ def main():
     print(f"\n✅ {added} pick historis ditambahkan ke {core.DAYTRADE_PICKS_HISTORY_FILE}")
 
     print("\n🎯 Menjalankan resolve_daytrade_picks() ASLI (entry_price/day1-3_pnl_pct dari data riil)...")
-    resolved = core.resolve_daytrade_picks()
-    print(f"✅ {resolved} pick diperbarui (entry_price/day1-3_pnl_pct/status).")
+    resolve_result = core.resolve_daytrade_picks()
+    print(f"✅ {resolve_result['changed']} pick diperbarui (entry_price/day1-3_pnl_pct/status).")
 
 
 if __name__ == "__main__":
