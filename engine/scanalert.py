@@ -533,13 +533,132 @@ def _build_alert_b_messages(ticker: str, detection: dict, ret_3d: float | None,
 
 # ── Orkestrasi 1x scan ──────────────────────────────────────────────────────
 
+# MBSS v2 (user request 2026-08-24 — "harus seamlessly berjalan beriringan
+# dengan scanalert"): watch kandidat FRESH CROSS MOMENTUM (SDT, commands/
+# scan.py -- cross_days_ago<=2, ret10_pre_cross_pct>15%) SECARA INTRADAY --
+# begitu candidate ini pullback ke zona toleransi yg SUDAH divalidasi
+# (median MAE trade yg EVENTUALLY hit +6% = -4.01%, p25 -9.01%, p10
+# -14.29%, dari 576 ISSI/2thn n=635), push "BUY NOW"-style alert -- bukan
+# nunggu user buka /screendaytrade. Watchlist DIHITUNG ULANG dari scratch
+# tiap hari (bukan baca daytrade_picks_history.json) supaya jalan
+# independen dari apakah user sudah jalankan /eodscan atau /screendaytrade
+# hari itu -- genuinely "seamless", tanpa langkah manual.
+PULLBACK_ENTRY_MIN_PCT = -2.0            # minimal pullback berarti dari open (bukan noise harian)
+PULLBACK_ENTRY_HEALTHY_MAX_PCT = -9.0    # dlm p25 -- masih sangat umum utk trade yg eventually menang
+PULLBACK_ENTRY_CAUTION_MAX_PCT = -14.0   # dlm p10 -- lebih dalam, tapi masih dlm rentang tervalidasi
+MACD_FRESH_CROSS_MOMENTUM_MAX_DAYS_AGO = 2   # PERSIS commands/scan.py -- jangan drift dari definisi SDT
+MACD_FRESH_CROSS_MOMENTUM_RET10_PRE_MIN = 15.0
+
+
+def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
+    """
+    Reuse PERSIS kriteria FRESH CROSS MOMENTUM (commands/scan.py, jangan
+    drift) -- dihitung ulang di sini via compute_factor_scoring langsung,
+    BUKAN baca daily_scan_cache/pick-history, supaya tidak bergantung pada
+    command lain sudah dijalankan user hari itu.
+    """
+    from engine import scoring  # import lokal -- pola sama dgn broker_engine's compute_orderflow_snapshot_zapi, hindari import-time circular
+    watchlist = {}
+    for t in universe:
+        try:
+            r = scoring.compute_factor_scoring(t, include_quote_check=False)
+        except Exception:
+            continue
+        if not r:
+            continue
+        if (
+            r.get("macd_cross_direction") == "bullish"
+            and r.get("macd_cross_days_ago") is not None
+            and r["macd_cross_days_ago"] <= MACD_FRESH_CROSS_MOMENTUM_MAX_DAYS_AGO
+            and r.get("macd_ret10_pre_cross_pct") is not None
+            and r["macd_ret10_pre_cross_pct"] > MACD_FRESH_CROSS_MOMENTUM_RET10_PRE_MIN
+        ):
+            watchlist[t] = {
+                "ret10_pre_cross_pct": r["macd_ret10_pre_cross_pct"],
+                "cross_days_ago": r["macd_cross_days_ago"],
+            }
+    return watchlist
+
+
+def _detect_pullback_entry(bars: pd.DataFrame) -> dict | None:
+    """
+    Pullback dari OPEN hari ini -- BUKAN dari peak spt Alert B. FRESH CROSS
+    MOMENTUM entry-nya "ref: open sesi berikutnya" (lihat commands/scan.py),
+    jadi open hari ini ADALAH titik referensi entry, bukan peak intraday.
+    First-touch begitu pullback TERDALAM sejauh ini masuk zona [-9%,-2%]
+    (sehat) atau (-14%,-9%] (hati-hati) -- di luar -14% TIDAK di-alert
+    (di luar rentang tervalidasi utk trade yg eventually menang).
+    """
+    if bars.empty:
+        return None
+    day_open = float(bars["Open"].astype(float).iloc[0])
+    if day_open <= 0:
+        return None
+    current_price = float(bars["Close"].astype(float).iloc[-1])
+    lowest_so_far = float(bars["Low"].astype(float).min())
+    deepest_pullback_pct = (lowest_so_far - day_open) / day_open * 100
+    if deepest_pullback_pct > PULLBACK_ENTRY_MIN_PCT:
+        return None
+    if deepest_pullback_pct < PULLBACK_ENTRY_CAUTION_MAX_PCT:
+        return None  # di luar toleransi tervalidasi -- sengaja tidak alert, bukan lupa
+    zone = "healthy" if deepest_pullback_pct >= PULLBACK_ENTRY_HEALTHY_MAX_PCT else "caution"
+    return {"pullback_pct": deepest_pullback_pct, "current_price": current_price, "day_open": day_open, "zone": zone}
+
+
+def _build_pullback_entry_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
+    zone_label = "🎯 SEHAT (dlm p25)" if detection["zone"] == "healthy" else "⚠️ HATI-HATI (mendekati batas p10)"
+    return (
+        f"🔥 {ticker} PULLBACK ENTRY — FRESH CROSS MOMENTUM ({watchlist_entry['cross_days_ago']} hari lalu, "
+        f"momentum pre-cross +{watchlist_entry['ret10_pre_cross_pct']:.1f}%)\n"
+        f"Pullback {detection['pullback_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f} | {zone_label}\n"
+        f"Tervalidasi: median MAE trade menang -4.0%, p25 -9.0%, p10 -14.3% (n=635) — bukan sinyal beli otomatis, verifikasi live."
+    )
+
+
+# MBSS v2 (user correction 2026-08-24 -- "tidak hanya healthy pullback,
+# termasuk kalau masuk ke zona validation yang menandakan sinyal naik
+# semakin tinggi"): sisi SEBALIKNYA dari pullback-entry -- kandidat FCM yg
+# HARI INI lanjut naik kuat (bukan dip) juga sinyal "BUY NOW" yg valid,
+# konsisten dgn temuan terkuat sesi ini (gap_slope>=Q4 + ret_1d_today>3% ->
+# hit6=68.79%, jauh lebih baik dari pullback-only). Threshold >3% REUSE
+# dari riset MOMENTUM EXTENDED itu (extended-episode 6-10hr), BUKAN
+# independen divalidasi khusus utk konteks FCM (0-2hr post-cross) -- extra-
+# polasi yg beralasan, bukan angka baru dari nol. Beri tahu user kalau mau
+# divalidasi ulang khusus populasi FCM.
+CONFIRMATION_ENTRY_MIN_GAIN_PCT = 3.0
+
+
+def _detect_confirmation_entry(bars: pd.DataFrame) -> dict | None:
+    """First-touch begitu gain dari open hari ini >= ambang -- momentum lanjut naik, bukan pullback."""
+    if bars.empty:
+        return None
+    day_open = float(bars["Open"].astype(float).iloc[0])
+    if day_open <= 0:
+        return None
+    current_price = float(bars["Close"].astype(float).iloc[-1])
+    highest_so_far = float(bars["High"].astype(float).max())
+    gain_pct = (highest_so_far - day_open) / day_open * 100
+    if gain_pct < CONFIRMATION_ENTRY_MIN_GAIN_PCT:
+        return None
+    return {"gain_pct": gain_pct, "current_price": current_price, "day_open": day_open}
+
+
+def _build_confirmation_entry_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
+    return (
+        f"🚀 {ticker} CONFIRMATION ENTRY — FRESH CROSS MOMENTUM ({watchlist_entry['cross_days_ago']} hari lalu, "
+        f"momentum pre-cross +{watchlist_entry['ret10_pre_cross_pct']:.1f}%)\n"
+        f"Lanjut naik +{detection['gain_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f}\n"
+        f"Sinyal konfirmasi (bukan pullback) — historis kombinasi momentum+konfirmasi hari sama hit6~69% (konteks episode extended, ekstrapolasi ke FCM) — verifikasi live."
+    )
+
+
 async def run_scan_alert_once() -> dict:
     """
     Satu kali scan penuh: fetch universe + data, deteksi Alert A/B per
     ticker, kirim ke Telegram (kalau ada & belum dikirim hari ini), simpan
     state. Return summary dict (utk logging CLI).
     """
-    summary = {"skipped_reason": None, "alert_a_sent": 0, "alert_b_sent": 0, "scanned": 0, "excluded_no_room": 0, "gap_up_sent": 0}
+    summary = {"skipped_reason": None, "alert_a_sent": 0, "alert_b_sent": 0, "scanned": 0, "excluded_no_room": 0, "gap_up_sent": 0, "pullback_entry_sent": 0}
 
     now_wib = datetime.datetime.now(core.WIB)
     if now_wib.weekday() >= 5:  # Sabtu/Minggu -- no-op murah, cek ini SEBELUM network call apapun
@@ -575,9 +694,20 @@ async def run_scan_alert_once() -> dict:
     else:
         daily_ref = state["daily_ref"]
 
+    if state.get("fresh_cross_momentum_watchlist") is None:
+        print(f"📡 Scan-alert: hitung watchlist FRESH CROSS MOMENTUM (cross<=2hr, ret10_pre>15%) utk {len(universe)} ticker...")
+        fcm_watchlist = await asyncio.to_thread(_get_fresh_cross_momentum_watchlist, universe)
+        state["fresh_cross_momentum_watchlist"] = fcm_watchlist
+        print(f"✅ FRESH CROSS MOMENTUM watchlist hari ini: {len(fcm_watchlist)} ticker.")
+    else:
+        fcm_watchlist = state["fresh_cross_momentum_watchlist"]
+
+    # Union -- FCM watchlist BISA di luar band harga 60-600 (tidak ada floor
+    # harga di definisi SDT-nya), jadi tidak selalu subset alert_universe.
     alert_universe = list(daily_ref.keys())
-    print(f"🔍 Scan-alert: {len(alert_universe)} ticker, fetch bar 1m...")
-    data = await asyncio.to_thread(_fetch_today_1m, alert_universe)
+    full_ticker_set = sorted(set(alert_universe) | set(fcm_watchlist.keys()))
+    print(f"🔍 Scan-alert: {len(full_ticker_set)} ticker ({len(alert_universe)} alert + {len(fcm_watchlist)} FCM watchlist), fetch bar 1m...")
+    data = await asyncio.to_thread(_fetch_today_1m, full_ticker_set)
 
     tickers_state = state.setdefault("tickers", {})
     bot = None
@@ -585,10 +715,10 @@ async def run_scan_alert_once() -> dict:
         import telegram
         bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
 
-    for t in alert_universe:
-        ref = daily_ref[t]
-        prev_close = ref["prev_close"]
-        ret_3d = ref.get("ret_3d")
+    for t in full_ticker_set:
+        ref = daily_ref.get(t)
+        prev_close = ref["prev_close"] if ref else None
+        ret_3d = ref.get("ret_3d") if ref else None
         sym = t + ".JK"
         try:
             bars = data[sym].dropna(how="all").sort_index()
@@ -602,9 +732,40 @@ async def run_scan_alert_once() -> dict:
         vwap_now = _compute_current_session_vwap(bars)
 
         t_state = tickers_state.setdefault(
-            t, {"excluded_no_room": False, "alert_a_sent": False, "alert_b_sent": False, "gap_up_sent": False}
+            t, {"excluded_no_room": False, "alert_a_sent": False, "alert_b_sent": False, "gap_up_sent": False, "watchlist_entry_sent": False}
         )
         t_state.setdefault("gap_up_sent", False)  # ticker lama di state file blm punya field ini
+        t_state.setdefault("watchlist_entry_sent", False)
+
+        # FRESH CROSS MOMENTUM watchlist entry -- DUA sisi (user correction:
+        # bukan cuma pullback), independen dari prev_close/Alert A-B
+        # machinery di bawah (ticker ini bisa HANYA ada krn masuk
+        # fcm_watchlist, di luar band harga 60-600 scanalert biasa). Satu
+        # flag dibagi utk keduanya -- begitu salah satu fire, cukup 1x/hari,
+        # tidak dobel-alert ticker yg sama.
+        if t in fcm_watchlist and not t_state["watchlist_entry_sent"]:
+            det_confirm = _detect_confirmation_entry(bars)
+            if det_confirm:
+                msg = _build_confirmation_entry_message(t, det_confirm, fcm_watchlist[t])
+                if bot is not None:
+                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                else:
+                    print(f"[NO TELEGRAM TOKEN] {msg}")
+                t_state["watchlist_entry_sent"] = True
+                summary["pullback_entry_sent"] += 1
+            else:
+                det_pullback = _detect_pullback_entry(bars)
+                if det_pullback:
+                    msg = _build_pullback_entry_message(t, det_pullback, fcm_watchlist[t])
+                    if bot is not None:
+                        await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                    else:
+                        print(f"[NO TELEGRAM TOKEN] {msg}")
+                    t_state["watchlist_entry_sent"] = True
+                    summary["pullback_entry_sent"] += 1
+
+        if ref is None:
+            continue  # ticker ini HANYA di fcm_watchlist (di luar band 60-600) -- Alert A/B/gap-up di bawah butuh prev_close, sisanya di-skip
 
         if not t_state["gap_up_sent"]:
             det_gap = _detect_gap_up(bars, prev_close)
@@ -670,5 +831,6 @@ async def run_scan_alert_once() -> dict:
     _save_state(state)
     print(f"✅ Scan-alert selesai: {summary['scanned']} ticker discan, "
           f"{summary['alert_a_sent']} Alert A, {summary['alert_b_sent']} Alert B, "
+          f"{summary['pullback_entry_sent']} FCM watchlist entry, "
           f"{summary['excluded_no_room']} di-exclude (no room).")
     return summary
