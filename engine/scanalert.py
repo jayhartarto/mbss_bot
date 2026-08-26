@@ -44,7 +44,7 @@ beda (lihat konstanta terkait utk detail riset):
     pengganti) -- jangan kejar >2% dari open (FCM_OPEN_BUY_CHASE_CAP_PCT).
   - PRE-CROSS (SDT) & CONTINUATION (HC): alert "menjelang closing", scan
     HANYA mulai jam 14:00 (PRE_CONTINUATION_SCAN_START), begitu body candle
-    hari berjalan hijau kuat >=2% dari open (PRE_CONTINUATION_BODY_MIN_PCT).
+    hari berjalan hijau >=1% dari open (PRE_CONTINUATION_BODY_MIN_PCT).
     Volume informational saja, bukan gate.
   - HC Minervini: di-hide dari /hc langsung (win rate rendah), dipantau
     live SEKALI esok harinya utk gap-up >=3% (HC_GAP_WATCH_MIN_GAP_PCT) dari
@@ -683,17 +683,23 @@ FCM_OPEN_BUY_WINDOW_END = datetime.time(9, 15)  # jendela "beli di open" -- di l
 # TUNGGU MENJELANG CLOSING (H+1 Close menang tipis tapi konsisten dari H+1
 # Open di kedua lane), BUKAN buru-buru di open spt FCM -- karena keduanya
 # masih fase "membangun/baru konfirmasi", closing yg lemah sering nyaring
-# false-start. Proxy live: body candle H+1 hijau kuat >=2% dari open HARI
-# ITU (bucket terbaik di kedua lane: PRE hit6=56.4%, CONTINUATION hit6=57.6%,
-# vs bucket "tipis" yg justru terburuk) -- scan mulai jam 14:00 (bukan dari
-# open) supaya "hijau kuat" yg terdeteksi genuinely representasi menjelang
-# closing, bukan noise pagi. Volume H+1 utk lane ini INFORMATIONAL SAJA
-# (bukan gate) -- volume TINGGI justru correlate ke stagnant_neg lebih besar
-# (45.9%/40.9% di bucket >=2x) drpd volume rendah, kebalikan dari FCM/HC
-# Minervini yg justru diuntungkan volume tinggi -- user pilih TIDAK
-# menggate di volume karena arahnya beda antar-lane & belum cukup robust
-# utk dijadikan hard filter tambahan, cukup ditampilkan sbg info.
-PRE_CONTINUATION_BODY_MIN_PCT = 2.0
+# false-start. Proxy live: body candle H+1 hijau dari open HARI ITU -- scan
+# mulai jam 14:00 (bukan dari open) supaya "hijau" yg terdeteksi genuinely
+# representasi menjelang closing, bukan noise pagi. Volume H+1 utk lane ini
+# INFORMATIONAL SAJA (bukan gate) -- volume TINGGI justru correlate ke
+# stagnant_neg lebih besar (45.9%/40.9% di bucket >=2x) drpd volume rendah,
+# kebalikan dari FCM/HC Minervini yg justru diuntungkan volume tinggi --
+# user pilih TIDAK menggate di volume karena arahnya beda antar-lane &
+# belum cukup robust utk dijadikan hard filter tambahan, cukup ditampilkan
+# sbg info.
+#
+# Ambang 2.0 (MBSS v2, user request 2026-08-27 -- sweep >0%/>1%/>2% thd
+# dataset sama): DITURUNKAN ke 1.0 -- penurunan hit6 dari >2% cuma -3.0pp
+# (PRE 56.4%->53.4%) / -3.5pp (CONTINUATION 57.6%->54.1%), TAPI fire-rate
+# naik ~30-35% (PRE n=163->219, CONTINUATION n=59->74) -- trade-off
+# menguntungkan. >0% DIPERTIMBANGKAN TAPI DITOLAK: penurunan lebih terasa,
+# khususnya CONTINUATION turun ke 48.9% (di bawah 50%, hampir coin-flip).
+PRE_CONTINUATION_BODY_MIN_PCT = 1.0
 PRE_CONTINUATION_SCAN_START = datetime.time(14, 0)
 MACD_CONTINUATION_MAX_CROSS_DAYS_AGO = 5    # PERSIS commands/scan.py high_conviction_command -- jangan drift
 
