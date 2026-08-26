@@ -104,6 +104,37 @@ SESSION2_START_TIME = datetime.time(12, 0)  # cutoff sederhana S1/S2 -- VWAP HAR
 SCAN_WINDOW_START = datetime.time(9, 0)
 SCAN_WINDOW_END = datetime.time(15, 55)
 
+# MBSS v2 (user request 2026-08-27 -- riset backtest gap-open 4-10%, 1m riil
+# 27 hari): "REBOUND" -- sinyal TERPISAH dari Alert A/B/gap-up di atas,
+# dipanggil lewat CLI/cron SENDIRI (`python bot.py --scanalert-rebound`,
+# state file sendiri jg -- HINDARI race condition baca-ubah-tulis bareng
+# scanalert_state.json kalau kebetulan jalan bersamaan dgn --scanalert
+# utama). Alasan terpisah: butuh cadence 1 MENIT (bukan 3 menit spt
+# --scanalert utama) krn median waktu fire = menit ke-0 sejak open --
+# TAPI hanya perlu jendela SEMPIT 09:00-09:10 (bukan 1 menit sepanjang
+# hari, boros API call utk manfaat yg cuma relevan di pembukaan).
+#
+# Mekanisme (persis speks user): track running-low sejak OPEN (reset ke
+# low TERBARU tiap kali ada low lebih dalam -- backtest "true MAE" pakai
+# hindsight, live TIDAK bisa tahu titik terendah di muka, jadi dinamis).
+# Begitu High rebound dari running-low SEKARANG >= tier (0.5/1.0/1.5/2.0%),
+# fire alert utk tier itu (first-touch PER TIER, independen). Berhenti
+# tracking ticker itu total begitu tier 2.0% tersentuh -- dites, ambang
+# rebound LEBIH KECIL = kualitas forward LEBIH BAIK (0.5%: +15m close
+# median +1.83%/68.9% positif -- TERBAIK dari seluruh eksplorasi sesi
+# ini; 2.0%: +1.60%/59.8% -- masih oke tapi mulai menurun, cutoff wajar).
+GAP_REBOUND_MIN_PCT = 4.0     # gap open dari prev_close, batas bawah (sweet spot 5-8% tapi 4-10% dites juga oke)
+GAP_REBOUND_MAX_PCT = 10.0    # di atas ini masuk wilayah "instant pop lalu fade EOD" -- beda populasi/karakter, exclude dari REBOUND
+GAP_REBOUND_TIERS = (0.5, 1.0, 1.5, 2.0)
+GAP_REBOUND_DETECT_WINDOW_MIN = 10   # cari rebound HANYA 10 menit pertama sejak open, konsisten dgn riset
+GAP_REBOUND_TP1_PCT = 4.0     # median MFE ~4-5% di horizon 5-10m dari entry rebound
+GAP_REBOUND_TP2_PCT = 6.0     # median MFE ~6% di horizon 15-20m
+GAP_REBOUND_SL_PCT = -2.5     # dekat P25 MAE dari entry rebound (-3.25%) -- kasih ruang dip median (-1.27%), potong sblm ekor buruk
+GAP_REBOUND_MAX_HOLD_MIN = 20  # window realisasi TP1/TP2, sesuai riset "siku" di 15-20 menit
+GAP_REBOUND_SCAN_WINDOW_START = datetime.time(9, 0)
+GAP_REBOUND_SCAN_WINDOW_END = datetime.time(9, 10)
+STATE_FILE_REBOUND = os.path.join(core.PROJECT_ROOT, "scanalert_rebound_state.json")
+
 
 # ── State & toggle persistence ────────────────────────────────────────────
 
@@ -249,6 +280,169 @@ def _exclude_erratic_volatility_profile(tickers: list[str]) -> list[str]:
     if excluded_wide:
         print(f"📈 Scan-alert: {len(excluded_wide)} ticker di-exclude (chronically wide-range): {', '.join(excluded_wide[:15])}{' ...' if len(excluded_wide) > 15 else ''}")
     return kept
+
+
+# ── REBOUND (gap-open 4-10%, tier 0.5/1.0/1.5/2.0%) ─────────────────────────
+
+def _load_rebound_state() -> dict:
+    if not os.path.exists(STATE_FILE_REBOUND):
+        return {}
+    try:
+        with open(STATE_FILE_REBOUND) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_rebound_state(state: dict):
+    with open(STATE_FILE_REBOUND, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def _ensure_rebound_daily_reset(state: dict) -> dict:
+    today = _today_str()
+    if state.get("trading_day_marker") != today:
+        return {"trading_day_marker": today, "tickers": {}}
+    return state
+
+
+def _detect_gap_rebound_tiers(bars: pd.DataFrame, day_open: float, running_low: float, tiers_fired: list) -> tuple:
+    """
+    Update running_low (RESET ke titik terendah TERBARU tiap kali ada low
+    lebih dalam -- live tidak bisa tahu titik terendah "sebenarnya" di
+    muka spt backtest hindsight, jadi dinamis, bukan dikunci sekali).
+    Return (running_low_baru, [(tier, fire_price), ...] utk tier yg BARU
+    fire sejak panggilan ini -- first-touch PER TIER, independen).
+    """
+    if bars.empty:
+        return running_low, []
+    lows = bars["Low"].astype(float)
+    highs = bars["High"].astype(float)
+    new_low = min(running_low, float(lows.min())) if running_low is not None else float(lows.min())
+    newly_fired = []
+    for tier in GAP_REBOUND_TIERS:
+        if tier in tiers_fired:
+            continue
+        target_price = new_low * (1 + tier / 100.0)
+        if float(highs.max()) >= target_price:
+            newly_fired.append((tier, target_price))
+    return new_low, newly_fired
+
+
+def _build_gap_rebound_message(ticker: str, tier: float, fire_price: float, running_low: float,
+                                day_open: float, gap_pct: float, danger_tag: str | None = None) -> str:
+    dip_pct = (running_low - day_open) / day_open * 100
+    tp1 = round(fire_price * (1 + GAP_REBOUND_TP1_PCT / 100.0))
+    tp2 = round(fire_price * (1 + GAP_REBOUND_TP2_PCT / 100.0))
+    sl = round(fire_price * (1 + GAP_REBOUND_SL_PCT / 100.0))
+    danger_line = f"\n{danger_tag}" if danger_tag else ""
+    return (
+        f"🔥 {ticker} REBOUND +{tier:.1f}% dari dip — entry {fire_price:,.0f}\n"
+        f"Gap open +{gap_pct:.1f}% (open {day_open:,.0f}), sempat dip {dip_pct:+.1f}% ke {running_low:,.0f}\n"
+        f"TP1 {tp1:,.0f} (+{GAP_REBOUND_TP1_PCT:.0f}%) | TP2 {tp2:,.0f} (+{GAP_REBOUND_TP2_PCT:.0f}%) — max {GAP_REBOUND_MAX_HOLD_MIN} menit\n"
+        f"SL {sl:,.0f} ({GAP_REBOUND_SL_PCT:+.1f}%)\n"
+        f"Historis tier {tier:.1f}%: closing median positif, hit-rate ~{'68.9%' if tier==0.5 else '64.4%' if tier==1.0 else '60.9%' if tier==1.5 else '59.8%'} (n=107-122, backtest 27hr bursa){danger_line}"
+    )
+
+
+async def run_gap_rebound_scan_once() -> dict:
+    """
+    One-shot CLI (`python bot.py --scanalert-rebound`), DIPISAH dari
+    run_scan_alert_once() -- lihat catatan konstanta GAP_REBOUND_* di atas
+    utk alasan (cadence 1 menit khusus jendela 09:00-09:10, state file
+    sendiri hindari race condition baca-ubah-tulis bareng --scanalert utama).
+    """
+    summary = {"skipped_reason": None, "scanned": 0, "rebound_sent": 0}
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (GAP_REBOUND_SCAN_WINDOW_START <= now_wib.time() <= GAP_REBOUND_SCAN_WINDOW_END):
+        summary["skipped_reason"] = "outside_rebound_window"
+        return summary
+    if await asyncio.to_thread(core.is_idx_market_holiday_today):
+        summary["skipped_reason"] = "holiday"
+        return summary
+    if not is_scan_alert_enabled():
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+
+    state = _ensure_rebound_daily_reset(_load_rebound_state())
+    universe = _get_alert_universe()
+    if not universe:
+        summary["skipped_reason"] = "no_universe"
+        _save_rebound_state(state)
+        return summary
+
+    if state.get("daily_ref") is None:
+        daily_ref = await asyncio.to_thread(_fetch_daily_ref, universe)
+        state["daily_ref"] = daily_ref
+    else:
+        daily_ref = state["daily_ref"]
+
+    if state.get("danger_lookup") is None:
+        import engine.nightly as nightly_engine
+        backbone_result, _ = await asyncio.to_thread(nightly_engine.load_backbone_daily_allow_stale)
+        all_scored = (backbone_result or {}).get("all_scored", {}) or {}
+        state["danger_lookup"] = {
+            t: {"predicted_danger": info.get("predicted_danger"), "passed_danger_gate": info.get("passed_danger_gate")}
+            for t, info in all_scored.items()
+        }
+    danger_lookup = state["danger_lookup"]
+
+    ticker_list = list(daily_ref.keys())
+    data = await asyncio.to_thread(_fetch_today_1m, ticker_list)
+
+    tickers_state = state.setdefault("tickers", {})
+    bot = None
+    if core.TELEGRAM_BOT_TOKEN:
+        import telegram
+        bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
+
+    for t in ticker_list:
+        ref = daily_ref.get(t)
+        if ref is None:
+            continue
+        prev_close = ref["prev_close"]
+        sym = t + ".JK"
+        try:
+            bars = data[sym].dropna(how="all").sort_index()
+        except Exception:
+            continue
+        if bars.empty:
+            continue
+        summary["scanned"] += 1
+
+        day_open = float(bars["Open"].astype(float).iloc[0])
+        if day_open <= 0:
+            continue
+        gap_pct = (day_open - prev_close) / prev_close * 100
+        if not (GAP_REBOUND_MIN_PCT <= gap_pct < GAP_REBOUND_MAX_PCT):
+            continue
+
+        t_state = tickers_state.setdefault(t, {"running_low": day_open, "tiers_fired": [], "done": False})
+        if t_state.get("done"):
+            continue
+
+        detect_bars = bars.iloc[:GAP_REBOUND_DETECT_WINDOW_MIN + 1]
+        new_low, newly_fired = _detect_gap_rebound_tiers(detect_bars, day_open, t_state["running_low"], t_state["tiers_fired"])
+        t_state["running_low"] = new_low
+
+        for tier, fire_price in newly_fired:
+            t_state["tiers_fired"].append(tier)
+            danger_tag = _danger_gate_tag(t, danger_lookup)
+            msg = _build_gap_rebound_message(t, tier, fire_price, new_low, day_open, gap_pct, danger_tag)
+            if bot is not None:
+                await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+            else:
+                print(f"[NO TELEGRAM TOKEN] {msg}")
+            summary["rebound_sent"] += 1
+            if tier >= max(GAP_REBOUND_TIERS):
+                t_state["done"] = True
+
+    _save_rebound_state(state)
+    print(f"✅ Gap-rebound scan selesai: {summary['scanned']} ticker discan, {summary['rebound_sent']} alert REBOUND terkirim.")
+    return summary
 
 
 def _fetch_daily_ref(tickers: list[str]) -> dict:

@@ -71,6 +71,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
              "every 3 minutes (MBSS v2, user request 2026-08-27, was 5min -- see engine/scanalert.py "
              "docstring for the timing-audit backing this) by an external cron during trading hours (09:00-15:55 WIB).",
     )
+    mode.add_argument(
+        "--scanalert-rebound", dest="scanalert_rebound", action="store_true",
+        help="One-shot gap-open REBOUND tier scan (MBSS v2, user request 2026-08-27), then exit. "
+             "SEPARATE from --scanalert (own state file, own cadence) -- meant to be invoked every "
+             "1 MINUTE by an external cron, ONLY during 09:00-09:10 WIB (see GAP_REBOUND_* constants "
+             "in engine/scanalert.py). No-ops outside that window, safe to schedule loosely.",
+    )
     return parser.parse_args(argv)
 
 
@@ -156,6 +163,19 @@ def run_scanalert() -> None:
         sys.exit(1)
 
 
+def run_scanalert_rebound() -> None:
+    """One-shot gap-open REBOUND tier scan (CLI). Meant to run every 1 minute
+    via external cron, ONLY 09:00-09:10 WIB — see engine/scanalert.py."""
+    logger.info("Scan-alert REBOUND starting (CLI mode) — gap-open tier scan")
+    t0 = time.time()
+    try:
+        summary = asyncio.run(scanalert_engine.run_gap_rebound_scan_once())
+        logger.info("Scan-alert REBOUND finished in %.1fs: %s", time.time() - t0, summary)
+    except Exception:
+        logger.exception("Scan-alert REBOUND failed after %.1fs", time.time() - t0)
+        sys.exit(1)
+
+
 def run_polling() -> None:
     """Start the Telegram bot in polling mode, with startup retries in case
     network isn't ready yet (common right after launching on mobile)."""
@@ -197,6 +217,8 @@ def main(argv: list[str] | None = None) -> None:
         run_repairthin()
     elif args.scanalert:
         run_scanalert()
+    elif args.scanalert_rebound:
+        run_scanalert_rebound()
     else:
         run_polling()
 
