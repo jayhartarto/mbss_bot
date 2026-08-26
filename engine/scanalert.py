@@ -192,12 +192,21 @@ def _get_alert_universe() -> list[str]:
 
 def _fetch_daily_ref(tickers: list[str]) -> dict:
     """
-    Fetch closing kemarin (prev_close, dasar semua gain% + filter 60-600)
-    dan ret_3d (3 hari bursa sebelum kemarin, utk tag "sudah lari kencang").
-    Dipanggil SEKALI per hari (di-cache ke state), bukan tiap scan 5 menit.
+    Fetch closing kemarin (prev_close, dasar semua gain% + filter 60-600),
+    ret_3d (3 hari bursa sebelum kemarin, utk tag "sudah lari kencang"), dan
+    avg_value_traded_20d (MBSS v2, user request 2026-08-26 -- live case
+    SAPX/WAPO: fire Alert A/B tapi rata-rata value traded 20 hari cuma
+    Rp92-657 juta, JAUH di bawah floor likuiditas Rp1M yg dipakai Danger
+    Gate/HC/SDT di seluruh sistem lain. Alert A/B/gap-up TIDAK PERNAH cek
+    likuiditas -- cuma filter harga 60-600 -- jadi saham tipis lolos begitu
+    saja. BUKAN exclude/filter di sini (scalping thin-liquid stock TETAP
+    valid dipantau, cuma risikonya beda: slippage/spread lebih lebar,
+    lebih rentan digerakkan modal kecil) -- ditandai sbg tag informational
+    di pesan, lihat _risk_tags). period diperpanjang 10d->20d supaya
+    rata-ratanya representatif, bukan cuma beberapa hari.
     """
     symbols = [t + ".JK" for t in tickers]
-    data = yf.download(symbols, period="10d", interval="1d", group_by="ticker", threads=True, progress=False)
+    data = yf.download(symbols, period="20d", interval="1d", group_by="ticker", threads=True, progress=False)
     ref = {}
     for t in tickers:
         sym = t + ".JK"
@@ -214,7 +223,10 @@ def _fetch_daily_ref(tickers: list[str]) -> dict:
         ret_3d = None
         if len(closes) >= 4:
             ret_3d = float((closes.iloc[-1] - closes.iloc[-4]) / closes.iloc[-4] * 100)
-        ref[t] = {"prev_close": prev_close, "ret_3d": ret_3d}
+        volumes = d["Volume"].reindex(closes.index).fillna(0).astype(float)
+        value_traded = (closes * volumes).tail(20)
+        avg_value_traded_20d = float(value_traded.mean()) if len(value_traded) else None
+        ref[t] = {"prev_close": prev_close, "ret_3d": ret_3d, "avg_value_traded_20d": avg_value_traded_20d}
     return ref
 
 
@@ -294,12 +306,14 @@ def _detect_gap_up(bars: pd.DataFrame, prev_close: float) -> dict | None:
     return {"gap_pct": gap_pct, "day_open": day_open, "holds": holds, "bucket_note": GAP_UP_SWEET_SPOT_NOTE}
 
 
-def _build_gap_up_message(ticker: str, detection: dict) -> str:
+def _build_gap_up_message(ticker: str, detection: dict, conviction: str = "", risk_tags: list[str] | None = None) -> str:
     hold_txt = "bertahan" if detection["holds"] else "belum jelas bertahan (sempat turun >3% dari open)"
     note = f"\n{detection['bucket_note']}" if detection["bucket_note"] else ""
+    conviction_line = f"\n{conviction}" if conviction else ""
+    risk_lines = "".join(f"\n{tag}" for tag in (risk_tags or []))
     return (
         f"🌅 {ticker} GAP-UP +{detection['gap_pct']:.1f}% di pembukaan ({hold_txt}) | open {detection['day_open']:,.0f}"
-        f"{note}\nInformational — sample historis kecil, bukan sinyal beli."
+        f"{note}\nInformational — sample historis kecil, bukan sinyal beli.{conviction_line}{risk_lines}"
     )
 
 
@@ -501,12 +515,90 @@ def _compute_tp_targets(prev_close: float, ara_price: float | None) -> tuple[flo
     return tp1, tp2
 
 
+# MBSS v2 (user request 2026-08-26 — "defense mechanism chasing": live case
+# beli di puncak Alert A/gap-up sebelum 09:30, turun dalam menjelang akhir
+# sesi 1. Alert A/B/gap-up sifatnya MURNI teknikal intraday (spike/volume/
+# pullback), TIDAK PERNAH dicek terhadap sinyal sistem yg py punya "dasar"
+# (FCM/PRE-CROSS/CONTINUATION/HC, semua sudah divalidasi backtest 2 tahun
+# 576 ISSI): kalau ticker yg sama JUGA lolos salah satu lane itu malam
+# sebelumnya, ada alasan tambahan utk bertahan tunggu rebound; kalau tidak,
+# itu genuinely spike telanjang tanpa dukungan apa pun -- user bisa lebih
+# hati-hati/kurangi ukuran. Bukan filter/exclude (tidak mengubah kapan alert
+# fire), murni informational tag ditempel di SEMUA alert teknikal.
+def _conviction_tag(ticker: str, fcm_watchlist: dict, pre_continuation_watchlist: dict, hc_gap_watch_list: dict) -> str:
+    if ticker in fcm_watchlist:
+        w = fcm_watchlist[ticker]
+        return f"✅ ADA SETUP: FRESH CROSS MOMENTUM ({w['cross_days_ago']}hr lalu, pre-cross +{w['ret10_pre_cross_pct']:.0f}%)"
+    if ticker in pre_continuation_watchlist:
+        w = pre_continuation_watchlist[ticker]
+        lane_label = "PRE-CROSS (SDT)" if w["lane"] == "PRE" else "CONTINUATION (HC)"
+        return f"✅ ADA SETUP: {lane_label}, {w['detail']}"
+    if ticker in hc_gap_watch_list:
+        return "✅ ADA SETUP: HC Minervini (diflag malam sebelumnya)"
+    return "⚠️ NO SETUP — spike teknikal murni, tidak ada dukungan sinyal sistem (FCM/PRE/CONTINUATION/HC)"
+
+
+def _danger_gate_tag(ticker: str, danger_lookup: dict) -> str | None:
+    """
+    MBSS v2 (user request 2026-08-26, live case NZIA: fire breakout kuat
+    TAPI Danger Gate malam sebelumnya SUDAH menolaknya, danger=78/100 --
+    red flag independen yg ada SEBELUM rally terjadi, bukan analisis
+    belakangan). danger_lookup = backbone_daily's all_scored (ticker ->
+    predicted_danger/passed_danger_gate), dimuat SEKALI per hari (lihat
+    run_scan_alert_once) -- None-safe kalau backbone belum ada/ticker di
+    luar cakupan malam itu (missing = tidak ditandai, BUKAN dianggap aman
+    ATAU bahaya -- konsisten "missing=neutral" convention codebase ini).
+    """
+    info = danger_lookup.get(ticker)
+    if not info or info.get("passed_danger_gate") is not False:
+        return None
+    danger = info.get("predicted_danger")
+    danger_str = f"{danger:.0f}/100" if danger is not None else "-"
+    return f"🧱 DITOLAK DANGER GATE malam sebelumnya (danger {danger_str}) — sistem sudah menandai berisiko SEBELUM rally/breakout ini terjadi"
+
+
+def _risk_tags(bars: pd.DataFrame, ref: dict | None, now_wib: datetime.datetime,
+                ticker: str = "", danger_lookup: dict | None = None) -> list[str]:
+    """Tag informational (lihat CHASE_WARN_GAIN_FROM_OPEN_PCT dkk) -- tidak pernah menekan/menunda alert, cuma ditempel."""
+    tags = []
+    if danger_lookup:
+        danger_tag = _danger_gate_tag(ticker, danger_lookup)
+        if danger_tag:
+            tags.append(danger_tag)
+    if not bars.empty:
+        day_open = float(bars["Open"].astype(float).iloc[0])
+        current_price = float(bars["Close"].astype(float).iloc[-1])
+        if day_open > 0:
+            gain_from_open = (current_price - day_open) / day_open * 100
+            if gain_from_open >= CHASE_WARN_GAIN_FROM_OPEN_PCT:
+                tags.append(
+                    f"⚠️ CHASE RISK: sudah +{gain_from_open:.1f}% dari open — di atas +{CHASE_WARN_GAIN_FROM_OPEN_PCT:.0f}% "
+                    f"drawdown lanjutan historis melompat (median -6% s/d -10% ke closing sesi)"
+                )
+    if now_wib.time() < RISKY_TIME_WINDOW_END:
+        tags.append(
+            f"⚠️ JAM BERISIKO: fire sebelum {RISKY_TIME_WINDOW_END.strftime('%H:%M')} — "
+            f"historis 44% kasus turun >=3% & 22% turun >=5% dlm 60 menit (vs ~15%/5% di jam lain)"
+        )
+    if ref is not None:
+        avg_vt = ref.get("avg_value_traded_20d")
+        if avg_vt is not None and avg_vt < core.LIQUIDITY_FLOOR_VALUE_TRADED_IDR:
+            tags.append(
+                f"⚠️ LIKUIDITAS TIPIS: avg value traded 20hr Rp{avg_vt/1e9:.2f}M — "
+                f"di bawah floor Rp{core.LIQUIDITY_FLOOR_VALUE_TRADED_IDR/1e9:.0f}M sistem, risiko slippage/spread lebih besar"
+            )
+    return tags
+
+
 def _build_alert_a_message(ticker: str, detection: dict, ret_3d: float | None,
-                            current_price: float | None, vwap: float | None) -> str:
+                            current_price: float | None, vwap: float | None,
+                            conviction: str = "", risk_tags: list[str] | None = None) -> str:
     tag = " ⚠️lari kencang" if ret_3d is not None and ret_3d >= RET_3D_WARN_THRESHOLD else ""
+    conviction_line = f"\n{conviction}" if conviction else ""
+    risk_lines = "".join(f"\n{t}" for t in (risk_tags or []))
     return (
         f"⚡ {ticker} +{detection['spike_pct']:.1f}% | vol {detection['volume_ratio']:.1f}x | "
-        f"{detection['time']}{tag}{_vwap_segment(current_price, vwap)} | amati"
+        f"{detection['time']}{tag}{_vwap_segment(current_price, vwap)} | amati{conviction_line}{risk_lines}"
     )
 
 
@@ -515,13 +607,18 @@ def _build_alert_b_messages(ticker: str, detection: dict, ret_3d: float | None,
                              current_price: float | None, vwap: float | None,
                              macd_label: str | None = None, tp1: float | None = None,
                              tp2: float | None = None, ara_price: float | None = None,
-                             buy_power: dict | None = None) -> list[str]:
+                             buy_power: dict | None = None, conviction: str = "",
+                             risk_tags: list[str] | None = None) -> list[str]:
     tag = " ⚠️lari kencang" if ret_3d is not None and ret_3d >= RET_3D_WARN_THRESHOLD else ""
     messages = [
         f"✅ {ticker} PULLBACK REBOUND dari +{detection['peak_tier']}% | "
         f"skrg {detection['gain_at_rebound_pct']:+.1f}% | {detection['rebound_time']}"
         f"{tag}{_vwap_segment(current_price, vwap)} | entry candidate"
     ]
+    if conviction:
+        messages.append(conviction)
+    for t in (risk_tags or []):
+        messages.append(t)
     if macd_label:
         messages.append(f"📊 {ticker} {macd_label}")
 
@@ -611,6 +708,28 @@ MACD_CONTINUATION_MAX_CROSS_DAYS_AGO = 5    # PERSIS commands/scan.py high_convi
 # for_today docstring). Definisi SENGAJA tidak mensyaratkan ticker tetap HC
 # di hari+1 (dites, subset itu n=14 malah lebih rendah hit6=50%).
 HC_GAP_WATCH_MIN_GAP_PCT = 3.0
+
+# MBSS v2 (user request 2026-08-26 — "defense mechanism chasing", live case
+# beli di puncak NZIA/dkk sebelum 09:30): 3 tag informational (BUKAN filter/
+# suppress -- Alert A/B tetap fire seperti biasa, cuma ditempeli peringatan)
+# ditempel ke Alert A/B/gap-up, ditemukan lewat backtest 1m riil 27 hari
+# terakhir, 174 ticker gap-candidate (lihat chat sesi ini):
+#   1) CHASE: gain dari open sudah >=3% saat alert fire -- di atas ambang
+#      ini risiko drawdown lanjutan melompat tajam (rally 60menit <3% ->
+#      median dd -5.17% ke EOD; 3-6% -> -7.76%; makin besar makin dalam).
+#   2) JAM RISIKO: fire sebelum jam 09:30 -- 44% kasus turun >=3% dlm 60
+#      menit (vs cuma ~15% di jam2 lain), 22% turun >=5% (vs ~5%). TAPI
+#      TIDAK di-suppress/tunda -- 72% Alert A & 53% Alert B genuinely fire
+#      SETELAH 09:30 juga, jadi window ini bukan cuma noise pembukaan.
+#   3) LIKUIDITAS TIPIS: avg value traded 20d di bawah floor Rp1M yg
+#      dipakai Danger Gate/HC/SDT di seluruh sistem lain (live case SAPX
+#      Rp92jt/hari, WAPO Rp657jt/hari, KEDUANYA fire Alert A/B). Ditest
+#      SEBAGAI HARD FILTER dulu (bukan cuma tag): akan membuang 40.9% fire
+#      Alert A dan 50.8% Alert B -- TERLALU AGRESIF, jadi tag saja, bukan
+#      exclude (saham tipis TETAP valid dipantau, cuma risiko slippage/
+#      spread/gampang digerakkan modal kecil lebih tinggi).
+CHASE_WARN_GAIN_FROM_OPEN_PCT = 3.0
+RISKY_TIME_WINDOW_END = datetime.time(9, 30)
 
 
 def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
@@ -902,6 +1021,26 @@ async def run_scan_alert_once() -> dict:
     else:
         hc_gap_watch_list = state["hc_gap_watch_list"]
 
+    # MBSS v2 (user request 2026-08-26, live case NZIA: Alert B fire kuat tapi
+    # Danger Gate malam sebelumnya SUDAH menolaknya) -- baca predicted_danger/
+    # passed_danger_gate dari backbone_daily malam terakhir (bukan hitung
+    # ulang), disederhanakan ke {ticker: {predicted_danger, passed_danger_gate}}
+    # SAJA (bukan simpan all_scored utuh) supaya aman di-JSON-kan ke state
+    # file & tidak membengkakkan ukurannya.
+    if state.get("danger_lookup") is None:
+        import engine.nightly as nightly_engine
+        backbone_result, _ = await asyncio.to_thread(nightly_engine.load_backbone_daily_allow_stale)
+        all_scored = (backbone_result or {}).get("all_scored", {}) or {}
+        danger_lookup = {
+            t: {"predicted_danger": info.get("predicted_danger"), "passed_danger_gate": info.get("passed_danger_gate")}
+            for t, info in all_scored.items()
+        }
+        state["danger_lookup"] = danger_lookup
+        n_rejected = sum(1 for v in danger_lookup.values() if v.get("passed_danger_gate") is False)
+        print(f"✅ Danger Gate lookup hari ini: {len(danger_lookup)} ticker ({n_rejected} ditolak malam kemarin).")
+    else:
+        danger_lookup = state["danger_lookup"]
+
     # Union -- FCM/PRE-CONTINUATION/HC-gap-watch watchlist BISA di luar band
     # harga 60-600 (tidak ada floor harga di definisi masing-masing), jadi
     # tidak selalu subset alert_universe.
@@ -1021,10 +1160,13 @@ async def run_scan_alert_once() -> dict:
         if ref is None:
             continue  # ticker ini HANYA di fcm_watchlist/pre_continuation_watchlist/hc_gap_watch_list (di luar band 60-600) -- Alert A/B/gap-up di bawah butuh prev_close, sisanya di-skip
 
+        conviction = _conviction_tag(t, fcm_watchlist, pre_continuation_watchlist, hc_gap_watch_list)
+        risk_tags = _risk_tags(bars, ref, now_wib, ticker=t, danger_lookup=danger_lookup)
+
         if not t_state["gap_up_sent"]:
             det_gap = _detect_gap_up(bars, prev_close)
             if det_gap:
-                msg = _build_gap_up_message(t, det_gap)
+                msg = _build_gap_up_message(t, det_gap, conviction=conviction, risk_tags=risk_tags)
                 if bot is not None:
                     await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
                 else:
@@ -1045,7 +1187,7 @@ async def run_scan_alert_once() -> dict:
         if not t_state["alert_a_sent"]:
             det_a = _detect_alert_a(bars, prev_close)
             if det_a:
-                msg = _build_alert_a_message(t, det_a, ret_3d, current_price, vwap_now)
+                msg = _build_alert_a_message(t, det_a, ret_3d, current_price, vwap_now, conviction=conviction, risk_tags=risk_tags)
                 if bot is not None:
                     await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
                 else:
@@ -1074,6 +1216,7 @@ async def run_scan_alert_once() -> dict:
                 for msg in _build_alert_b_messages(
                     t, det_b, ret_3d, orderbook_check, current_price, vwap_now,
                     macd_label=macd_label, tp1=tp1, tp2=tp2, ara_price=ara_price, buy_power=buy_power,
+                    conviction=conviction, risk_tags=risk_tags,
                 ):
                     if bot is not None:
                         await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
