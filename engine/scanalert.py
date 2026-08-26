@@ -87,6 +87,18 @@ PRICE_CEILING = 600
 NO_ROOM_GAIN_PCT = 15.0
 RET_3D_WARN_THRESHOLD = 10.0
 
+# MBSS v2 (user request 2026-08-27 -- audit backtest 1m riil 27 hari bursa):
+# Alert A (rolling 3-bar spike) & Alert B (pullback-rebound) TERBUKTI edge-nya
+# nyaris 0 sbg sinyal actionable -- confirm-then-notify di berbagai delay/
+# threshold TIDAK PERNAH menghasilkan median close positif konsisten (blip
+# rate 63-85%, window TP realistis cuma ~1-2 menit, di bawah waktu reaksi
+# manusia + cadence cron manapun). Digantikan Alert C (gain dari prev_close,
+# _detect_open_buy dkk di atas) & REBOUND (gap-open+tier, di bawah) yang
+# BEDA JAUH lebih baik di backtest yang sama. PUSH di-nonaktifkan (bukan
+# dihapus -- _detect_alert_a/_detect_alert_b & pesan builder-nya TETAP ada,
+# tinggal balik True kalau nanti ada desain baru yang mau dites ulang).
+ALERT_A_B_PUSH_ENABLED = False
+
 ALERT_A_SPIKE_PCT = 4.0
 ALERT_A_VOLUME_RATIO = 5.0
 ALERT_A_LOOKBACK_BARS = 3
@@ -1580,7 +1592,7 @@ async def run_scan_alert_once() -> dict:
         if t_state["excluded_no_room"]:
             continue
 
-        if not t_state["alert_a_sent"]:
+        if ALERT_A_B_PUSH_ENABLED and not t_state["alert_a_sent"]:
             det_a = _detect_alert_a(bars, prev_close)
             if det_a:
                 msg = _build_alert_a_message(t, det_a, ret_3d, current_price, vwap_now, conviction=conviction, risk_tags=risk_tags)
@@ -1591,7 +1603,7 @@ async def run_scan_alert_once() -> dict:
                 t_state["alert_a_sent"] = True
                 summary["alert_a_sent"] += 1
 
-        if not t_state["alert_b_sent"]:
+        if ALERT_A_B_PUSH_ENABLED and not t_state["alert_b_sent"]:
             det_b = _detect_alert_b(bars, prev_close)
             if det_b:
                 # MBSS v2 (user request — enrich Alert B: MACD position, TP1/
