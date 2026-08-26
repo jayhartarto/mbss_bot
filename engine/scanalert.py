@@ -230,6 +230,81 @@ def _fetch_daily_ref(tickers: list[str]) -> dict:
     return ref
 
 
+# MBSS v2 (user request 2026-08-27 -- riset BSJP buy-power backtest 2 tahun
+# 576 ISSI: rasio volume hari ARA vs rata2 20 hari adalah prediktor
+# terbaik, titik efektif >=10x [median high besok naik dari ~2-5% ke
+# 6-9%, gap-positif 68-69% vs 62-64%]): monitor live BSJP-ARA (sleeper,
+# engine/nightly.py load_bsjp_ara_candidates) + second-wave (load_second_
+# wave_watch_for_today) utk rasio volume PACE-ADJUSTED (skala waktu
+# sesi berjalan, BUKAN rasio end-of-day yg divalidasi -- ekstrapolasi
+# beralasan, sama spirit dgn Alert B's ARA_TP -- info di message).
+BUY_POWER_STRONG_VOL_RATIO = 10.0
+BSJP_TYPICAL_SESSION_MINUTES = 330  # sesi IDX S1+S2 penuh, sama konvensi fetch_opening_dynamics
+
+
+def _fetch_volume_ref(tickers: list[str]) -> dict:
+    """
+    Sama pola dgn _fetch_daily_ref, TAPI TANPA filter harga 60-600 -- BSJP-
+    ARA/second-wave TIDAK dibatasi band harga scanalert biasa (BSJP-ARA
+    sendiri pakai batas Rp1000, second-wave malah tanpa batas harga sama
+    sekali). Cuma butuh avg_vol_20d (volume LEMBAR, bukan value rupiah --
+    beda dari _fetch_daily_ref's avg_value_traded_20d) utk hitung pace-
+    adjusted volume ratio.
+    """
+    symbols = [t + ".JK" for t in tickers]
+    data = yf.download(symbols, period="20d", interval="1d", group_by="ticker", threads=True, progress=False)
+    ref = {}
+    for t in tickers:
+        sym = t + ".JK"
+        try:
+            d = data[sym].dropna(how="all")
+        except Exception:
+            continue
+        volumes = d["Volume"].dropna().astype(float)
+        if len(volumes) < 2:
+            continue
+        ref[t] = {"avg_vol_20d": float(volumes.tail(20).mean())}
+    return ref
+
+
+def _detect_buy_power_surge(bars: pd.DataFrame, avg_vol_20d: float | None) -> dict | None:
+    """
+    First-touch: pace-adjusted volume ratio (volume hari ini SEJAUH INI vs
+    ekspektasi pace normal) >= BUY_POWER_STRONG_VOL_RATIO. Pace pakai
+    len(bars) sbg proksi menit sesi berjalan -- bar 1m yfinance sudah
+    otomatis skip jeda istirahat 12:00-13:30 (dikonfirmasi dari data riil),
+    jadi hitungan baris = menit sesi genuine, bukan wall-clock.
+    """
+    if bars.empty or not avg_vol_20d or avg_vol_20d <= 0:
+        return None
+    minutes_elapsed = max(5, len(bars))
+    expected_vol_so_far = avg_vol_20d * (minutes_elapsed / BSJP_TYPICAL_SESSION_MINUTES)
+    if expected_vol_so_far <= 0:
+        return None
+    volume_so_far = float(bars["Volume"].fillna(0).astype(float).sum())
+    vol_pace_ratio = volume_so_far / expected_vol_so_far
+    if vol_pace_ratio < BUY_POWER_STRONG_VOL_RATIO:
+        return None
+    current_price = float(bars["Close"].astype(float).iloc[-1])
+    return {"vol_pace_ratio": vol_pace_ratio, "volume_so_far": volume_so_far, "current_price": current_price}
+
+
+def _build_buy_power_surge_message(ticker: str, detection: dict, source: str, extra: dict) -> str:
+    if source == "bsjp_ara":
+        stats = "sleeper+katalis, historis gap-positif besok ~69.5%, median high +4.9% dari open (n=2027 episode ARA-like, 2 tahun)"
+        source_label = f"BSJP-ARA sleeper (katalis: {extra.get('catalyst_category', '-')})"
+    else:
+        stats = "gelombang KEDUA (pernah ARA {:.0f}% dlm 10hr terakhir) -- historis LEBIH LEMAH dari sleeper murni: gap-positif besok ~57.9%, median high +4.1% dari open".format(extra.get("max_ret_1d_pct_10d", 0))
+        source_label = "BSJP reaktivasi (second-wave)"
+    return (
+        f"🔥 {ticker} BUY POWER KUAT — {source_label}\n"
+        f"Volume pace {detection['vol_pace_ratio']:.1f}x normal | harga {detection['current_price']:,.0f}\n"
+        f"{stats}\n"
+        f"Exit guidance: jual dekat open/awal sesi BESOK, JANGAN tahan sampai closing — "
+        f"median closing besok justru negatif dari open (giveback), makin besar volume hari ini makin besar giveback-nya."
+    )
+
+
 def _fetch_today_1m(tickers: list[str]):
     symbols = [t + ".JK" for t in tickers]
     return yf.download(symbols, period="1d", interval="1m", group_by="ticker", threads=True, progress=False)
@@ -977,6 +1052,7 @@ async def run_scan_alert_once() -> dict:
     summary = {
         "skipped_reason": None, "alert_a_sent": 0, "alert_b_sent": 0, "scanned": 0, "excluded_no_room": 0,
         "gap_up_sent": 0, "pullback_entry_sent": 0, "open_buy_sent": 0, "pre_continuation_sent": 0, "hc_gap_sent": 0,
+        "buy_power_sent": 0,
     }
 
     now_wib = datetime.datetime.now(core.WIB)
@@ -1058,16 +1134,45 @@ async def run_scan_alert_once() -> dict:
     else:
         danger_lookup = state["danger_lookup"]
 
-    # Union -- FCM/PRE-CONTINUATION/HC-gap-watch watchlist BISA di luar band
+    # MBSS v2 (user request 2026-08-27 -- BSJP buy-power monitor): BSJP-ARA
+    # (sleeper+katalis, sudah dihitung nightly) + second-wave (reaktivasi,
+    # sudah dihitung nightly) digabung jadi satu lookup {ticker: source_info}
+    # -- keduanya dipantau pace volume live yg SAMA (_detect_buy_power_surge),
+    # bedanya cuma pesan/statistik yg ditampilkan.
+    if state.get("bsjp_watch_lookup") is None:
+        import engine.nightly as nightly_engine
+        bsjp_ara_rows = await asyncio.to_thread(nightly_engine.load_bsjp_ara_candidates)
+        second_wave_rows = await asyncio.to_thread(nightly_engine.load_second_wave_watch_for_today)
+        bsjp_watch_lookup = {}
+        for row in bsjp_ara_rows:
+            if row.get("ticker"):
+                bsjp_watch_lookup[row["ticker"]] = {"source": "bsjp_ara", "catalyst_category": row.get("catalyst_category")}
+        for row in second_wave_rows:
+            if row.get("ticker") and row["ticker"] not in bsjp_watch_lookup:  # BSJP-ARA prioritas kalau ticker sama kebetulan masuk dua-duanya
+                bsjp_watch_lookup[row["ticker"]] = {"source": "second_wave", "max_ret_1d_pct_10d": row.get("max_ret_1d_pct_10d")}
+        state["bsjp_watch_lookup"] = bsjp_watch_lookup
+        if bsjp_watch_lookup:
+            vol_ref = await asyncio.to_thread(_fetch_volume_ref, list(bsjp_watch_lookup.keys()))
+            state["bsjp_vol_ref"] = vol_ref
+        else:
+            state["bsjp_vol_ref"] = {}
+        print(f"✅ BSJP watch hari ini: {len(bsjp_ara_rows)} BSJP-ARA + {len(second_wave_rows)} second-wave = {len(bsjp_watch_lookup)} ticker dipantau buy-power.")
+    else:
+        bsjp_watch_lookup = state["bsjp_watch_lookup"]
+    bsjp_vol_ref = state.get("bsjp_vol_ref", {})
+
+    # Union -- FCM/PRE-CONTINUATION/HC-gap-watch/BSJP-watch BISA di luar band
     # harga 60-600 (tidak ada floor harga di definisi masing-masing), jadi
     # tidak selalu subset alert_universe.
     alert_universe = list(daily_ref.keys())
     full_ticker_set = sorted(
-        set(alert_universe) | set(fcm_watchlist.keys()) | set(pre_continuation_watchlist.keys()) | set(hc_gap_watch_list.keys())
+        set(alert_universe) | set(fcm_watchlist.keys()) | set(pre_continuation_watchlist.keys())
+        | set(hc_gap_watch_list.keys()) | set(bsjp_watch_lookup.keys())
     )
     print(
         f"🔍 Scan-alert: {len(full_ticker_set)} ticker ({len(alert_universe)} alert + {len(fcm_watchlist)} FCM + "
-        f"{len(pre_continuation_watchlist)} PRE/CONTINUATION + {len(hc_gap_watch_list)} HC gap-watch), fetch bar 1m..."
+        f"{len(pre_continuation_watchlist)} PRE/CONTINUATION + {len(hc_gap_watch_list)} HC gap-watch + "
+        f"{len(bsjp_watch_lookup)} BSJP-watch), fetch bar 1m..."
     )
     data = await asyncio.to_thread(_fetch_today_1m, full_ticker_set)
 
@@ -1101,6 +1206,25 @@ async def run_scan_alert_once() -> dict:
         t_state.setdefault("open_buy_sent", False)
         t_state.setdefault("pre_continuation_sent", False)
         t_state.setdefault("hc_gap_sent", False)
+        t_state.setdefault("buy_power_sent", False)
+
+        # BSJP-ARA (sleeper) / second-wave (reaktivasi): pace volume live
+        # >=BUY_POWER_STRONG_VOL_RATIO -- jalan SEPANJANG hari (bukan cuma
+        # jendela waktu tertentu spt FCM/PRE-CONTINUATION), krn buy-power
+        # bisa muncul kapan saja & justru itu yg mau ditangkap SEDINI mungkin
+        # (persis kasus EKAD, entry mid-day bukan di jam spesifik).
+        if t in bsjp_watch_lookup and not t_state["buy_power_sent"]:
+            watch_info = bsjp_watch_lookup[t]
+            avg_vol_20d = (bsjp_vol_ref.get(t) or {}).get("avg_vol_20d")
+            det_power = _detect_buy_power_surge(bars, avg_vol_20d)
+            if det_power:
+                msg = _build_buy_power_surge_message(t, det_power, watch_info["source"], watch_info)
+                if bot is not None:
+                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                else:
+                    print(f"[NO TELEGRAM TOKEN] {msg}")
+                t_state["buy_power_sent"] = True
+                summary["buy_power_sent"] = summary.get("buy_power_sent", 0) + 1
 
         # FCM: beli di open, jendela pendek (FCM_OPEN_BUY_WINDOW_END) --
         # dicek SEBELUM confirmation/pullback (independen, bisa dua-duanya
@@ -1249,5 +1373,6 @@ async def run_scan_alert_once() -> dict:
           f"{summary['pullback_entry_sent']} FCM pullback/confirmation, "
           f"{summary['pre_continuation_sent']} PRE/CONTINUATION menjelang closing, "
           f"{summary['hc_gap_sent']} HC gap-watch, "
+          f"{summary['buy_power_sent']} BSJP buy-power surge, "
           f"{summary['excluded_no_room']} di-exclude (no room).")
     return summary

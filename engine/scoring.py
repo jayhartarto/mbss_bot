@@ -2135,6 +2135,20 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "rsi": round(current_rsi, 1),
         "ret_1d_pct": round(float(stock_return_today), 2) if 'stock_return_today' in locals() else None,
         "ret_5d_pct": round(float((current_price - close_prices.iloc[-6]) / close_prices.iloc[-6] * 100), 2) if len(close_prices) >= 6 else None,  # momentum harga 5-hari, dipakai Explosive Lane v2 -- lihat catatan _explosive_score
+        # MBSS v2 (user request 2026-08-27 -- riset BSJP-ARA "gelombang kedua",
+        # live case EKAD 24 Agustus: pernah ARA 12-13 Agustus, konsolidasi,
+        # meledak lagi): max return harian 10 hari SEBELUM hari ini (exclude
+        # hari ini sendiri, itu udah ret_1d_pct) -- proksi "pernah ARA
+        # baru-baru ini, mungkin reaktivasi". Dites thd 2027 episode ARA-like
+        # (ret>=20%, 576 ISSI/2thn): status "sudah aktif" (avg |ret| 5hr
+        # sebelum >=7%) gap-positif besok cuma 57.9% vs "sleeper murni"
+        # (<2%) 69.5% -- reaktivasi genuinely lebih lemah dari sleeper asli,
+        # BUKAN dianggap setara. Reuse close_prices yg sudah di-fetch, zero
+        # cost tambahan.
+        "max_ret_1d_pct_10d": (
+            round(float((close_prices.pct_change().iloc[-11:-1] * 100).max()), 2)
+            if len(close_prices) >= 12 else None
+        ),
         "intraday_range_pct": round(float((high_prices.iloc[-1] - low_prices.iloc[-1]) / max(current_price, 1e-9) * 100), 2),
         "close_pos_day": round(float((current_price - low_prices.iloc[-1]) / max(high_prices.iloc[-1] - low_prices.iloc[-1], 1e-9)), 3),
         "value_traded": int(float(current_price * current_vol)),

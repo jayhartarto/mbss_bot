@@ -476,6 +476,19 @@ async def run_nightly_full_scan(context):
         except Exception as e:
             print(f"⚠️ Gagal membangun BSJP-ARA candidates: {e}")
 
+        # MBSS v2 (user request 2026-08-27 -- riset BSJP "gelombang kedua",
+        # live case EKAD 24 Agustus): watchlist terpisah dari bsjp_ara di
+        # atas (yang khusus sleeper-belum-pernah-bergerak+katalis) -- ini
+        # utk saham yang PERNAH ARA 10 hari terakhir lalu dingin lagi,
+        # dipantau live besok utk reaktivasi volume (lihat engine/
+        # scanalert.py BUY_POWER_STRONG_VOL_RATIO). Zero cost tambahan
+        # (max_ret_1d_pct_10d sudah dihitung di compute_factor_scoring).
+        try:
+            second_wave_watch = build_second_wave_watch(results)
+            save_second_wave_watch(second_wave_watch)
+        except Exception as e:
+            print(f"⚠️ Gagal membangun BSJP second-wave watch: {e}")
+
         # MBSS v2 (user request — /broksum): fetch broker-summary batch buat
         # 250 ticker berskor tertinggi SEKALI di sini, pakai HABIS kuota
         # harian Index Alpha (5 panggilan batch x 50 = 250 ticker, persis
@@ -873,6 +886,55 @@ def load_bsjp_ara_candidates() -> list:
         return []
     payload = cache_manager.get("bsjp_ara", default={})
     return payload.get("candidates", []) if isinstance(payload, dict) else []
+
+
+# MBSS v2 (user request 2026-08-27 -- riset backtest 2 tahun 576 ISSI, 2027
+# episode ret>=20%): "gelombang kedua" -- ticker yang PERNAH ARA-like
+# (return>=20%) dlm 10 hari terakhir lalu dingin lagi, dipantau utk
+# reaktivasi. BEDA dari bsjp_ara di atas (sleeper MURNI belum pernah
+# bergerak + katalis berita) -- dites TERPISAH thd populasi sama: "sudah
+# aktif" (avg |ret| 5hr sebelum ARA >=7%, mirip profil gelombang-kedua)
+# gap-positif besok cuma 57.9%/median high +4.1% vs sleeper murni 69.5%/
+# +4.9% -- genuinely lebih lemah, BUKAN dianggap setara sleeper. Threshold
+# dipilih SAMA dgn definisi ARA-day di riset (ret>=20%) supaya konsisten
+# dgn angka yang sudah divalidasi, bukan angka baru dikarang.
+BSJP_SECOND_WAVE_MIN_RET_10D = 20.0
+BSJP_SECOND_WAVE_MAX_TODAY_RET = 15.0  # exclude yg HARI INI sendiri lagi meledak -- itu domain NO_ROOM_GAIN_PCT scanalert, bukan "sudah dingin lalu reaktivasi"
+
+
+def build_second_wave_watch(results: list) -> list:
+    watch_list = []
+    for r in results:
+        if not r or not r.get("ticker") or not r.get("price"):
+            continue
+        max_ret_10d = r.get("max_ret_1d_pct_10d")
+        if max_ret_10d is None or max_ret_10d < BSJP_SECOND_WAVE_MIN_RET_10D:
+            continue
+        today_ret = r.get("ret_1d_pct")
+        if today_ret is not None and today_ret >= BSJP_SECOND_WAVE_MAX_TODAY_RET:
+            continue
+        watch_list.append({"ticker": r["ticker"], "prev_close": r["price"], "max_ret_1d_pct_10d": max_ret_10d})
+    return watch_list
+
+
+def save_second_wave_watch(watch_list: list):
+    meta = {"trading_day_marker": core.get_current_trading_day_close_marker()}
+    ok = cache_manager.set("second_wave_watch", {"watch_list": watch_list}, meta=meta)
+    if ok:
+        print(f"💾 BSJP second-wave watch tersimpan: {len(watch_list)} ticker (pernah ARA-like 10hr terakhir, sudah dingin).")
+    else:
+        print("⚠️ Gagal menyimpan BSJP second-wave watch cache.")
+
+
+def load_second_wave_watch_for_today() -> list:
+    """Sama pola dgn load_hc_gap_watch_for_today -- HANYA valid kalau dari malam kemarin (bukan basi lebih tua)."""
+    meta = cache_manager.get_meta("second_wave_watch")
+    if not meta:
+        return []
+    if meta.get("trading_day_marker") != core.get_current_trading_day_close_marker():
+        return []
+    payload = cache_manager.get("second_wave_watch", default={})
+    return payload.get("watch_list", []) if isinstance(payload, dict) else []
 
 
 # ==========================================
