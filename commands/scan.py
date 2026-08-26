@@ -1350,107 +1350,24 @@ async def high_conviction_command(update, context):
     history_for_streak = core.load_daytrade_picks_history()
     pick_date_today = core.get_current_trading_day_close_marker()
 
-    lines = [f"🔥 TOP {len(top10)} HIGH CONVICTION — urut {sort_label} (dari {len(candidates)} kandidat, cache /eodscan)\n"]
+    # MBSS v2 (user request 2026-08-26 — riset backtest 2 tahun 576 ISSI:
+    # Minervini-8-kriteria hit6=33.0%, jauh di bawah FCM/PRE/CONTINUATION
+    # yang 50%+): breakdown per-ticker DI-HIDE dari sini (bukan dihapus —
+    # tetap di-lock ke daytrade_picks_history via lock_daily_daytrade_picks
+    # di bawah, jadi /winrate tetap bisa melacaknya), diganti catatan
+    # ringkas. Sinyal "sebenarnya" dipindah ke live: kalau ticker ini gap-up
+    # >=3% BESOK dari closing malam ini, scanalert.py mem-push alert
+    # terpisah (hit6=62.7%, n=51 — lihat engine/nightly.py's
+    # save_hc_gap_watch). Ini BUKAN exclude — kandidat tetap dipakai untuk
+    # exclude VALIDATION/CONTINUATION di bawah (hc_tickers) & tetap masuk
+    # accumulation_candidates check, cuma listing verbose-nya yang disembunyikan.
+    lines = [
+        f"🔥 HIGH CONVICTION (Minervini) — {len(top10)} kandidat di-HIDE dari daftar ({len(candidates)} total lolos kriteria)\n"
+        "Win rate historis lane ini rendah (hit6~33%, backtest 2 tahun) — TIDAK ditampilkan sebagai rekomendasi beli langsung.\n"
+        "Dipantau live: kalau gap-up ≥3% BESOK dari closing malam ini, akan di-push alert terpisah (historis hit6~63%, n=51).\n"
+    ]
     if staleness_note:
         lines.insert(0, staleness_note)
-    for i, r in enumerate(top10, 1):
-        s = r.get("scores", {})
-        hc = r.get("high_conviction", {})
-        t = r.get("targets", {})
-        rr = t.get("risk_reward_at_max")
-        rr_str = f"1:{rr:.2f}" if isinstance(rr, (int, float)) else "-"
-
-        # Ceiling asterisk — SEKARANG prioritaskan broksum_250 (otomatis,
-        # cakupan 250 saham), jatuh ke screenshot manual kalau di luar
-        # cakupan itu (MBSS v2, user request).
-        ceiling_str = ""
-        ceiling = broker_engine.get_best_available_ceiling(r["ticker"], broksum_data)
-        if ceiling:
-            ceiling_str = f" / {ceiling['avg_price']:.0f}*"
-
-        streak_any = core.compute_consecutive_appearance_streak_any_source(r["ticker"], pick_date_today, history_for_streak)
-        streak_hc = core.compute_consecutive_appearance_streak(r["ticker"], "hc", pick_date_today, history_for_streak)
-        streak_str = f" 🔁 {streak_any}x berturut-turut (lintas-tool)" if streak_any > 1 else ""
-        if streak_hc > 1 and streak_hc != streak_any:
-            streak_str += f", {streak_hc}x khusus /hc"
-
-        daytrade_note = f" | DT {r['_daytrade_score_hc']:.1f}" if "_daytrade_score_hc" in r else ""
-
-        # AB-RC1 backbone (MBSS v2, user backtest) — rank/skor UNIVERSAL yang
-        # sama dipakai buat filter gate DAN ditampilkan di /screendaytrade,
-        # /consensus — supaya angkanya konsisten dilihat di semua tool, bukan
-        # cuma dipakai diam-diam buat filter (user request eksplisit).
-        bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
-        backbone_note = (
-    f" | Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} (prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f})"
-    if bb_info and "entry_rank" in bb_info else ""
-)
-
-        sector_note = ""
-        sector_info = market_engine.get_sector_rank_info(r.get("sector"))
-        if sector_info:
-            sector_note = f"\n   🏭 Sektor {sector_info['sector']}: #{sector_info['rank']}/{sector_info['total_sectors']} terkuat ({sector_info['avg_return_pct']:+.1f}% avg)"
-        smart_money_note = broker_engine.format_smart_money_tag(r["ticker"], broksum_data)
-        breakout_alert_note = nightly_engine.format_breakout_alert_tag(r["ticker"])
-
-        # MBSS v2 (user request — inline winrate per label, supaya tidak perlu
-        # recall/cross-reference manual): tampilkan angka winrate historis
-        # PERSIS untuk label yang sedang ditunjukkan di sini (action_label_id).
-        label = r.get("action_label_id", "-")
-        wr = core.get_winrate_for_label(label)
-        label_str = f"{label} (winrate {wr})" if wr else label
-
-        # MBSS v2 (user request — "selaraskan, ikuti format SDT": EXCL nyata
-        # menampilkan "SINYAL CAMPURAN (winrate 55%)" di /hc TAPI "EXTENDED /
-        # CHASE WATCH (WR 74%)" di /screendaytrade untuk ticker yang SAMA,
-        # user bingung ini kontradiksi atau bukan). action_label_id (di atas)
-        # dan lane SDT adalah DUA LENSA BEDA (skor blend Value/Momentum/
-        # Sentimen vs klasifikasi momentum day-trade) — bukan bug, tapi
-        # supaya konsisten & tidak membingungkan, /hc SEKARANG JUGA
-        # menampilkan lane SDT + WR-nya sendiri, format PERSIS sama dengan
-        # /screendaytrade dan /gptpick (lihat _gptpick_format_item), bukan
-        # cuma satu sisi yang kelihatan.
-        try:
-            sdt_lane = core.compute_screendaytrade_positive_bias(r, hc_market_regime).get("lane")
-        except Exception:
-            sdt_lane = None
-        sdt_wr = core.get_winrate_for_label(sdt_lane) if sdt_lane else ""
-        sdt_lane_note = f"\n   📊 Lane {sdt_lane} (WR {sdt_wr})" if sdt_lane and sdt_wr else (f"\n   📊 Lane {sdt_lane}" if sdt_lane else "")
-
-        # MBSS v2 (user request — "HC boleh pakai data dari SDT dari study
-        # macd... bisa masuk HC untuk diproduksi sebagai sedang breaking
-        # ataupun continuation, ataupun watch for pullback"): 3-state
-        # lifecycle (macd_lifecycle_state, engine/scoring.py), GANTI dari
-        # note flat macd_fresh_breakout_confirmed sebelumnya. Cross-
-        # reference ke tag SDT sebelumnya (find_recent_sdt_macd_tag)
-        # berlaku utk BREAKING & CONTINUATION (dua-duanya bisa jadi
-        # kelanjutan dari kandidat yang SDT tandai lebih dulu).
-        macd_lifecycle_note = ""
-        lifecycle = r.get("macd_lifecycle_state")
-        if lifecycle == "BREAKING":
-            macd_lifecycle_note = (
-                f"\n   📈 MACD BREAKING (BACKTEST): centerline cross hari ini, "
-                f"{r.get('macd_cross_days_ago', '-')} hari dari signal cross awal — follow-through terbaik secara historis"
-            )
-        elif lifecycle == "CONTINUATION":
-            macd_lifecycle_note = "\n   📊 MACD CONTINUATION: sudah di atas centerline, momentum terjaga"
-        elif lifecycle == "WATCH_PULLBACK":
-            macd_lifecycle_note = "\n   ⏳ MACD WATCH PULLBACK: masih di atas centerline tapi histogram melemah 3 hari terakhir — pertimbangkan tunggu pullback"
-        if lifecycle in ("BREAKING", "CONTINUATION"):
-            sdt_prior = core.find_recent_sdt_macd_tag(r["ticker"], pick_date_today, history_for_streak)
-            if sdt_prior:
-                macd_lifecycle_note += (
-                    f"\n   🔗 SDT sudah tandai {sdt_prior['tier']} {sdt_prior['days_gap']} hari lalu — sekarang HC konfirmasi lanjutannya"
-                )
-
-        lines.append(
-            f"{i}. {r['ticker']} — Final {s.get('final', 0):.1f}{daytrade_note}{streak_str} "
-            f"(Nilai {s.get('value', 0):.1f} | Momentum {s.get('momentum', 0):.1f} | Sentimen {s.get('sentiment', 0):.1f})\n"
-            f"   {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)} kriteria | "
-            f"RR {rr_str} | {label_str}{backbone_note}{sdt_lane_note}{macd_lifecycle_note}\n"
-            f"   Entry {t.get('buy_range', '-')}{ceiling_str}{sector_note}{smart_money_note}{breakout_alert_note}"
-            f"{core.format_fast_candidate_tag(r)}"
-        )
 
     # MBSS v2 (RapidAPI integration, "diskusi trader" session, user request):
     # blok TAMBAHAN, independen dari 8-kriteria HC di atas (yang secara

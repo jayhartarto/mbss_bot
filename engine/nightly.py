@@ -203,6 +203,64 @@ def save_backbone_daily(backbone_result: dict):
         print("⚠️ Gagal menyimpan backbone daily cache.")
 
 
+def save_hc_gap_watch(results: list):
+    """
+    MBSS v2 (user request 2026-08-26 — HC Minervini-8-kriteria win rate
+    jauh di bawah FCM/PRE/CONTINUATION, riset backtest 2 tahun 576 ISSI:
+    hit6=33.0% vs 50%+ di lane MACD-cycle lain): Minervini-HC di-HIDE dari
+    tampilan `/hc` langsung (lihat commands/scan.py), dan sebagai gantinya
+    di-watch live esok harinya — kalau gap-up >=3% dari closing malam ini
+    (HC_GAP_WATCH_MIN_GAP_PCT, engine/scanalert.py), historisnya hit6=62.7%
+    (n=51, jauh di atas 33% baseline) -- gap besar justru filter kuat utk
+    subset Minervini-HC yg genuinely breakout, bukan false-positive teknikal.
+    Definisi SENGAJA tidak mensyaratkan ticker tetap HC di hari+2 -- dites,
+    subset itu (n=14) malah TIDAK lebih baik (hit6=50%) drpd yg gap>=3% saja
+    (n=51, hit6=62.7%), jadi syarat "muncul lagi" DIBUANG, bukan lupa.
+
+    Overwrite tiap malam (BUKAN akumulasi banyak hari) -- persis konvensi
+    daily_ref-nya scanalert (state 1-hari), karena signal-nya sendiri cuma
+    tervalidasi utk jendela H+1, bukan H+2 dst (lihat HC_GAP_WATCH docstring
+    di scanalert.py).
+    """
+    watch_list = [
+        {"ticker": r["ticker"], "prev_close": r.get("price")}
+        for r in results
+        if r.get("high_conviction", {}).get("is_high_conviction") and r.get("price")
+    ]
+    meta = {"trading_day_marker": core.get_current_trading_day_close_marker()}
+    ok = cache_manager.set("hc_gap_watch", {"watch_list": watch_list}, meta=meta)
+    if ok:
+        print(f"💾 HC gap-watch tersimpan: {len(watch_list)} ticker Minervini-HC malam ini (di-hide dari /hc, dipantau gap>=3% besok).")
+    else:
+        print("⚠️ Gagal menyimpan HC gap-watch cache.")
+
+
+def load_hc_gap_watch_for_today() -> list:
+    """
+    Dipanggil scanalert.py (bukan /hc) — return watch_list HANYA kalau
+    trading_day_marker-nya PERSIS "hari bursa yang datanya seharusnya sudah
+    tersedia sekarang" (core.get_current_trading_day_close_marker() -- SAMA
+    persis convention staleness check load_backbone_daily_allow_stale dkk).
+    Dipanggil scanalert SELAMA jam bursa (sebelum market_closed_today di
+    marker function itu jadi True), jadi marker-nya otomatis merujuk hari
+    bursa KEMARIN MALAM (saat save_hc_gap_watch terakhir jalan) -- TIDAK
+    perlu dimundurkan manual lagi via get_previous_trading_day_marker (itu
+    akan dobel-mundur, bug). Beda dari load_backbone_daily_allow_stale (yang
+    sengaja menampilkan data basi dengan catatan): sinyal gap ini SPESIFIK
+    tervalidasi utk window H+1 SAJA (lihat save_hc_gap_watch docstring) --
+    data yg lebih tua BUKAN "basi tapi masih berguna", tapi genuinely di
+    luar populasi yang divalidasi, jadi sengaja dibuang total (return
+    kosong), bukan ditampilkan dengan catatan.
+    """
+    meta = cache_manager.get_meta("hc_gap_watch")
+    if not meta:
+        return []
+    if meta.get("trading_day_marker") != core.get_current_trading_day_close_marker():
+        return []
+    payload = cache_manager.get("hc_gap_watch", default={})
+    return payload.get("watch_list", []) if isinstance(payload, dict) else []
+
+
 def load_backbone_daily_allow_stale() -> tuple[dict | None, str | None]:
     """
     Return (backbone_result, staleness_note) — mirrors
@@ -604,6 +662,11 @@ async def run_nightly_full_scan(context):
             )
         except Exception as e:
             print(f"⚠️ Gagal menghitung AB-RC1 backbone: {e}")
+
+        try:
+            save_hc_gap_watch(results)
+        except Exception as e:
+            print(f"⚠️ Gagal menyimpan HC gap-watch: {e}")
 
         # BUGFIX (ditemukan lewat pengamatan user — SOHO "Top" berturut-turut
         # dengan skor cuma 4.0, tidak istimewa): results TIDAK PERNAH di-sort

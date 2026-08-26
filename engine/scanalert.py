@@ -35,6 +35,22 @@ MBSS v2 (user request) — push alert intraday "breaking" utk scalping, 2 tahap:
     lebih tinggi, konsisten di semua threshold — ditempel sbg warning label
     di pesan, bukan exclude (variance-nya dua arah, bukan cuma risiko).
 
+MBSS v2 (user request 2026-08-26, riset entry-timing FCM/PRE/CONTINUATION/
+HC — backtest 2 tahun 576 ISSI raw OHLC, cakupan penuh di chat sesi ini):
+3 mekanisme baru, masing-masing entry-timing berbeda krn karakter sinyalnya
+beda (lihat konstanta terkait utk detail riset):
+  - FCM: alert "beli di open" (jendela pendek FCM_OPEN_BUY_WINDOW_END),
+    TAMBAHAN di atas pullback/confirmation-entry yg sudah ada (bukan
+    pengganti) -- jangan kejar >2% dari open (FCM_OPEN_BUY_CHASE_CAP_PCT).
+  - PRE-CROSS (SDT) & CONTINUATION (HC): alert "menjelang closing", scan
+    HANYA mulai jam 14:00 (PRE_CONTINUATION_SCAN_START), begitu body candle
+    hari berjalan hijau kuat >=2% dari open (PRE_CONTINUATION_BODY_MIN_PCT).
+    Volume informational saja, bukan gate.
+  - HC Minervini: di-hide dari /hc langsung (win rate rendah), dipantau
+    live SEKALI esok harinya utk gap-up >=3% (HC_GAP_WATCH_MIN_GAP_PCT) dari
+    closing malam saat pertama diflag -- watchlist dari engine/nightly.py
+    save_hc_gap_watch/load_hc_gap_watch_for_today.
+
 Dipanggil sbg one-shot CLI (`python bot.py --scanalert`), ikut pola
 `--eodscan` yg sudah ada — BUKAN in-process scheduler. Dimaksudkan di-invoke
 tiap 5 menit oleh cron eksternal (Termux crontab) 09:00-15:55 WIB hari
@@ -549,6 +565,53 @@ PULLBACK_ENTRY_CAUTION_MAX_PCT = -14.0   # dlm p10 -- lebih dalam, tapi masih dl
 MACD_FRESH_CROSS_MOMENTUM_MAX_DAYS_AGO = 2   # PERSIS commands/scan.py -- jangan drift dari definisi SDT
 MACD_FRESH_CROSS_MOMENTUM_RET10_PRE_MIN = 15.0
 
+# MBSS v2 (user request 2026-08-26 — riset entry-timing FCM/PRE/CONTINUATION/
+# HC, backtest 2 tahun 576 ISSI raw OHLC, lihat chat sesi ini): FCM ternyata
+# entry TERBAIK justru di H+1 Open langsung (bukan tunggu konfirmasi/pullback
+# spt sebelumnya) -- kecepatan menang krn momentumnya SUDAH terbukti (ret10
+# pre-cross>15%). Chase-tolerance dites (0-7% dari open): hit6/hit10 FLAT di
+# semua level (49-53%), TIDAK ADA penalti kualitas sampai +3%, tapi fill-rate
+# anjlok cepat (100%->56.5% di +2%->42.5% di +3%) -- jadi 2% dipilih sbg CAP
+# BUKAN krn kualitas jatuh di atasnya, tapi krn di atas situ opportunity-cost
+# (kandidat sudah lari duluan) lebih besar drpd manfaatnya. Alert ini
+# TAMBAHAN, bukan pengganti pullback/confirmation-entry yg sudah ada (user
+# keputusan eksplisit) -- utk yg belum sempat entry di open, dua alert lama
+# itu masih jalan sbg sinyal susulan sepanjang hari.
+FCM_OPEN_BUY_CHASE_CAP_PCT = 2.0
+FCM_OPEN_BUY_WINDOW_END = datetime.time(9, 15)  # jendela "beli di open" -- di luar ini bukan lagi representasi entry-di-open yg valid
+
+# MBSS v2 (user request 2026-08-26, riset sesi sama): PRE-CROSS (lane SDT
+# FAST_RECOVERY/EARLY_RECOVERY/ABOVE_MOMENTUM) dan CONTINUATION (HC, sudah
+# cross bullish <=5hr & gain_since_cross 6-10%) SAMA-SAMA entry lebih baik
+# TUNGGU MENJELANG CLOSING (H+1 Close menang tipis tapi konsisten dari H+1
+# Open di kedua lane), BUKAN buru-buru di open spt FCM -- karena keduanya
+# masih fase "membangun/baru konfirmasi", closing yg lemah sering nyaring
+# false-start. Proxy live: body candle H+1 hijau kuat >=2% dari open HARI
+# ITU (bucket terbaik di kedua lane: PRE hit6=56.4%, CONTINUATION hit6=57.6%,
+# vs bucket "tipis" yg justru terburuk) -- scan mulai jam 14:00 (bukan dari
+# open) supaya "hijau kuat" yg terdeteksi genuinely representasi menjelang
+# closing, bukan noise pagi. Volume H+1 utk lane ini INFORMATIONAL SAJA
+# (bukan gate) -- volume TINGGI justru correlate ke stagnant_neg lebih besar
+# (45.9%/40.9% di bucket >=2x) drpd volume rendah, kebalikan dari FCM/HC
+# Minervini yg justru diuntungkan volume tinggi -- user pilih TIDAK
+# menggate di volume karena arahnya beda antar-lane & belum cukup robust
+# utk dijadikan hard filter tambahan, cukup ditampilkan sbg info.
+PRE_CONTINUATION_BODY_MIN_PCT = 2.0
+PRE_CONTINUATION_SCAN_START = datetime.time(14, 0)
+MACD_CONTINUATION_MAX_CROSS_DAYS_AGO = 5    # PERSIS commands/scan.py high_conviction_command -- jangan drift
+
+# MBSS v2 (user request 2026-08-26): HC Minervini-8-kriteria di-HIDE dari
+# /hc langsung (win rate historis rendah, hit6=33.0% vs 50%+ lane lain, lihat
+# commands/scan.py high_conviction_command) -- SEBAGAI GANTI, dipantau live
+# esok harinya: gap-up dari closing malam ini (saat HC pertama diflag) >=3%
+# di pembukaan -> hit6=62.7% (n=51), jauh di atas baseline 33%. Watchlist
+# datang dari engine/nightly.py save_hc_gap_watch/load_hc_gap_watch_for_today
+# (overwrite tiap malam, HANYA valid utk H+1 -- window >H+1 belum
+# tervalidasi, sengaja TIDAK dipantau lebih lama, lihat load_hc_gap_watch_
+# for_today docstring). Definisi SENGAJA tidak mensyaratkan ticker tetap HC
+# di hari+1 (dites, subset itu n=14 malah lebih rendah hit6=50%).
+HC_GAP_WATCH_MIN_GAP_PCT = 3.0
+
 
 def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
     """
@@ -578,6 +641,93 @@ def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
                 "cross_days_ago": r["macd_cross_days_ago"],
             }
     return watchlist
+
+
+def _get_pre_continuation_watchlist(universe: list[str]) -> dict:
+    """
+    Reuse PERSIS kriteria PRE-CROSS lane (macd_approach_tier, engine/
+    scoring.py) dan CONTINUATION (macd_cross_direction bullish, cross<=5hr,
+    gain_since_cross 6-10%, commands/scan.py high_conviction_command) --
+    dihitung ulang di sini via compute_factor_scoring, pola SAMA dgn
+    _get_fresh_cross_momentum_watchlist di atas (independen dari command
+    lain sudah jalan atau belum hari ini).
+    """
+    from engine import scoring  # import lokal, sama alasan spt FCM watchlist di atas
+    watchlist = {}
+    for t in universe:
+        try:
+            r = scoring.compute_factor_scoring(t, include_quote_check=False)
+        except Exception:
+            continue
+        if not r:
+            continue
+        tier = r.get("macd_approach_tier")
+        if tier in ("FAST_RECOVERY", "EARLY_RECOVERY", "ABOVE_MOMENTUM"):
+            watchlist[t] = {"lane": "PRE", "detail": tier}
+            continue
+        gain = r.get("macd_gain_since_cross_pct")
+        if (
+            r.get("macd_cross_direction") == "bullish"
+            and r.get("macd_cross_days_ago") is not None
+            and r["macd_cross_days_ago"] <= MACD_CONTINUATION_MAX_CROSS_DAYS_AGO
+            and gain is not None and 6.0 <= gain < 10.0
+        ):
+            watchlist[t] = {"lane": "CONTINUATION", "detail": f"+{gain:.1f}% sejak cross"}
+    return watchlist
+
+
+def _detect_h1_strong_body(bars: pd.DataFrame) -> dict | None:
+    """
+    Body candle hari-berjalan hijau kuat >=2% dari open -- proxy live utk
+    "H+1 body kuat" yg tervalidasi (lihat PRE_CONTINUATION_BODY_MIN_PCT).
+    Dipanggil HANYA sesudah jam 14:00 (dicek oleh caller) supaya representasi
+    menjelang closing, bukan noise pagi. First-touch (bukan snapshot
+    terakhir) -- begitu gain dari open PERNAH tembus ambang hari ini.
+    """
+    if bars.empty:
+        return None
+    day_open = float(bars["Open"].astype(float).iloc[0])
+    if day_open <= 0:
+        return None
+    current_price = float(bars["Close"].astype(float).iloc[-1])
+    highest_so_far = float(bars["High"].astype(float).max())
+    gain_pct = (highest_so_far - day_open) / day_open * 100
+    if gain_pct < PRE_CONTINUATION_BODY_MIN_PCT:
+        return None
+    vol_so_far = float(bars["Volume"].fillna(0).astype(float).sum())
+    return {"gain_pct": gain_pct, "current_price": current_price, "day_open": day_open, "vol_so_far": vol_so_far}
+
+
+def _build_h1_strong_body_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
+    lane, detail = watchlist_entry["lane"], watchlist_entry["detail"]
+    lane_label = "PRE-CROSS (SDT)" if lane == "PRE" else "CONTINUATION (HC)"
+    return (
+        f"📈 {ticker} MENJELANG CLOSING — {lane_label}, {detail}\n"
+        f"Body hijau +{detection['gain_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f}\n"
+        f"Volume hari ini: {detection['vol_so_far']:,.0f} lembar (informational, bukan gate)\n"
+        f"Historis: {'PRE hit6~50-56%' if lane == 'PRE' else 'CONTINUATION hit6~49-58%'} — verifikasi live sebelum entry."
+    )
+
+
+def _detect_hc_gap_watch(bars: pd.DataFrame, prev_close: float) -> dict | None:
+    """Gap-up di pembukaan dari closing malam saat pertama diflag HC (lihat HC_GAP_WATCH_MIN_GAP_PCT)."""
+    if bars.empty or not prev_close or prev_close <= 0:
+        return None
+    day_open = float(bars["Open"].astype(float).iloc[0])
+    if day_open <= 0:
+        return None
+    gap_pct = (day_open - prev_close) / prev_close * 100
+    if gap_pct < HC_GAP_WATCH_MIN_GAP_PCT:
+        return None
+    return {"gap_pct": gap_pct, "day_open": day_open, "prev_close": prev_close}
+
+
+def _build_hc_gap_watch_message(ticker: str, detection: dict) -> str:
+    return (
+        f"🔥 {ticker} HC GAP-UP +{detection['gap_pct']:.1f}% dari closing malam HC diflag ({detection['prev_close']:,.0f}) — buka {detection['day_open']:,.0f}\n"
+        f"Historis: gap>=3% pasca-HC-Minervini hit6~62.7% (n=51, backtest 2 tahun) — jauh di atas baseline HC 33% tanpa filter ini.\n"
+        f"Cek 1x, tidak dipantau lagi hari berikutnya kalau tidak fire hari ini."
+    )
 
 
 def _detect_pullback_entry(bars: pd.DataFrame) -> dict | None:
@@ -652,13 +802,46 @@ def _build_confirmation_entry_message(ticker: str, detection: dict, watchlist_en
     )
 
 
+def _detect_open_buy(bars: pd.DataFrame) -> dict | None:
+    """
+    FCM: entry di H+1 Open langsung (lihat FCM_OPEN_BUY_CHASE_CAP_PCT
+    docstring). None kalau gain dari open SUDAH >=cap -- jangan kejar,
+    momen sudah lewat (caller jg membatasi jendela waktu via
+    FCM_OPEN_BUY_WINDOW_END, dua lapis proteksi supaya tidak fire "beli di
+    open" yg sebenarnya sudah siang hari).
+    """
+    if bars.empty:
+        return None
+    day_open = float(bars["Open"].astype(float).iloc[0])
+    if day_open <= 0:
+        return None
+    current_price = float(bars["Close"].astype(float).iloc[-1])
+    gain_from_open = (current_price - day_open) / day_open * 100
+    if gain_from_open >= FCM_OPEN_BUY_CHASE_CAP_PCT:
+        return None
+    return {"day_open": day_open, "current_price": current_price, "gain_from_open": gain_from_open}
+
+
+def _build_open_buy_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
+    return (
+        f"🔔 {ticker} BELI DI OPEN — FRESH CROSS MOMENTUM ({watchlist_entry['cross_days_ago']} hari lalu, "
+        f"momentum pre-cross +{watchlist_entry['ret10_pre_cross_pct']:.1f}%)\n"
+        f"Open {detection['day_open']:,.0f} — skrg {detection['current_price']:,.0f} ({detection['gain_from_open']:+.1f}% dari open)\n"
+        f"Riset: entry di open lebih baik dari nunggu konfirmasi/pullback (hit rate flat s/d +3% chase, tapi fill-rate anjlok di atas +2%) — "
+        f"JANGAN KEJAR kalau sudah naik >{FCM_OPEN_BUY_CHASE_CAP_PCT:.0f}% dari open ini."
+    )
+
+
 async def run_scan_alert_once() -> dict:
     """
     Satu kali scan penuh: fetch universe + data, deteksi Alert A/B per
     ticker, kirim ke Telegram (kalau ada & belum dikirim hari ini), simpan
     state. Return summary dict (utk logging CLI).
     """
-    summary = {"skipped_reason": None, "alert_a_sent": 0, "alert_b_sent": 0, "scanned": 0, "excluded_no_room": 0, "gap_up_sent": 0, "pullback_entry_sent": 0}
+    summary = {
+        "skipped_reason": None, "alert_a_sent": 0, "alert_b_sent": 0, "scanned": 0, "excluded_no_room": 0,
+        "gap_up_sent": 0, "pullback_entry_sent": 0, "open_buy_sent": 0, "pre_continuation_sent": 0, "hc_gap_sent": 0,
+    }
 
     now_wib = datetime.datetime.now(core.WIB)
     if now_wib.weekday() >= 5:  # Sabtu/Minggu -- no-op murah, cek ini SEBELUM network call apapun
@@ -702,11 +885,34 @@ async def run_scan_alert_once() -> dict:
     else:
         fcm_watchlist = state["fresh_cross_momentum_watchlist"]
 
-    # Union -- FCM watchlist BISA di luar band harga 60-600 (tidak ada floor
-    # harga di definisi SDT-nya), jadi tidak selalu subset alert_universe.
+    if state.get("pre_continuation_watchlist") is None:
+        print(f"📡 Scan-alert: hitung watchlist PRE-CROSS/CONTINUATION utk {len(universe)} ticker...")
+        pre_continuation_watchlist = await asyncio.to_thread(_get_pre_continuation_watchlist, universe)
+        state["pre_continuation_watchlist"] = pre_continuation_watchlist
+        print(f"✅ PRE-CROSS/CONTINUATION watchlist hari ini: {len(pre_continuation_watchlist)} ticker.")
+    else:
+        pre_continuation_watchlist = state["pre_continuation_watchlist"]
+
+    if state.get("hc_gap_watch_list") is None:
+        import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
+        hc_watch_rows = await asyncio.to_thread(nightly_engine.load_hc_gap_watch_for_today)
+        hc_gap_watch_list = {row["ticker"]: row["prev_close"] for row in hc_watch_rows if row.get("prev_close")}
+        state["hc_gap_watch_list"] = hc_gap_watch_list
+        print(f"✅ HC gap-watch hari ini: {len(hc_gap_watch_list)} ticker (dari HC Minervini malam kemarin).")
+    else:
+        hc_gap_watch_list = state["hc_gap_watch_list"]
+
+    # Union -- FCM/PRE-CONTINUATION/HC-gap-watch watchlist BISA di luar band
+    # harga 60-600 (tidak ada floor harga di definisi masing-masing), jadi
+    # tidak selalu subset alert_universe.
     alert_universe = list(daily_ref.keys())
-    full_ticker_set = sorted(set(alert_universe) | set(fcm_watchlist.keys()))
-    print(f"🔍 Scan-alert: {len(full_ticker_set)} ticker ({len(alert_universe)} alert + {len(fcm_watchlist)} FCM watchlist), fetch bar 1m...")
+    full_ticker_set = sorted(
+        set(alert_universe) | set(fcm_watchlist.keys()) | set(pre_continuation_watchlist.keys()) | set(hc_gap_watch_list.keys())
+    )
+    print(
+        f"🔍 Scan-alert: {len(full_ticker_set)} ticker ({len(alert_universe)} alert + {len(fcm_watchlist)} FCM + "
+        f"{len(pre_continuation_watchlist)} PRE/CONTINUATION + {len(hc_gap_watch_list)} HC gap-watch), fetch bar 1m..."
+    )
     data = await asyncio.to_thread(_fetch_today_1m, full_ticker_set)
 
     tickers_state = state.setdefault("tickers", {})
@@ -736,6 +942,54 @@ async def run_scan_alert_once() -> dict:
         )
         t_state.setdefault("gap_up_sent", False)  # ticker lama di state file blm punya field ini
         t_state.setdefault("watchlist_entry_sent", False)
+        t_state.setdefault("open_buy_sent", False)
+        t_state.setdefault("pre_continuation_sent", False)
+        t_state.setdefault("hc_gap_sent", False)
+
+        # FCM: beli di open, jendela pendek (FCM_OPEN_BUY_WINDOW_END) --
+        # dicek SEBELUM confirmation/pullback (independen, bisa dua-duanya
+        # fire di hari yg sama: open-buy pagi ini, pullback/confirmation
+        # susulan siang kalau belum sempat entry pagi).
+        if t in fcm_watchlist and not t_state["open_buy_sent"] and now_wib.time() <= FCM_OPEN_BUY_WINDOW_END:
+            det_open = _detect_open_buy(bars)
+            if det_open:
+                msg = _build_open_buy_message(t, det_open, fcm_watchlist[t])
+                if bot is not None:
+                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                else:
+                    print(f"[NO TELEGRAM TOKEN] {msg}")
+                t_state["open_buy_sent"] = True
+                summary["open_buy_sent"] += 1
+
+        # PRE-CROSS / CONTINUATION: body hijau kuat >=2%, HANYA dicek mulai
+        # jam 14:00 (PRE_CONTINUATION_SCAN_START) -- lihat konstanta di atas.
+        if (
+            t in pre_continuation_watchlist and not t_state["pre_continuation_sent"]
+            and now_wib.time() >= PRE_CONTINUATION_SCAN_START
+        ):
+            det_body = _detect_h1_strong_body(bars)
+            if det_body:
+                msg = _build_h1_strong_body_message(t, det_body, pre_continuation_watchlist[t])
+                if bot is not None:
+                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                else:
+                    print(f"[NO TELEGRAM TOKEN] {msg}")
+                t_state["pre_continuation_sent"] = True
+                summary["pre_continuation_sent"] += 1
+
+        # HC Minervini gap-watch -- ticker ini di-hide dari /hc malam
+        # kemarin, dipantau SEKALI utk gap>=3% pagi ini (lihat
+        # HC_GAP_WATCH_MIN_GAP_PCT).
+        if t in hc_gap_watch_list and not t_state["hc_gap_sent"]:
+            det_hc_gap = _detect_hc_gap_watch(bars, hc_gap_watch_list[t])
+            if det_hc_gap:
+                msg = _build_hc_gap_watch_message(t, det_hc_gap)
+                if bot is not None:
+                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                else:
+                    print(f"[NO TELEGRAM TOKEN] {msg}")
+                t_state["hc_gap_sent"] = True
+                summary["hc_gap_sent"] += 1
 
         # FRESH CROSS MOMENTUM watchlist entry -- DUA sisi (user correction:
         # bukan cuma pullback), independen dari prev_close/Alert A-B
@@ -765,7 +1019,7 @@ async def run_scan_alert_once() -> dict:
                     summary["pullback_entry_sent"] += 1
 
         if ref is None:
-            continue  # ticker ini HANYA di fcm_watchlist (di luar band 60-600) -- Alert A/B/gap-up di bawah butuh prev_close, sisanya di-skip
+            continue  # ticker ini HANYA di fcm_watchlist/pre_continuation_watchlist/hc_gap_watch_list (di luar band 60-600) -- Alert A/B/gap-up di bawah butuh prev_close, sisanya di-skip
 
         if not t_state["gap_up_sent"]:
             det_gap = _detect_gap_up(bars, prev_close)
@@ -831,6 +1085,9 @@ async def run_scan_alert_once() -> dict:
     _save_state(state)
     print(f"✅ Scan-alert selesai: {summary['scanned']} ticker discan, "
           f"{summary['alert_a_sent']} Alert A, {summary['alert_b_sent']} Alert B, "
-          f"{summary['pullback_entry_sent']} FCM watchlist entry, "
+          f"{summary['open_buy_sent']} FCM open-buy, "
+          f"{summary['pullback_entry_sent']} FCM pullback/confirmation, "
+          f"{summary['pre_continuation_sent']} PRE/CONTINUATION menjelang closing, "
+          f"{summary['hc_gap_sent']} HC gap-watch, "
           f"{summary['excluded_no_room']} di-exclude (no room).")
     return summary
