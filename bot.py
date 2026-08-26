@@ -68,7 +68,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument(
         "--scanalert", dest="scanalert", action="store_true",
         help="One-shot intraday breaking-alert scan (Alert A/B), then exit. Meant to be invoked "
-             "every 5 minutes by an external cron during trading hours (09:00-15:55 WIB).",
+             "every 3 minutes (MBSS v2, user request 2026-08-27, was 5min -- see engine/scanalert.py "
+             "docstring for the timing-audit backing this) by an external cron during trading hours (09:00-15:55 WIB).",
     )
     return parser.parse_args(argv)
 
@@ -143,7 +144,7 @@ def run_repairthin() -> None:
 
 
 def run_scanalert() -> None:
-    """One-shot intraday breaking-alert scan (CLI). Meant to run every 5
+    """One-shot intraday breaking-alert scan (CLI). Meant to run every 3
     minutes via external cron during trading hours — see engine/scanalert.py."""
     logger.info("Scan-alert starting (CLI mode) — Alert A/B intraday breaking scan")
     t0 = time.time()

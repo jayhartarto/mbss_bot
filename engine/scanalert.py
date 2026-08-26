@@ -53,8 +53,15 @@ beda (lihat konstanta terkait utk detail riset):
 
 Dipanggil sbg one-shot CLI (`python bot.py --scanalert`), ikut pola
 `--eodscan` yg sudah ada — BUKAN in-process scheduler. Dimaksudkan di-invoke
-tiap 5 menit oleh cron eksternal (Termux crontab) 09:00-15:55 WIB hari
-bursa. Tiap scan FETCH ULANG seluruh bar 1m hari ini (bukan incremental) dan
+tiap 3 menit (MBSS v2, user request 2026-08-27 -- diturunkan dari 5 menit,
+riset audit timing 1m: drift harga selama nunggu polling di cadence 5 menit
+median 0.85%/p95 5.76%/max 15.32%, turun jadi median 0%/p95 4.68%/max 15.32%
+di 3 menit -- p99 drift dari 8.90%->8.18%, %kasus drift>=10% dari 0.9%->0.4%.
+1 menit HAMPIR nol drift tapi resiko operasional job overlap kalau 1x scan
+penuh universe makan waktu >1 menit, 3 menit dipilih sbg titik tengah) oleh
+cron eksternal (Termux crontab) 09:00-15:55 WIB hari bursa -- UBAH MANUAL
+baris crontab-nya dari `*/5 9-15 * * 1-5` ke `*/3 9-15 * * 1-5` (atau
+setara), file crontab TIDAK ada di repo ini. Tiap scan FETCH ULANG seluruh bar 1m hari ini (bukan incremental) dan
 re-derive semua deteksi dari nol — state file HANYA menyimpan flag
 "sudah dikirim/di-exclude", bukan progress harga inkremental. Ini sengaja:
 lebih sederhana & self-correcting (tidak ada state drift antar-proses)
@@ -160,8 +167,8 @@ def _get_alert_universe() -> list[str]:
     pernah menulis ulang FILE-nya (sudah diperbaiki, self-heal di sana) --
     tapi fungsi ini baca FILE LANGSUNG (bukan lewat load_or_build_whitelist),
     jadi tidak boleh menganggap file selalu bersih. Intersect eksplisit thd
-    fetch_online_sharia_list() (baca lokal, murah, aman dipanggil tiap scan
-    5 menit) sebagai lapis pertahanan kedua -- jangan bergantung pada file
+    fetch_online_sharia_list() (baca lokal, murah, aman dipanggil tiap scan)
+    sebagai lapis pertahanan kedua -- jangan bergantung pada file
     sudah ter-self-heal duluan.
     """
     if not os.path.exists(core.WHITELIST_CACHE_FILE):
@@ -184,10 +191,64 @@ def _get_alert_universe() -> list[str]:
         dropped = len(eligible) - len(filtered)
         if dropped > 0:
             print(f"🕌 Scan-alert: {dropped} ticker non-Sharia dibuang dari universe (di luar ISSI terkunci).")
-        return filtered
     except Exception as e:
         print(f"⚠️ Gagal memuat daftar Sharia terkunci ({e}) -- pakai whitelist apa adanya, TIDAK di-intersect.")
-        return eligible
+        filtered = eligible
+    return _exclude_erratic_volatility_profile(filtered)
+
+
+# MBSS v2 (user request 2026-08-27 -- audit Alert A/B timing/drift, keputusan
+# user "riwayat pola beku-meledak langsung exclude saja, termasuk yang
+# extremely range candle tipis lebar"): HARD EXCLUDE dari universe (bukan
+# tag informational spt _risk_tags -- dua pola ini beda kelas, user pilih
+# tidak mau lihat sama sekali, bukan cuma diberi peringatan). Dua pola beda:
+#   FROZEN_THEN_EXPLODE: median range harian 60 hari nyaris nol (nyaris
+#     tidak bergerak MAYORITAS hari) TAPI max range ekstrem -- live case
+#     YPAS (median=0.00%, max=38.10%, drift alert +15.32% di data 1m riil).
+#     MEDIAN dipilih (bukan mean) justru krn mean gampang ke-drag oleh 1-2
+#     hari ekstrem, padahal itu yang mau ditangkap -- exclude butuh baca
+#     "mayoritas hari beku", median lebih representasikan itu.
+#   CHRONICALLY_WIDE_RANGE: median range harian 60 hari sendiri sudah tinggi
+#     terus-menerus (BUKAN sesekali) -- live case DOSS/DAYA/ARII (persentil
+#     73-90 dari seluruh universe drift-audit).
+FROZEN_MEDIAN_RANGE_MAX_PCT = 1.0
+FROZEN_MAX_RANGE_MIN_PCT = 25.0
+CHRONIC_WIDE_MEDIAN_RANGE_MIN_PCT = 5.5  # DOSS (real case, persentil 90 drift-audit) median_range 2thn ~5.95% -- 5.5 dipilih supaya kasus itu genuinely kena, bukan lolos tipis-tipis
+
+
+def _exclude_erratic_volatility_profile(tickers: list[str]) -> list[str]:
+    """None-safe (data historis kurang dari 60hr -> TIDAK dikecualikan, "missing=neutral")."""
+    import engine.nightly as nightly_engine  # import lokal, hindari circular import di level modul
+    try:
+        scored = nightly_engine.load_daily_scan_cache()
+    except Exception as e:
+        print(f"⚠️ Gagal memuat daily_scan_cache utk cek pola volatilitas ({e}) -- exclude di-skip, universe apa adanya.")
+        return tickers
+    if not scored:
+        return tickers
+
+    kept = []
+    excluded_frozen, excluded_wide = [], []
+    for t in tickers:
+        r = scored.get(t)
+        med = r.get("hist_median_range_pct_60d") if r else None
+        mx = r.get("hist_max_range_pct_60d") if r else None
+        if med is None or mx is None:
+            kept.append(t)
+            continue
+        if med <= FROZEN_MEDIAN_RANGE_MAX_PCT and mx >= FROZEN_MAX_RANGE_MIN_PCT:
+            excluded_frozen.append(t)
+            continue
+        if med >= CHRONIC_WIDE_MEDIAN_RANGE_MIN_PCT:
+            excluded_wide.append(t)
+            continue
+        kept.append(t)
+
+    if excluded_frozen:
+        print(f"🧊 Scan-alert: {len(excluded_frozen)} ticker di-exclude (pola beku-lalu-meledak): {', '.join(excluded_frozen[:15])}{' ...' if len(excluded_frozen) > 15 else ''}")
+    if excluded_wide:
+        print(f"📈 Scan-alert: {len(excluded_wide)} ticker di-exclude (chronically wide-range): {', '.join(excluded_wide[:15])}{' ...' if len(excluded_wide) > 15 else ''}")
+    return kept
 
 
 def _fetch_daily_ref(tickers: list[str]) -> dict:

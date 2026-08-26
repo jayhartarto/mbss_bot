@@ -2149,6 +2149,26 @@ def compute_factor_scoring(ticker, include_quote_check=True):
             round(float((close_prices.pct_change().iloc[-11:-1] * 100).max()), 2)
             if len(close_prices) >= 12 else None
         ),
+        # MBSS v2 (user request 2026-08-27 -- audit Alert A/B timing/drift:
+        # "instant mover" ekstrem [drift >=10% dlm <2 menit] 60% di antaranya
+        # likuiditas tipis, DAN cek riwayat range harian 2 tahun nunjuk 2
+        # pola beda: (a) chronically wide-range [ARII/DAYA/DOSS persentil
+        # 73-90 vs universe] -- genuinely volatile terus-menerus, bukan
+        # sesekali; (b) "beku-lalu-meledak" [YPAS: median range HARIAN
+        # 0.00% -- nyaris tidak bergerak SEBAGIAN BESAR hari -- tapi max
+        # 38.10%, pola paling berbahaya krn tidak ada baseline volatilitas
+        # utk dikalibrasi]. Median (BUKAN mean) yg dipakai gate exclude
+        # karena mean gampang ke-drag naik oleh 1-2 hari ekstrem padahal
+        # mayoritas hari genuinely beku -- itu justru sinyal (b) yg mau
+        # ditangkap, bukan noise yg mau dihindari.
+        "hist_median_range_pct_60d": (
+            round(float(((high_prices.tail(60) - low_prices.tail(60)) / close_prices.tail(60).replace(0, float("nan"))).median() * 100), 2)
+            if len(close_prices) >= 60 else None
+        ),
+        "hist_max_range_pct_60d": (
+            round(float(((high_prices.tail(60) - low_prices.tail(60)) / close_prices.tail(60).replace(0, float("nan"))).max() * 100), 2)
+            if len(close_prices) >= 60 else None
+        ),
         "intraday_range_pct": round(float((high_prices.iloc[-1] - low_prices.iloc[-1]) / max(current_price, 1e-9) * 100), 2),
         "close_pos_day": round(float((current_price - low_prices.iloc[-1]) / max(high_prices.iloc[-1] - low_prices.iloc[-1], 1e-9)), 3),
         "value_traded": int(float(current_price * current_vol)),
