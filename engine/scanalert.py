@@ -582,10 +582,10 @@ def _risk_tags(bars: pd.DataFrame, ref: dict | None, now_wib: datetime.datetime,
         )
     if ref is not None:
         avg_vt = ref.get("avg_value_traded_20d")
-        if avg_vt is not None and avg_vt < core.LIQUIDITY_FLOOR_VALUE_TRADED_IDR:
+        if avg_vt is not None and avg_vt < SCANALERT_LIQUIDITY_WARN_FLOOR_IDR:
             tags.append(
                 f"⚠️ LIKUIDITAS TIPIS: avg value traded 20hr Rp{avg_vt/1e9:.2f}M — "
-                f"di bawah floor Rp{core.LIQUIDITY_FLOOR_VALUE_TRADED_IDR/1e9:.0f}M sistem, risiko slippage/spread lebih besar"
+                f"di bawah floor Rp{SCANALERT_LIQUIDITY_WARN_FLOOR_IDR/1e9:.2f}M scalping, risiko slippage/spread lebih besar"
             )
     return tags
 
@@ -721,15 +721,26 @@ HC_GAP_WATCH_MIN_GAP_PCT = 3.0
 #      menit (vs cuma ~15% di jam2 lain), 22% turun >=5% (vs ~5%). TAPI
 #      TIDAK di-suppress/tunda -- 72% Alert A & 53% Alert B genuinely fire
 #      SETELAH 09:30 juga, jadi window ini bukan cuma noise pembukaan.
-#   3) LIKUIDITAS TIPIS: avg value traded 20d di bawah floor Rp1M yg
-#      dipakai Danger Gate/HC/SDT di seluruh sistem lain (live case SAPX
-#      Rp92jt/hari, WAPO Rp657jt/hari, KEDUANYA fire Alert A/B). Ditest
-#      SEBAGAI HARD FILTER dulu (bukan cuma tag): akan membuang 40.9% fire
-#      Alert A dan 50.8% Alert B -- TERLALU AGRESIF, jadi tag saja, bukan
-#      exclude (saham tipis TETAP valid dipantau, cuma risiko slippage/
-#      spread/gampang digerakkan modal kecil lebih tinggi).
+#   3) LIKUIDITAS TIPIS: avg value traded 20d di bawah SCANALERT_LIQUIDITY_
+#      WARN_FLOOR_IDR (live case SAPX Rp92jt/hari, WAPO Rp657jt/hari,
+#      KEDUANYA fire Alert A/B). Ditest floor Rp1M (LIQUIDITY_FLOOR_VALUE_
+#      TRADED_IDR, dipakai Danger Gate/HC/SDT) SEBAGAI HARD FILTER dulu:
+#      akan membuang 40.9% fire Alert A dan 50.8% Alert B -- TERLALU
+#      AGRESIF, jadi (a) tag saja bukan exclude, DAN (b) user pilih floor
+#      lebih longgar KHUSUS scalping (Rp500jt, lihat SCANALERT_LIQUIDITY_
+#      WARN_FLOOR_IDR di bawah) -- exposure scalping jauh lebih singkat
+#      drpd day-trade/swing multi-hari yg dilindungi floor Rp1M itu.
 CHASE_WARN_GAIN_FROM_OPEN_PCT = 3.0
 RISKY_TIME_WINDOW_END = datetime.time(9, 30)
+
+# MBSS v2 (user request 2026-08-26): floor likuiditas KHUSUS tag Alert A/B/
+# gap-up, SENGAJA lebih longgar dari core.LIQUIDITY_FLOOR_VALUE_TRADED_IDR
+# (Rp1M, dipakai Danger Gate/HC/SDT) -- scalping intraday genuinely lebih
+# toleran thd saham lebih tipis drpd swing/day-trade multi-hari (exposure
+# lebih singkat), jadi TIDAK reuse konstanta yang sama. Tidak mengubah
+# core.LIQUIDITY_FLOOR_VALUE_TRADED_IDR sama sekali -- floor Rp1M di
+# Danger Gate/HC/SDT tetap seperti semula.
+SCANALERT_LIQUIDITY_WARN_FLOOR_IDR = 500_000_000
 
 
 def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
