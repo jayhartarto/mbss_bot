@@ -1358,9 +1358,14 @@ async def high_conviction_command(update, context):
     # ringkas. Sinyal "sebenarnya" dipindah ke live: kalau ticker ini gap-up
     # >=3% BESOK dari closing malam ini, scanalert.py mem-push alert
     # terpisah (hit6=62.7%, n=51 — lihat engine/nightly.py's
-    # save_hc_gap_watch). Ini BUKAN exclude — kandidat tetap dipakai untuk
-    # exclude VALIDATION/CONTINUATION di bawah (hc_tickers) & tetap masuk
-    # accumulation_candidates check, cuma listing verbose-nya yang disembunyikan.
+    # save_hc_gap_watch). Ini BUKAN exclude dari eligibility apa pun --
+    # kandidat tetap dipakai utk accumulation_candidates check, cuma
+    # listing verbose-nya yang disembunyikan. CATATAN (user request
+    # 2026-08-27, revisi dari versi awal): hc_tickers SUDAH TIDAK dipakai
+    # lagi utk exclude dari VALIDATION/CONTINUATION di bawah -- lihat
+    # catatan di excluded_tickers, exclusion lama itu jadi kontraproduktif
+    # begitu Minervini di-hide (ticker yg genuinely lolos kriteria
+    # tervalidasi malah ikut terkubur, bukan tampil di section yang tepat).
     lines = [
         f"🔥 HIGH CONVICTION (Minervini) — {len(top10)} kandidat di-HIDE dari daftar ({len(candidates)} total lolos kriteria)\n"
         "Win rate historis lane ini rendah (hit6~33%, backtest 2 tahun) — TIDAK ditampilkan sebagai rekomendasi beli langsung.\n"
@@ -1432,7 +1437,21 @@ async def high_conviction_command(update, context):
     # D5" di 01_GUIDE_PRODUKSI.md -- cross yg sudah lewat window evaluasi
     # bukan lagi episode yg sama, sudah basi utk disebut "continuation".
     MACD_CONTINUATION_MAX_CROSS_DAYS = 5
-    excluded_tickers = hc_tickers | {r["ticker"] for r in accumulation_candidates}
+    # MBSS v2 (user request 2026-08-27 — live case: SSIA/NRCA/PTBA/MPIX/SGER/
+    # ADRO/AADI lolos Minervini top10 [hc_tickers] TAPI juga membawa
+    # macd_lifecycle_state BREAKING/CONTINUATION -- sebelum hide Minervini,
+    # exclude hc_tickers dari sini masuk akal [hindari dobel tampil, sama2
+    # kelihatan]. SETELAH hide (Minervini breakdown per-ticker disembunyikan,
+    # lihat di atas), exclusion ini jadi KONTRAPRODUKTIF: ticker yg genuinely
+    # lolos kriteria CONTINUATION/VALIDATION TERVALIDASI (macd_gain_since_
+    # cross_pct, BEDA dari macd_lifecycle_state yg sekadar anotasi generik --
+    # lihat engine/scoring.py, WATCH_PULLBACK eksplisit "belum divalidasi
+    # backtest terpisah") malah ikut terkubur di section yg sudah di-hide,
+    # bukan muncul di section yg SEHARUSNYA jadi rumah sinyal mereka.
+    # hc_tickers DIHAPUS dari exclusion -- accumulation_candidates TETAP
+    # exclude (konsep beda: pra-breakout vs post-breakout, exclusion itu
+    # bukan soal duplikasi tampilan Minervini).
+    excluded_tickers = {r["ticker"] for r in accumulation_candidates}
     continuation_candidates = [
         r for r in scored.values()
         if r.get("ticker") not in excluded_tickers
