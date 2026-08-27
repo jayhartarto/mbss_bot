@@ -7474,6 +7474,28 @@ async def run_scanalert_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ Scan-alert job gagal: {e}")
 
 
+async def run_gap_rebound_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH (MBSS v2, user request 2026-08-27 -- ditemukan
+    lewat log produksi riil kalau scan-alert intraday di deployment ini
+    JALAN lewat JobQueue in-process, BUKAN cron eksternal spt yg sempat
+    diasumsikan waktu Alert REBOUND [engine/scanalert.py's run_gap_rebound_
+    scan_once, dipanggil jg via CLI --scanalert-rebound] dibangun -- tanpa
+    job kedua ini, REBOUND TIDAK PERNAH jalan otomatis di deployment ini
+    sama sekali). Interval JAUH lebih pendek (tiap 1 menit, lihat build_app())
+    drpd run_scanalert_job -- run_gap_rebound_scan_once sendiri SUDAH no-op
+    murah di luar jendela 09:00-09:10 WIB (GAP_REBOUND_SCAN_WINDOW_START/END),
+    jadi aman dipanggil rapat sepanjang hari tanpa membebani di luar jendela
+    itu. State file terpisah dari run_scanalert_job (scanalert_rebound_
+    state.json vs scanalert_state.json) -- kedua job ini TIDAK berbagi
+    state, aman jalan bersamaan.
+    """
+    try:
+        await scanalert_engine.run_gap_rebound_scan_once()
+    except Exception as e:
+        print(f"⚠️ Gap-rebound scan job gagal: {e}")
+
+
 async def send_startup_notice(app: Application):
     """Sent once automatically when the bot process starts — the person's cue that
     it's alive, and the one place the disclaimer appears instead of every message."""
@@ -7570,6 +7592,16 @@ def build_app():
     # 24/7, dia sendiri yg no-op murah di luar jam bursa.
     if app.job_queue is not None:
         app.job_queue.run_repeating(run_scanalert_job, interval=300, first=10)
+        # MBSS v2 (user request 2026-08-27 -- Alert REBOUND, engine/
+        # scanalert.py run_gap_rebound_scan_once): job TERPISAH, interval
+        # jauh lebih rapat (60s) krn median waktu fire = menit ke-0 sejak
+        # open (riset backtest 1m). Aman rapat sepanjang hari -- fungsinya
+        # sendiri no-op murah di luar jendela 09:00-09:10 WIB. TANPA job
+        # ini, REBOUND TIDAK PERNAH jalan otomatis (ditemukan dari log
+        # produksi: scan-alert utama JALAN via JobQueue in-process ini,
+        # BUKAN cron eksternal spt sempat diasumsikan saat REBOUND dibangun
+        # dgn CLI --scanalert-rebound).
+        app.job_queue.run_repeating(run_gap_rebound_scan_job, interval=60, first=10)
     else:
         print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
               "scan-alert intraday TIDAK akan jalan otomatis. Install dgn: "

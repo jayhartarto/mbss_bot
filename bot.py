@@ -67,16 +67,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     mode.add_argument(
         "--scanalert", dest="scanalert", action="store_true",
-        help="One-shot intraday breaking-alert scan (Alert A/B), then exit. Meant to be invoked "
-             "every 3 minutes (MBSS v2, user request 2026-08-27, was 5min -- see engine/scanalert.py "
-             "docstring for the timing-audit backing this) by an external cron during trading hours (09:00-15:55 WIB).",
+        help="One-shot intraday breaking-alert scan (Alert A/B), then exit. NOTE (corrected "
+             "2026-08-27): in the actual GCP production deployment this is NOT invoked by an "
+             "external cron -- engine/legacy_core.py's build_app() already runs it automatically "
+             "every 5 minutes via python-telegram-bot's in-process JobQueue. This CLI flag exists "
+             "for manual/debug runs or alternate deployments without JobQueue.",
     )
     mode.add_argument(
         "--scanalert-rebound", dest="scanalert_rebound", action="store_true",
         help="One-shot gap-open REBOUND tier scan (MBSS v2, user request 2026-08-27), then exit. "
-             "SEPARATE from --scanalert (own state file, own cadence) -- meant to be invoked every "
-             "1 MINUTE by an external cron, ONLY during 09:00-09:10 WIB (see GAP_REBOUND_* constants "
-             "in engine/scanalert.py). No-ops outside that window, safe to schedule loosely.",
+             "SEPARATE from --scanalert (own state file, own cadence). Like --scanalert above, the "
+             "GCP production deployment runs this automatically via JobQueue (every 1 minute, "
+             "no-ops outside 09:00-09:10 WIB internally) -- this CLI flag is for manual/debug runs "
+             "or alternate deployments without JobQueue.",
     )
     return parser.parse_args(argv)
 

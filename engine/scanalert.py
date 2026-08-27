@@ -51,17 +51,27 @@ beda (lihat konstanta terkait utk detail riset):
     closing malam saat pertama diflag -- watchlist dari engine/nightly.py
     save_hc_gap_watch/load_hc_gap_watch_for_today.
 
-Dipanggil sbg one-shot CLI (`python bot.py --scanalert`), ikut pola
-`--eodscan` yg sudah ada — BUKAN in-process scheduler. Dimaksudkan di-invoke
-tiap 3 menit (MBSS v2, user request 2026-08-27 -- diturunkan dari 5 menit,
-riset audit timing 1m: drift harga selama nunggu polling di cadence 5 menit
-median 0.85%/p95 5.76%/max 15.32%, turun jadi median 0%/p95 4.68%/max 15.32%
-di 3 menit -- p99 drift dari 8.90%->8.18%, %kasus drift>=10% dari 0.9%->0.4%.
-1 menit HAMPIR nol drift tapi resiko operasional job overlap kalau 1x scan
-penuh universe makan waktu >1 menit, 3 menit dipilih sbg titik tengah) oleh
-cron eksternal (Termux crontab) 09:00-15:55 WIB hari bursa -- UBAH MANUAL
-baris crontab-nya dari `*/5 9-15 * * 1-5` ke `*/3 9-15 * * 1-5` (atau
-setara), file crontab TIDAK ada di repo ini. Tiap scan FETCH ULANG seluruh bar 1m hari ini (bukan incremental) dan
+Bisa dipanggil sbg one-shot CLI (`python bot.py --scanalert`, ikut pola
+`--eodscan` yg sudah ada). TAPI di deployment produksi SEBENARNYA (GCP,
+lihat engine/legacy_core.py build_app()) dipanggil lewat python-telegram-
+bot's JobQueue IN-PROCESS (app.job_queue.run_repeating(run_scanalert_job,
+interval=300, ...), run_scanalert_job cuma wrapper tipis ke
+run_scan_alert_once() di sini) -- BUKAN cron eksternal Termux spt yg
+DIASUMSIKAN sebelumnya di catatan ini (koreksi MBSS v2, user request
+2026-08-27 -- ditemukan dari log produksi riil yg menunjukkan apscheduler
+job "run_scanalert_job (trigger: interval[0:05:00])", bukan proses CLI
+terpisah). Interval 300s (5 menit) itu masih HARDCODED di legacy_core.py,
+BELUM diturunkan ke 3 menit spt riset audit timing merekomendasikan (lihat
+komentar itu tetap valid sbg alasan/riset -- cuma lokasi eksekusinya yg
+salah diasumsikan) -- PENTING sebelum diturunkan: log produksi yg sama jg
+menunjukkan APScheduler kadang SUDAH skip run krn "maximum number of
+running instances reached" di interval 5 menit (1x scan penuh kadang
+mendekati/melebihi 5 menit, makin berat sejak FCM/PRE-CONTINUATION/HC-gap-
+watch/BSJP-watch ditambahkan) -- turun ke 3 menit BISA memperparah overlap-
+skip ini kalau runtime per-siklus tidak ikut dipangkas, jadi ukur dulu
+runtime aktual sebelum mengubah interval, jangan cuma ganti angkanya.
+
+Tiap scan FETCH ULANG seluruh bar 1m hari ini (bukan incremental) dan
 re-derive semua deteksi dari nol — state file HANYA menyimpan flag
 "sudah dikirim/di-exclude", bukan progress harga inkremental. Ini sengaja:
 lebih sederhana & self-correcting (tidak ada state drift antar-proses)
@@ -73,6 +83,7 @@ import asyncio
 import datetime
 import json
 import os
+import time
 
 import pandas as pd
 import yfinance as yf
@@ -572,9 +583,32 @@ def _build_buy_power_surge_message(ticker: str, detection: dict, source: str, ex
     )
 
 
+# MBSS v2 (user request 2026-08-27 -- live case: "248 Failed downloads" SEMUA
+# ticker sekaligus gagal dlm 1x panggilan, pesan yfinance "possibly delisted"
+# menyesatkan -- itu bukan 248 saham genuinely delisted serentak, itu cara
+# yfinance melaporkan Yahoo memblokir/rate-limit SATU BATCH REQUEST secara
+# keseluruhan [pola umum di server cloud spt GCP, reputasi IP shared]. Beda
+# dari kegagalan PER-TICKER wajar [beberapa delisted, encer di antara
+# ratusan] -- kegagalan TOTAL serentak ini genuinely retriable. core.
+# yf_fetch_with_retry TIDAK dipakai di sini krn filter kata kuncinya ["too
+# many requests"/"rate limit"] tidak match pesan "possibly delisted" yg
+# muncul di kasus ini -- retry KHUSUS di sini: kalau hasil download KOSONG
+# TOTAL (bukan per-ticker), tunggu singkat lalu coba SEKALI lagi sebelum
+# menyerah (match filosofi max_retries=2 yg sudah ada, bukan retry tanpa
+# batas).
+_FETCH_1M_RETRY_DELAY_SEC = 15
+
+
 def _fetch_today_1m(tickers: list[str]):
     symbols = [t + ".JK" for t in tickers]
-    return yf.download(symbols, period="1d", interval="1m", group_by="ticker", threads=True, progress=False)
+    data = yf.download(symbols, period="1d", interval="1m", group_by="ticker", threads=True, progress=False)
+    if data.empty and tickers:
+        print(f"⚠️ Scan-alert: fetch bar 1m KOSONG TOTAL ({len(tickers)} ticker) -- kemungkinan Yahoo blokir batch sesaat, retry sekali dalam {_FETCH_1M_RETRY_DELAY_SEC}s...")
+        time.sleep(_FETCH_1M_RETRY_DELAY_SEC)
+        data = yf.download(symbols, period="1d", interval="1m", group_by="ticker", threads=True, progress=False)
+        if data.empty:
+            print("⚠️ Scan-alert: retry jg kosong total -- genuinely gagal siklus ini, coba lagi siklus berikutnya.")
+    return data
 
 
 def _compute_current_session_vwap(bars: pd.DataFrame) -> float | None:
