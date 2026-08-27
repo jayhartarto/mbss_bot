@@ -1279,10 +1279,16 @@ async def high_conviction_command(update, context):
     # criteria_met lebih tinggi dari fraction 0.70 lama.
     hc_market_regime = (backbone_result or {}).get("market_regime")
     candidates = [r for r in scored.values() if scoring_engine.is_high_conviction_regime_aware(r, hc_market_regime)]
-    if not candidates:
-        await core.safe_reply(update.message, "📋 Tidak ada saham HIGH CONVICTION di cache hari ini.")
-        return
 
+    # MBSS v2 BUGFIX (user request 2026-08-27 — live case: candidates
+    # Minervini kosong malam itu, TAPI early-return di sini SEBELUM ini
+    # sekaligus membungkam accumulation_candidates/continuation_candidates/
+    # validation_candidates di bawah -- tiga section itu computasinya
+    # SAMA SEKALI TIDAK bergantung pada Minervini punya kandidat atau tidak
+    # [independen sejak hc_tickers dihapus dari exclusion, lihat catatan di
+    # excluded_tickers]. "Tidak ada Minervini" TIDAK BOLEH berarti "tidak
+    # ada apa-apa di /hc" -- lanjut proses dgn candidates=[] (sort/top10
+    # aman kosong), jangan return dini.
     if sort_mode == "rr":
         # None-safe: ticker tanpa RR terhitung ditaruh PALING BELAKANG (bukan
         # dibuang) — pakai (punya_rr, nilai_rr) sebagai key gabungan supaya
@@ -1366,11 +1372,19 @@ async def high_conviction_command(update, context):
     # catatan di excluded_tickers, exclusion lama itu jadi kontraproduktif
     # begitu Minervini di-hide (ticker yg genuinely lolos kriteria
     # tervalidasi malah ikut terkubur, bukan tampil di section yang tepat).
-    lines = [
-        f"🔥 HIGH CONVICTION (Minervini) — {len(top10)} kandidat di-HIDE dari daftar ({len(candidates)} total lolos kriteria)\n"
-        "Win rate historis lane ini rendah (hit6~33%, backtest 2 tahun) — TIDAK ditampilkan sebagai rekomendasi beli langsung.\n"
-        "Dipantau live: kalau gap-up ≥3% BESOK dari closing malam ini, akan di-push alert terpisah (historis hit6~63%, n=51).\n"
-    ]
+    if candidates:
+        lines = [
+            f"🔥 HIGH CONVICTION (Minervini) — {len(top10)} kandidat di-HIDE dari daftar ({len(candidates)} total lolos kriteria)\n"
+            "Win rate historis lane ini rendah (hit6~33%, backtest 2 tahun) — TIDAK ditampilkan sebagai rekomendasi beli langsung.\n"
+            "Dipantau live: kalau gap-up ≥3% BESOK dari closing malam ini, akan di-push alert terpisah (historis hit6~63%, n=51).\n"
+        ]
+    else:
+        # MBSS v2 BUGFIX (user request 2026-08-27): 0 kandidat Minervini
+        # TIDAK BOLEH berarti section CONTINUATION/VALIDATION/AKUMULASI di
+        # bawah ikut disembunyikan (lihat catatan early-return yang dihapus
+        # di atas) -- pesan ini cuma bilang lane Minervini-nya kosong,
+        # bukan /hc keseluruhan kosong.
+        lines = ["🔥 HIGH CONVICTION (Minervini) — 0 kandidat lolos kriteria malam ini.\n"]
     if staleness_note:
         lines.insert(0, staleness_note)
 
