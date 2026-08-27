@@ -7584,14 +7584,27 @@ def build_app():
     # bukan lagi PythonAnywhere request-driven): morning brief / nightly scan
     # / opening dynamics MASIH manual via /testbrief, /screendaytrade,
     # /testopening (tidak diubah). Scan-alert intraday (Alert A/B) BEDA --
-    # butuh polling tiap 5 menit sepanjang jam bursa, jadi ini satu-satunya
-    # job otomatis lewat JobQueue. interval=300s (5 menit), first=10 (mulai
-    # 10 detik setelah proses hidup, bukan nunggu interval penuh pertama).
-    # Guard hari-bursa/jam-bursa ada DI DALAM run_scan_alert_once (dipakai
-    # bareng CLI --scanalert), bukan di sini -- job ini boleh terus jalan
-    # 24/7, dia sendiri yg no-op murah di luar jam bursa.
+    # butuh polling sepanjang jam bursa, jadi ini satu-satunya job otomatis
+    # lewat JobQueue. interval=180s (3 menit -- MBSS v2, user request
+    # 2026-08-27, DITURUNKAN dari 5 menit sesuai riset audit timing 1m:
+    # drift harga selama nunggu polling di cadence 5 menit median 0.85%/
+    # p95 5.76%/max 15.32%, turun jadi median 0%/p95 4.68% di 3 menit.
+    # CATATAN RISIKO yg sudah disampaikan sebelum keputusan ini: log
+    # produksi PERNAH menunjukkan APScheduler skip run scan-alert krn
+    # overlap ["maximum number of running instances reached"] SUDAH terjadi
+    # di interval 5 menit -- turun ke 3 menit bisa membuat overlap-skip
+    # lebih sering kalau runtime 1x scan penuh mendekati/melebihi 3 menit.
+    # User pilih tetap turunkan skrg -- PANTAU log utk "maximum number of
+    # running instances reached" setelah perubahan ini; kalau makin sering
+    # muncul, itu tanda runtime per-siklus perlu dipangkas duluan (mis.
+    # FCM/PRE-CONTINUATION watchlist compute yg jalan sekali/hari cukup
+    # berat), bukan sekadar naikkan interval lagi tanpa evaluasi.
+    # first=10 (mulai 10 detik setelah proses hidup, bukan nunggu interval
+    # penuh pertama). Guard hari-bursa/jam-bursa ada DI DALAM run_scan_
+    # alert_once (dipakai bareng CLI --scanalert), bukan di sini -- job ini
+    # boleh terus jalan 24/7, dia sendiri yg no-op murah di luar jam bursa.
     if app.job_queue is not None:
-        app.job_queue.run_repeating(run_scanalert_job, interval=300, first=10)
+        app.job_queue.run_repeating(run_scanalert_job, interval=180, first=10)
         # MBSS v2 (user request 2026-08-27 -- Alert REBOUND, engine/
         # scanalert.py run_gap_rebound_scan_once): job TERPISAH, interval
         # jauh lebih rapat (60s) krn median waktu fire = menit ke-0 sejak
