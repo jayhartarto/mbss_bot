@@ -1565,9 +1565,22 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     # memaksa turun saat oversold, karena oversold pada swing justru sering jadi
     # peluang entry, bukan sinyal buruk. Plafon 7.0 adalah pilihan awal, bisa
     # disesuaikan lagi setelah dicoba di data nyata.
+    #
+    # MBSS v2 (user request 2026-08-27 -- riset lanjutan dari temuan Danger
+    # Gate "RSI tinggi = conviction lebih tinggi": tervalidasi JUGA di
+    # populasi ticker yg SEDANG bertag salah satu lane MACD [FCM/FAST_
+    # RECOVERY/EARLY_RECOVERY/ABOVE_MOMENTUM/CONTINUATION/VALIDATION/
+    # MOMENTUM EXTENDED], 576 ISSI/2thn n=12.869: hit6 monoton naik dari
+    # 51.5% [RSI<50] sampai 67.3% [RSI>=90], stagnant_negative TERENDAH
+    # justru di RSI>=90 [26.0%] -- cap ini menghukum persis kandidat
+    # terbaik di populasi itu. Cap TETAP berlaku spt biasa di LUAR lane
+    # MACD (belum divalidasi di situ, jangan generalisasi tanpa data) --
+    # keputusan lane-active baru bisa diambil setelah macd_approach_tier
+    # dkk selesai dihitung (di bawah), jadi CAP DITUNDA (bukan dihapus) --
+    # lihat is_macd_lane_active & penerapannya menjelang final_score.
     RSI_OVERBOUGHT_MOMENTUM_CAP = 7.0
-    if current_rsi > p75:
-        momentum_score = min(momentum_score, RSI_OVERBOUGHT_MOMENTUM_CAP)
+    momentum_score_before_rsi_cap = momentum_score
+    rsi_overbought_flag = current_rsi > p75
 
     # --- 4. SENTIMENT SCORE (volume, adaptive per stock, sharpened by CMF + OBV divergence) ---
     # vol_ratio, current_cmf sudah dihitung lebih awal (dibutuhkan Momentum duluan) —
@@ -1592,10 +1605,18 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     # pressure (closes near daily lows)? Pulls the raw volume-ratio score toward
     # what the money flow direction actually shows, instead of treating all high
     # volume as automatically bullish.
+    cmf_adjustment_applied = 0.0
     if current_cmf is not None and not pd.isna(current_cmf):
         # current_cmf ranges roughly -1 to +1; nudge sentiment score toward it
         cmf_adjustment = current_cmf * 2.0  # e.g. CMF of -0.5 pulls score down ~1 point
         sentiment_score = max(1.0, min(10.0, sentiment_score + cmf_adjustment))
+        cmf_adjustment_applied = cmf_adjustment
+        # MBSS v2 (user request 2026-08-27 -- riset lanjutan): penalti/bonus CMF
+        # ini TIDAK backwards spt RSI, TAPI genuinely tidak prediktif DI DALAM
+        # populasi lane MACD (576 ISSI/2thn n=12.869: hit6 flat 47-52% di
+        # semua bucket CMF, tanpa arah jelas) -- di-UNDO utk ticker ber-lane
+        # MACD (lihat is_macd_lane_active menjelang final_score), TETAP
+        # berlaku spt biasa di luar itu.
     else:
         current_cmf = None
 
@@ -1930,6 +1951,54 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     # they're often one-off news/rumor-driven or thin-liquidity events that can reverse
     # sharply. Flag rather than let a huge ratio blindly max out the sentiment score.
     is_volume_spike_anomaly = vol_ratio > 3.0
+
+    # MBSS v2 (user request 2026-08-27): satu flag gabungan -- ticker ini
+    # SEDANG bertag salah satu dari 7 lane MACD tervalidasi (SDT pre-cross
+    # FAST_RECOVERY/EARLY_RECOVERY/ABOVE_MOMENTUM via macd_approach_tier,
+    # FCM, HC CONTINUATION/VALIDATION, HC MOMENTUM EXTENDED -- window
+    # diperlebar 6-40hr, lihat commands/scan.py MACD_EXTENDED_MAX_CROSS_
+    # DAYS_AGO). Definisi PERSIS meniru kriteria lane produksi masing2 --
+    # DIPAKAI CUMA utk 2 exception di atas (RSI cap momentum, CMF adjustment
+    # sentiment), TIDAK mengubah gate/tampilan lane itu sendiri. Konstanta
+    # duplikat dari commands/scan.py [MACD_GAP_SLOPE_Q4_THRESHOLD dkk] --
+    # sama pola dgn MACD_LANE_FAST_SLOPE3_MIN yg juga sudah duplikat inline
+    # di scoring.py vs scan.py, jaga tetap sinkron kalau salah satu diubah.
+    MACD_LANE_MOMENTUM_EXTENDED_GAP_SLOPE_Q4 = 0.3106
+    is_macd_fcm = bool(
+        macd_cross_direction == "bullish" and macd_cross_days_ago is not None
+        and macd_cross_days_ago <= 2 and macd_ret10_pre_cross_pct is not None
+        and macd_ret10_pre_cross_pct > 15.0
+    )
+    is_macd_continuation_or_validation = bool(
+        macd_cross_direction == "bullish" and macd_cross_days_ago is not None
+        and macd_cross_days_ago <= 5 and macd_gain_since_cross_pct is not None
+        and 3.0 <= macd_gain_since_cross_pct < 10.0
+    )
+    ret1d_now = stock_return_today if "stock_return_today" in locals() else None
+    is_macd_momentum_extended = bool(
+        macd_regime == "ABOVE_CENTERLINE" and macd_episode_had_volume_breakout
+        and macd_cross_days_ago is not None and 6 <= macd_cross_days_ago <= 40
+        and macd_gap_slope_3d is not None and macd_gap_slope_3d >= MACD_LANE_MOMENTUM_EXTENDED_GAP_SLOPE_Q4
+        and ret1d_now is not None and ret1d_now > 2.5
+    )
+    is_macd_lane_active = bool(
+        macd_approach_tier is not None or is_macd_fcm
+        or is_macd_continuation_or_validation or is_macd_momentum_extended
+    )
+
+    # Terapkan cap RSI yg SEBELUMNYA ditunda (lihat momentum_score_before_
+    # rsi_cap) -- skip cap kalau lane MACD aktif, terapkan spt biasa kalau
+    # tidak.
+    if rsi_overbought_flag and not is_macd_lane_active:
+        momentum_score = min(momentum_score_before_rsi_cap, RSI_OVERBOUGHT_MOMENTUM_CAP)
+    else:
+        momentum_score = momentum_score_before_rsi_cap
+
+    # Batalkan adjustment CMF yg SEBELUMNYA sudah diterapkan (lihat
+    # cmf_adjustment_applied) kalau lane MACD aktif -- re-clip [1,10] krn
+    # sentiment_score sudah menerima adjustment lain (BB/OBV) sejak itu.
+    if is_macd_lane_active and cmf_adjustment_applied:
+        sentiment_score = max(1.0, min(10.0, sentiment_score - cmf_adjustment_applied))
 
     # Direvisi user: dari Value 30/Momentum 40/Sentiment 30 jadi Value 25/Momentum
     # 45/Sentiment 30 — untuk swing pendek, Momentum harus mengalahkan Value

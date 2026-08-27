@@ -1569,8 +1569,17 @@ async def high_conviction_command(update, context):
     #     (n=646), stagnant_negative 44.27% (SEDIKIT lebih tinggi dari
     #     baseline ~39%, bukan makin aman -- upside conversion naik, bukan
     #     risiko turun, makanya WAJIB tag "risiko lebih tinggi").
-    MACD_EXTENDED_MIN_CROSS_DAYS_AGO = 6   # (5,10] eksklusif thd CONTINUATION/VALIDATION yg <=5
-    MACD_EXTENDED_MAX_CROSS_DAYS_AGO = 10
+    # MBSS v2 (user request 2026-08-27 -- riset generalisasi window, 576 ISSI/
+    # 2thn): window 6-10 hari LAMA diperlebar ke 6-40 -- gate lengkap
+    # [regime ABOVE + had_breakout_in_episode + gap_slope_3d>=Q4 + ret1d>2.5%]
+    # dites tanpa batas hari dulu, breakdown per rentang TIDAK menunjukkan
+    # dilusi kualitas sama sekali sampai 40 hari (n 6-10=431/hit6=69.4% vs
+    # n 6-40=1260/hit6=70.2%, malah SEDIKIT naik + stagnant_neg SEDIKIT
+    # turun 36.0%->32.6%) -- window lama membuang ~65% kandidat yg sama
+    # bagusnya secara percuma. >40 hari mulai n kecil & kualitas turun,
+    # tetap dijaga sbg batas atas.
+    MACD_EXTENDED_MIN_CROSS_DAYS_AGO = 6   # (5,40] eksklusif thd CONTINUATION/VALIDATION yg <=5
+    MACD_EXTENDED_MAX_CROSS_DAYS_AGO = 40
     MACD_GAP_SLOPE_Q4_THRESHOLD = 0.3106    # kuartil-75 gap_slope_3d dari populasi backtest, BUKAN cross-sectional live (sama konvensi lane MACD_LANE_FAST_SLOPE3_MIN dkk)
     MACD_MOMENTUM_RET1D_MIN = 2.5
     MACD_MOMENTUM_RET1D_HIGH_QUALITY = 5.0  # >= ini ditag kualitas tinggi di pesan
