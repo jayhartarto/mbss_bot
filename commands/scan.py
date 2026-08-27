@@ -380,7 +380,14 @@ async def screen_daytrade(update, context):
         # dari 2 angka yang SUDAH published (bukan tebakan baru).
         "FAST_RECOVERY": {"order": 0, "label": "FAST RECOVERY", "hit6": 62.35, "hit10": 38.82, "n": 85, "derived": False},
         "EARLY_RECOVERY": {"order": 1, "label": "EARLY RECOVERY", "hit6": 59.2, "hit10": 43.1, "n": 262, "derived": True},
-        "ABOVE_MOMENTUM": {"order": 2, "label": "ABOVE MOMENTUM", "hit6": 40.98, "hit10": 27.87, "n": 61, "derived": False},
+        # MBSS v2 (user request 2026-08-27 -- riset conditional filter dist_
+        # to_sma20>=12%, 576 ISSI/2thn): angka LAMA (40.98/27.87, n=61) DIGANTI
+        # -- sejak gate dist_to_sma20>=12% ditambahkan ke ABOVE_MOMENTUM di
+        # engine/scoring.py (macd_approach_tier), populasi produksi SEKARANG
+        # adalah subset yang lolos gate itu (hit6 65.3%/hit10 50.7%, n=300),
+        # BUKAN lagi populasi lama 41%/n=61 -- update ini WAJIB konsisten dgn
+        # kriteria produksi aktual, bukan cuma kosmetik.
+        "ABOVE_MOMENTUM": {"order": 2, "label": "ABOVE MOMENTUM", "hit6": 65.3, "hit10": 50.7, "n": 300, "derived": False},
     }
 
     def _bb_prob(ticker):
@@ -1465,6 +1472,13 @@ async def high_conviction_command(update, context):
     # hc_tickers DIHAPUS dari exclusion -- accumulation_candidates TETAP
     # exclude (konsep beda: pra-breakout vs post-breakout, exclusion itu
     # bukan soal duplikasi tampilan Minervini).
+    # MBSS v2 (user request 2026-08-27 -- riset conditional filter, 576
+    # ISSI/2thn): dist_to_sma20 ("price_vs_sma20_pct") >=12% adalah gate
+    # TERKUAT & KONSISTEN utk CONTINUATION/VALIDATION (sama field & ambang
+    # dgn ABOVE_MOMENTUM di engine/scoring.py, jaga sinkron). CONTINUATION
+    # 50.0%->60.2% (n=530), VALIDATION 40.5%->57.6% (n=340) -- pola monoton
+    # bersih, kombo RSI/ADX/volume tidak menambah apa pun di atasnya.
+    MACD_LANE_DIST_SMA20_MIN_PCT = 12.0
     excluded_tickers = {r["ticker"] for r in accumulation_candidates}
     continuation_candidates = [
         r for r in scored.values()
@@ -1474,12 +1488,17 @@ async def high_conviction_command(update, context):
         and r["macd_cross_days_ago"] <= MACD_CONTINUATION_MAX_CROSS_DAYS
         and r.get("macd_gain_since_cross_pct") is not None
         and 6.0 <= r["macd_gain_since_cross_pct"] < 10.0
+        and r.get("price_vs_sma20_pct") is not None
+        and r["price_vs_sma20_pct"] >= MACD_LANE_DIST_SMA20_MIN_PCT
     ]
     continuation_candidates.sort(key=lambda r: r["macd_gain_since_cross_pct"], reverse=True)
     continuation_candidates = continuation_candidates[:8]
 
     if continuation_candidates:
-        lines.append(f"\n📈 CONTINUATION — {len(continuation_candidates)} kandidat (sudah cross bullish & sudah hit +6%, masih potensi +10%)\n")
+        lines.append(
+            f"\n📈 CONTINUATION — {len(continuation_candidates)} kandidat (sudah cross bullish & sudah hit +6%, masih potensi +10%)\n"
+            f"WR historis (+dist_to_sma20≥12%): hit6~60.2% / hit10~46.4% (n=530, 576 ISSI/2thn)\n"
+        )
         for r in continuation_candidates:
             t = r.get("targets", {})
             bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
@@ -1520,12 +1539,17 @@ async def high_conviction_command(update, context):
         and r["macd_cross_days_ago"] <= MACD_CONTINUATION_MAX_CROSS_DAYS
         and r.get("macd_gain_since_cross_pct") is not None
         and 3.0 <= r["macd_gain_since_cross_pct"] < 6.0
+        and r.get("price_vs_sma20_pct") is not None
+        and r["price_vs_sma20_pct"] >= MACD_LANE_DIST_SMA20_MIN_PCT
     ]
     validation_candidates.sort(key=lambda r: r["macd_gain_since_cross_pct"], reverse=True)
     validation_candidates = validation_candidates[:8]
 
     if validation_candidates:
-        lines.append(f"\n📊 VALIDATION — {len(validation_candidates)} kandidat (sudah cross bullish, +3-6% sejak cross — hit rate lebih rendah dari CONTINUATION: ~40%/25% vs ~48%/34%)\n")
+        lines.append(
+            f"\n📊 VALIDATION — {len(validation_candidates)} kandidat (sudah cross bullish, +3-6% sejak cross)\n"
+            f"WR historis (+dist_to_sma20≥12%): hit6~57.6% / hit10~43.2% (n=340, 576 ISSI/2thn)\n"
+        )
         for r in validation_candidates:
             t = r.get("targets", {})
             bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None

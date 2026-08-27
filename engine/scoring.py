@@ -1862,6 +1862,21 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     MACD_LANE_FAST_SLOPE3_MIN = 0.653771
     MACD_LANE_NEAR_ABS_GAP_MAX = 0.308084
     MACD_LANE_ABOVE_SLOPE5_MIN = 0.148378
+    # MBSS v2 (user request 2026-08-27 -- riset ABOVE_MOMENTUM/CONTINUATION/
+    # VALIDATION winrate rendah, eksplorasi conditional filter): dist_to_
+    # sma20 (jarak harga ke SMA20, %) adalah filter TERKUAT & KONSISTEN di
+    # ketiga lane sekaligus, pola MONOTON BERSIH tanpa pembalikan arah (576
+    # ISSI/2thn) -- makin "extended" dari MA20, makin baik hit6/hit10, mirip
+    # pola RSI yg sudah ditemukan sebelumnya (jangan disamakan penyebabnya,
+    # tapi arahnya konsisten: "sudah lari" != "bahaya" di populasi momentum
+    # aktif ini). Kombinasi dgn RSI/ADX/volume TIDAK menambah apa pun di atas
+    # dist_to_sma20 sendirian -- jadi cukup SATU gate ini, bukan kombo rumit.
+    # Ambang >=12% dipilih user (n masih besar, winrate naik jelas dari
+    # >=10%): ABOVE_MOMENTUM 41.0%->65.3% (n=300), CONTINUATION 50.0%->60.2%
+    # (n=530), VALIDATION 40.5%->57.6% (n=340). Lihat penerapan sama di
+    # commands/scan.py CONTINUATION/VALIDATION (field yg sama, "price_vs_
+    # sma20_pct") -- jaga tetap sinkron kalau ambang ini diubah lagi.
+    MACD_LANE_DIST_SMA20_MIN_PCT = 12.0
     macd_narrowing_today = bool(macd_gap_change_1d is not None and macd_gap_change_1d > 0)
 
     if (
@@ -1877,6 +1892,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         macd_pre_cross and macd_narrowing_today
         and macd_regime == "ABOVE_CENTERLINE" and macd_gap_slope_5d is not None
         and macd_gap_slope_5d >= MACD_LANE_ABOVE_SLOPE5_MIN
+        and sma_dist_pct >= MACD_LANE_DIST_SMA20_MIN_PCT
     ):
         macd_approach_tier = "ABOVE_MOMENTUM"
 
