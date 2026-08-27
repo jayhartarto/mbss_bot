@@ -81,6 +81,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
              "no-ops outside 09:00-09:10 WIB internally) -- this CLI flag is for manual/debug runs "
              "or alternate deployments without JobQueue.",
     )
+    mode.add_argument(
+        "--conviction-sweep", dest="conviction_sweep", action="store_true",
+        help="One-shot conviction-sweep intraday scan (MBSS v2, user request 2026-08-27) -- monitors "
+             "the union of today's FCM/PRE-CROSS/CONTINUATION/VALIDATION/HC-gap-watch/BSJP-watch "
+             "lists for building momentum, then exits. SEPARATE from --scanalert (own state file, "
+             "own cadence). Like --scanalert above, the GCP production deployment runs this "
+             "automatically via JobQueue (every 15 minutes, no-ops outside 10:00-15:55 WIB "
+             "internally) -- this CLI flag is for manual/debug runs or alternate deployments "
+             "without JobQueue.",
+    )
     return parser.parse_args(argv)
 
 
@@ -179,6 +189,19 @@ def run_scanalert_rebound() -> None:
         sys.exit(1)
 
 
+def run_conviction_sweep() -> None:
+    """One-shot conviction-sweep intraday scan (CLI). Meant to run every 15
+    minutes via external cron, 10:00-15:55 WIB — see engine/scanalert.py."""
+    logger.info("Conviction-sweep starting (CLI mode) — momentum-building tier scan")
+    t0 = time.time()
+    try:
+        summary = asyncio.run(scanalert_engine.run_conviction_sweep_once())
+        logger.info("Conviction-sweep finished in %.1fs: %s", time.time() - t0, summary)
+    except Exception:
+        logger.exception("Conviction-sweep failed after %.1fs", time.time() - t0)
+        sys.exit(1)
+
+
 def run_polling() -> None:
     """Start the Telegram bot in polling mode, with startup retries in case
     network isn't ready yet (common right after launching on mobile)."""
@@ -222,6 +245,8 @@ def main(argv: list[str] | None = None) -> None:
         run_scanalert()
     elif args.scanalert_rebound:
         run_scanalert_rebound()
+    elif args.conviction_sweep:
+        run_conviction_sweep()
     else:
         run_polling()
 

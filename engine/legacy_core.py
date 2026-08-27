@@ -7496,6 +7496,21 @@ async def run_gap_rebound_scan_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ Gap-rebound scan job gagal: {e}")
 
 
+async def run_conviction_sweep_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH (MBSS v2, user request 2026-08-27 --
+    "conviction sweep": pantau union watchlist harian [FCM/PRE-CROSS/
+    CONTINUATION/VALIDATION/HC gap-watch/BSJP-watch] tiap 15 menit mulai
+    10:00, engine/scanalert.py run_conviction_sweep_once). State file
+    terpisah (conviction_sweep_state.json) -- no-op murah di luar jendela
+    10:00-15:55 WIB, aman didaftarkan interval rapat.
+    """
+    try:
+        await scanalert_engine.run_conviction_sweep_once()
+    except Exception as e:
+        print(f"⚠️ Conviction-sweep job gagal: {e}")
+
+
 async def send_startup_notice(app: Application):
     """Sent once automatically when the bot process starts — the person's cue that
     it's alive, and the one place the disclaimer appears instead of every message."""
@@ -7615,6 +7630,11 @@ def build_app():
         # BUKAN cron eksternal spt sempat diasumsikan saat REBOUND dibangun
         # dgn CLI --scanalert-rebound).
         app.job_queue.run_repeating(run_gap_rebound_scan_job, interval=60, first=10)
+        # MBSS v2 (user request 2026-08-27 -- conviction sweep, engine/
+        # scanalert.py run_conviction_sweep_once): interval=900s (15 menit,
+        # sesuai speks) -- job ini sendiri no-op murah di luar jendela
+        # 10:00-15:55 WIB, aman didaftarkan 24/7 spt job lain di atas.
+        app.job_queue.run_repeating(run_conviction_sweep_job, interval=900, first=10)
     else:
         print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
               "scan-alert intraday TIDAK akan jalan otomatis. Install dgn: "

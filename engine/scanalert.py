@@ -90,6 +90,7 @@ import yfinance as yf
 
 from engine import legacy_core as core
 from engine import broker as broker_engine
+from engine import lane_confidence
 
 STATE_FILE = os.path.join(core.PROJECT_ROOT, "scanalert_state.json")
 
@@ -157,6 +158,43 @@ GAP_REBOUND_MAX_HOLD_MIN = 20  # window realisasi TP1/TP2, sesuai riset "siku" d
 GAP_REBOUND_SCAN_WINDOW_START = datetime.time(9, 0)
 GAP_REBOUND_SCAN_WINDOW_END = datetime.time(9, 10)
 STATE_FILE_REBOUND = os.path.join(core.PROJECT_ROOT, "scanalert_rebound_state.json")
+
+# MBSS v2 (user request 2026-08-27 -- "conviction sweep": pantau UNION
+# watchlist harian [FCM, PRE-CROSS/CONTINUATION/VALIDATION, HC gap-watch,
+# BSJP-watch] tiap 15 menit mulai 10:00, fire alert bertingkat begitu
+# harga nunjukkin "momentum membangun" [2 checkpoint 15-menit naik
+# beruntun -- reset kalau ada checkpoint yg flat/turun]). Reuse watchlist
+# yg SUDAH dihitung run_scan_alert_once() (baca scanalert_state.json
+# langsung) -- HINDARI hitung ulang compute_factor_scoring utk SELURUH
+# universe dua kali sehari (mahal, network call per ticker). Jendela mulai
+# 10:00 (bukan 09:00) krn universe FCM/PRE/CONTINUATION baru lengkap
+# begitu run_scan_alert_once() sudah jalan minimal sekali pagi itu.
+CONVICTION_SWEEP_WINDOW_START = datetime.time(10, 0)
+CONVICTION_SWEEP_WINDOW_END = datetime.time(15, 55)
+CONVICTION_SWEEP_CONSECUTIVE_UP_REQUIRED = 2   # 2 checkpoint 15-menit naik beruntun = 1 tier baru
+CONVICTION_SWEEP_MAX_TIERS = 4                 # cap spam -- tier ke-4 butuh 8 checkpoint (~2 jam) naik terus
+CONVICTION_SWEEP_PULLBACK_EXCEPTION_ENABLED = True
+
+# MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker,
+# engine/lane_confidence.py): dict ini DIPANGKAS -- 5 entri lama (ABOVE_
+# MOMENTUM/FCM/CONTINUATION/VALIDATION/MOMENTUM_EXTENDED, ceiling per-lane
+# FLAT dari room_ladder_backtest.py) sudah TIDAK PERNAH tercapai lagi di
+# run_conviction_sweep_once -- kelima lane itu sekarang lewat lane_
+# confidence.compute_tp1_tp2 (per-TICKER, bukan per-lane), yang HASILNYA
+# (real tp_info ATAU None+ticker di-drop dari universe) selalu sudah
+# tersedia sebelum baris yg baca dict ini dieksekusi. Sisa 2 entri
+# (FAST_RECOVERY/EARLY_RECOVERY) TETAP relevan -- lane_confidence SENGAJA
+# tidak mendukungnya (angka resmi 62.35%/59.2% beda dari quick-recompute
+# sandbox sesi ini, belum diinvestigasi) -- begitu juga DEFAULT_PCT
+# (fallback HC_GAP_WATCH/BSJP_ARA/BSJP_SECOND_WAVE, lane di luar cakupan
+# lane_confidence sama sekali).
+CONVICTION_TP_CEILING_PCT = {
+    "FAST_RECOVERY": 8.0,
+    "EARLY_RECOVERY": 8.0,
+}
+CONVICTION_TP_CEILING_DEFAULT_PCT = 8.0  # HC_GAP_WATCH / BSJP_ARA / BSJP_SECOND_WAVE -- populasi gabungan ~49.4% di +8%, blm ada ceiling spesifik tervalidasi utk lane2 ini
+
+STATE_FILE_CONVICTION = os.path.join(core.PROJECT_ROOT, "conviction_sweep_state.json")
 
 
 # ── State & toggle persistence ────────────────────────────────────────────
@@ -907,7 +945,7 @@ def _conviction_tag(ticker: str, fcm_watchlist: dict, pre_continuation_watchlist
         return f"✅ ADA SETUP: FRESH CROSS MOMENTUM ({w['cross_days_ago']}hr lalu, pre-cross +{w['ret10_pre_cross_pct']:.0f}%)"
     if ticker in pre_continuation_watchlist:
         w = pre_continuation_watchlist[ticker]
-        lane_label = "PRE-CROSS (SDT)" if w["lane"] == "PRE" else "CONTINUATION (HC)"
+        lane_label = {"PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)"}.get(w["lane"], w["lane"])
         return f"✅ ADA SETUP: {lane_label}, {w['detail']}"
     if ticker in hc_gap_watch_list:
         return "✅ ADA SETUP: HC Minervini (diflag malam sebelumnya)"
@@ -1151,6 +1189,7 @@ def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
             watchlist[t] = {
                 "ret10_pre_cross_pct": r["macd_ret10_pre_cross_pct"],
                 "cross_days_ago": r["macd_cross_days_ago"],
+                "pct_b": r.get("pct_b"),  # MBSS v2 2026-08-27 -- fitur utk engine/lane_confidence.py (TP1/TP2 individual)
             }
     return watchlist
 
@@ -1158,13 +1197,23 @@ def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
 def _get_pre_continuation_watchlist(universe: list[str]) -> dict:
     """
     Reuse PERSIS kriteria PRE-CROSS lane (macd_approach_tier, engine/
-    scoring.py) dan CONTINUATION (macd_cross_direction bullish, cross<=5hr,
-    gain_since_cross 6-10%, commands/scan.py high_conviction_command) --
-    dihitung ulang di sini via compute_factor_scoring, pola SAMA dgn
-    _get_fresh_cross_momentum_watchlist di atas (independen dari command
-    lain sudah jalan atau belum hari ini).
+    scoring.py) dan CONTINUATION/VALIDATION (macd_cross_direction bullish,
+    cross<=5hr, gain_since_cross 6-10%/3-6%, commands/scan.py high_
+    conviction_command) -- dihitung ulang di sini via compute_factor_
+    scoring, pola SAMA dgn _get_fresh_cross_momentum_watchlist di atas
+    (independen dari command lain sudah jalan atau belum hari ini).
+
+    MBSS v2 (user request 2026-08-27, susun conviction sweep): CONTINUATION
+    & VALIDATION digate dist_to_sma20>=MACD_LANE_DIST_SMA20_MIN_PCT, PERSIS
+    commands/scan.py high_conviction_command -- sebelumnya CONTINUATION di
+    fungsi ini TIDAK pakai gate ini (drift dari /hc), dan VALIDATION sama
+    sekali tidak ditandai di sini (celah, /hc sudah pakai gate dist_to_
+    sma20 sejak SCORING_FORMULA_VERSION 3.17.21 tapi watchlist live intraday
+    ini belum ikut) -- disamakan sekarang supaya universe conviction sweep
+    match persis kriteria /hc malam sebelumnya.
     """
     from engine import scoring  # import lokal, sama alasan spt FCM watchlist di atas
+    MACD_LANE_DIST_SMA20_MIN_PCT = 12.0  # PERSIS commands/scan.py & engine/scoring.py -- jangan drift
     watchlist = {}
     for t in universe:
         try:
@@ -1175,16 +1224,32 @@ def _get_pre_continuation_watchlist(universe: list[str]) -> dict:
             continue
         tier = r.get("macd_approach_tier")
         if tier in ("FAST_RECOVERY", "EARLY_RECOVERY", "ABOVE_MOMENTUM"):
-            watchlist[t] = {"lane": "PRE", "detail": tier}
+            watchlist[t] = {
+                "lane": "PRE", "detail": tier,
+                "dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b"),
+            }
+            continue
+        sma_dist = r.get("price_vs_sma20_pct")
+        if sma_dist is None or sma_dist < MACD_LANE_DIST_SMA20_MIN_PCT:
             continue
         gain = r.get("macd_gain_since_cross_pct")
         if (
-            r.get("macd_cross_direction") == "bullish"
-            and r.get("macd_cross_days_ago") is not None
-            and r["macd_cross_days_ago"] <= MACD_CONTINUATION_MAX_CROSS_DAYS_AGO
-            and gain is not None and 6.0 <= gain < 10.0
+            r.get("macd_cross_direction") != "bullish"
+            or r.get("macd_cross_days_ago") is None
+            or r["macd_cross_days_ago"] > MACD_CONTINUATION_MAX_CROSS_DAYS_AGO
+            or gain is None
         ):
-            watchlist[t] = {"lane": "CONTINUATION", "detail": f"+{gain:.1f}% sejak cross"}
+            continue
+        if 6.0 <= gain < 10.0:
+            watchlist[t] = {
+                "lane": "CONTINUATION", "detail": f"+{gain:.1f}% sejak cross",
+                "dist_to_sma20": sma_dist, "pct_b": r.get("pct_b"),
+            }
+        elif 3.0 <= gain < 6.0:
+            watchlist[t] = {
+                "lane": "VALIDATION", "detail": f"+{gain:.1f}% sejak cross",
+                "dist_to_sma20": sma_dist, "pct_b": r.get("pct_b"),
+            }
     return watchlist
 
 
@@ -1210,14 +1275,34 @@ def _detect_h1_strong_body(bars: pd.DataFrame) -> dict | None:
     return {"gain_pct": gain_pct, "current_price": current_price, "day_open": day_open, "vol_so_far": vol_so_far}
 
 
+# MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker,
+# gantikan WR rata-rata grup statis, dipakai di SEMUA alert scan-alert yg
+# bertag lane MACD): watchlist_entry["tp_info"] (kalau ada, diisi sekali/
+# hari di run_scan_alert_once/run_conviction_sweep_once via engine/
+# lane_confidence.py) -> baris "TP1 xxx (WR yy%)"/"(Tercapai!)". None kalau
+# lane tak didukung (FAST_RECOVERY/EARLY_RECOVERY) atau ref_price tak ada
+# -- caller HARUS fallback ke teks statis lama di kasus itu.
+def _tp_lines_suffix(watchlist_entry: dict, current_price: float | None) -> str:
+    tp_info = watchlist_entry.get("tp_info")
+    if not tp_info:
+        return ""
+    return "\n" + "\n".join(lane_confidence.format_tp_lines(tp_info, current_price=current_price))
+
+
 def _build_h1_strong_body_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
     lane, detail = watchlist_entry["lane"], watchlist_entry["detail"]
-    lane_label = "PRE-CROSS (SDT)" if lane == "PRE" else "CONTINUATION (HC)"
+    lane_label = {"PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)"}.get(lane, lane)
+    tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
+    if tp_suffix:
+        hist_line = f"Confidence individual (dist_to_sma20/pct_b ticker ini, bukan rata-rata grup):{tp_suffix}"
+    else:
+        hist_label = {"PRE": "PRE hit6~50-56%", "CONTINUATION": "CONTINUATION hit6~60.2%", "VALIDATION": "VALIDATION hit6~57.6%"}.get(lane, "-")
+        hist_line = f"Historis: {hist_label} (+dist_to_sma20>=12%) — verifikasi live sebelum entry."
     return (
         f"📈 {ticker} MENJELANG CLOSING — {lane_label}, {detail}\n"
         f"Body hijau +{detection['gain_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f}\n"
         f"Volume hari ini: {detection['vol_so_far']:,.0f} lembar (informational, bukan gate)\n"
-        f"Historis: {'PRE hit6~50-56%' if lane == 'PRE' else 'CONTINUATION hit6~49-58%'} — verifikasi live sebelum entry."
+        f"{hist_line}"
     )
 
 
@@ -1269,11 +1354,13 @@ def _detect_pullback_entry(bars: pd.DataFrame) -> dict | None:
 
 def _build_pullback_entry_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
     zone_label = "🎯 SEHAT (dlm p25)" if detection["zone"] == "healthy" else "⚠️ HATI-HATI (mendekati batas p10)"
+    tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
     return (
         f"🔥 {ticker} PULLBACK ENTRY — FRESH CROSS MOMENTUM ({watchlist_entry['cross_days_ago']} hari lalu, "
         f"momentum pre-cross +{watchlist_entry['ret10_pre_cross_pct']:.1f}%)\n"
         f"Pullback {detection['pullback_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f} | {zone_label}\n"
         f"Tervalidasi: median MAE trade menang -4.0%, p25 -9.0%, p10 -14.3% (n=635) — bukan sinyal beli otomatis, verifikasi live."
+        f"{tp_suffix}"
     )
 
 
@@ -1306,11 +1393,13 @@ def _detect_confirmation_entry(bars: pd.DataFrame) -> dict | None:
 
 
 def _build_confirmation_entry_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
+    tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
     return (
         f"🚀 {ticker} CONFIRMATION ENTRY — FRESH CROSS MOMENTUM ({watchlist_entry['cross_days_ago']} hari lalu, "
         f"momentum pre-cross +{watchlist_entry['ret10_pre_cross_pct']:.1f}%)\n"
         f"Lanjut naik +{detection['gain_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f}\n"
         f"Sinyal konfirmasi (bukan pullback) — historis kombinasi momentum+konfirmasi hari sama hit6~69% (konteks episode extended, ekstrapolasi ke FCM) — verifikasi live."
+        f"{tp_suffix}"
     )
 
 
@@ -1335,12 +1424,14 @@ def _detect_open_buy(bars: pd.DataFrame) -> dict | None:
 
 
 def _build_open_buy_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
+    tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
     return (
         f"🔔 {ticker} BELI DI OPEN — FRESH CROSS MOMENTUM ({watchlist_entry['cross_days_ago']} hari lalu, "
         f"momentum pre-cross +{watchlist_entry['ret10_pre_cross_pct']:.1f}%)\n"
         f"Open {detection['day_open']:,.0f} — skrg {detection['current_price']:,.0f} ({detection['gain_from_open']:+.1f}% dari open)\n"
         f"Riset: entry di open lebih baik dari nunggu konfirmasi/pullback (hit rate flat s/d +3% chase, tapi fill-rate anjlok di atas +2%) — "
         f"JANGAN KEJAR kalau sudah naik >{FCM_OPEN_BUY_CHASE_CAP_PCT:.0f}% dari open ini."
+        f"{tp_suffix}"
     )
 
 
@@ -1405,6 +1496,56 @@ async def run_scan_alert_once() -> dict:
         print(f"✅ PRE-CROSS/CONTINUATION watchlist hari ini: {len(pre_continuation_watchlist)} ticker.")
     else:
         pre_continuation_watchlist = state["pre_continuation_watchlist"]
+
+    # MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker):
+    # hitung SEKALI/hari (bukan tiap siklus 3 menit), simpan tp_info di tiap
+    # entry watchlist -- lane FAST_RECOVERY/EARLY_RECOVERY (belum didukung
+    # lane_confidence) & ticker tanpa ref_price dibiarkan tanpa tp_info,
+    # caller fallback ke teks statis lama. Suppression: ticker FCM/ABOVE_
+    # MOMENTUM/CONTINUATION/VALIDATION dgn confidence individual <50% di
+    # level terdekat DIBUANG dari watchlist (tidak diproduksi jadi sinyal
+    # sama sekali) -- bukan cuma disembunyikan angkanya.
+    if state.get("lane_tp_computed") is not True:
+        lane_tickers_needing_ref = [
+            t for t in (set(fcm_watchlist) | set(pre_continuation_watchlist)) if t not in daily_ref
+        ]
+        extra_ref = await asyncio.to_thread(_fetch_conviction_ref, lane_tickers_needing_ref) if lane_tickers_needing_ref else {}
+
+        def _lane_ref_price(t):
+            if t in daily_ref:
+                return daily_ref[t]["prev_close"]
+            return extra_ref.get(t)
+
+        n_suppressed = 0
+        for t, entry in list(fcm_watchlist.items()):
+            ref_price = _lane_ref_price(t)
+            tp_info = lane_confidence.compute_tp1_tp2(
+                "FCM", {"ret10_pre_cross_pct": entry.get("ret10_pre_cross_pct"), "pct_b": entry.get("pct_b")}, ref_price
+            ) if ref_price else None
+            if tp_info is None:
+                del fcm_watchlist[t]
+                n_suppressed += 1
+            else:
+                entry["tp_info"] = tp_info
+
+        for t, entry in list(pre_continuation_watchlist.items()):
+            lane_tag = entry["detail"] if entry["lane"] == "PRE" else entry["lane"]
+            if lane_tag not in lane_confidence.SUPPORTED_LANES:
+                continue  # FAST_RECOVERY/EARLY_RECOVERY -- tetap tanpa tp_info, fallback statis
+            ref_price = _lane_ref_price(t)
+            tp_info = lane_confidence.compute_tp1_tp2(
+                lane_tag, {"dist_to_sma20": entry.get("dist_to_sma20"), "pct_b": entry.get("pct_b")}, ref_price
+            ) if ref_price else None
+            if tp_info is None:
+                del pre_continuation_watchlist[t]
+                n_suppressed += 1
+            else:
+                entry["tp_info"] = tp_info
+
+        state["fresh_cross_momentum_watchlist"] = fcm_watchlist
+        state["pre_continuation_watchlist"] = pre_continuation_watchlist
+        state["lane_tp_computed"] = True
+        print(f"✅ Confidence individual (TP1/TP2) dihitung -- {n_suppressed} ticker di-suppress (WR<50% di level terdekat).")
 
     if state.get("hc_gap_watch_list") is None:
         import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
@@ -1676,4 +1817,301 @@ async def run_scan_alert_once() -> dict:
           f"{summary['hc_gap_sent']} HC gap-watch, "
           f"{summary['buy_power_sent']} BSJP buy-power surge, "
           f"{summary['excluded_no_room']} di-exclude (no room).")
+    return summary
+
+
+# ── CONVICTION SWEEP (mulai 10:00, tiap 15 menit, tiered) ───────────────────
+# Lihat catatan konstanta CONVICTION_SWEEP_*/CONVICTION_TP_CEILING_PCT di atas.
+
+def _load_conviction_state() -> dict:
+    if not os.path.exists(STATE_FILE_CONVICTION):
+        return {}
+    try:
+        with open(STATE_FILE_CONVICTION) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_conviction_state(state: dict):
+    with open(STATE_FILE_CONVICTION, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def _ensure_conviction_daily_reset(state: dict) -> dict:
+    today = _today_str()
+    if state.get("trading_day_marker") != today:
+        return {"trading_day_marker": today, "universe": None, "tickers": {}}
+    return state
+
+
+def _fetch_conviction_ref(tickers: list[str]) -> dict:
+    """
+    Closing kemarin (basis "estimasi max TP"), TANPA filter harga 60-600 --
+    sama alasan dgn _fetch_volume_ref: universe conviction sweep (FCM/PRE/
+    CONTINUATION/VALIDATION/HC-gap-watch/BSJP-watch) tidak dibatasi band
+    harga scanalert biasa.
+    """
+    symbols = [t + ".JK" for t in tickers]
+    data = yf.download(symbols, period="10d", interval="1d", group_by="ticker", threads=True, progress=False)
+    ref = {}
+    for t in tickers:
+        sym = t + ".JK"
+        try:
+            d = data[sym].dropna(how="all")
+        except Exception:
+            continue
+        closes = d["Close"].astype(float).dropna()
+        if len(closes) < 1:
+            continue
+        ref[t] = float(closes.iloc[-1])
+    return ref
+
+
+def _build_conviction_universe_tags(main_state: dict) -> dict:
+    """
+    ticker -> {"tag": lane, "features": {...}}. features kosong ({}) utk
+    lane yg tak didukung engine/lane_confidence.py (HC_GAP_WATCH/BSJP_ARA/
+    BSJP_SECOND_WAVE/FAST_RECOVERY/EARLY_RECOVERY) -- caller fallback ke
+    CONVICTION_TP_CEILING_PCT utk lane2 itu. Baca watchlist yg SUDAH di-
+    cache run_scan_alert_once() di scanalert_state.json (lihat catatan
+    CONVICTION_SWEEP_WINDOW_START) -- fallback hitung sendiri kalau state
+    utama belum ada (mis. proses baru mulai persis jam 10:00, sebelum
+    --scanalert utama sempat jalan).
+    """
+    tags = {}
+    fcm = main_state.get("fresh_cross_momentum_watchlist")
+    pre_cont = main_state.get("pre_continuation_watchlist")
+    if fcm is None or pre_cont is None:
+        alert_universe = _get_alert_universe()
+        if fcm is None:
+            fcm = _get_fresh_cross_momentum_watchlist(alert_universe)
+        if pre_cont is None:
+            pre_cont = _get_pre_continuation_watchlist(alert_universe)
+
+    for t, w in (fcm or {}).items():
+        tags[t] = {"tag": "FCM", "features": {"ret10_pre_cross_pct": w.get("ret10_pre_cross_pct"), "pct_b": w.get("pct_b")}}
+    for t, w in (pre_cont or {}).items():
+        if t in tags:
+            continue
+        lane_tag = w["detail"] if w["lane"] == "PRE" else w["lane"]  # PRE -> FAST_RECOVERY/EARLY_RECOVERY/ABOVE_MOMENTUM
+        tags[t] = {"tag": lane_tag, "features": {"dist_to_sma20": w.get("dist_to_sma20"), "pct_b": w.get("pct_b")}}
+
+    import engine.nightly as nightly_engine
+    hc_gap_watch_list = main_state.get("hc_gap_watch_list")
+    if hc_gap_watch_list is None:
+        hc_watch_rows = nightly_engine.load_hc_gap_watch_for_today()
+        hc_gap_watch_list = {row["ticker"]: row["prev_close"] for row in hc_watch_rows if row.get("prev_close")}
+    for t in hc_gap_watch_list:
+        if t not in tags:
+            tags[t] = {"tag": "HC_GAP_WATCH", "features": {}}
+
+    bsjp_watch_lookup = main_state.get("bsjp_watch_lookup")
+    if bsjp_watch_lookup is None:
+        bsjp_ara_rows = nightly_engine.load_bsjp_ara_candidates()
+        second_wave_rows = nightly_engine.load_second_wave_watch_for_today()
+        bsjp_watch_lookup = {}
+        for row in bsjp_ara_rows:
+            if row.get("ticker"):
+                bsjp_watch_lookup[row["ticker"]] = {"source": "bsjp_ara"}
+        for row in second_wave_rows:
+            if row.get("ticker") and row["ticker"] not in bsjp_watch_lookup:
+                bsjp_watch_lookup[row["ticker"]] = {"source": "second_wave"}
+    for t, w in bsjp_watch_lookup.items():
+        if t not in tags:
+            tags[t] = {"tag": "BSJP_ARA" if w.get("source") == "bsjp_ara" else "BSJP_SECOND_WAVE", "features": {}}
+
+    return tags
+
+
+def _process_conviction_ticker(t_state: dict, current_price: float, ref_price: float, ceiling_price: float) -> list[tuple]:
+    """
+    Update t_state IN-PLACE, return list of event tuple ("tier", n) atau
+    ("pullback_exception",) yg BARU terjadi sejak checkpoint sebelumnya.
+
+    Logic: bandingkan current_price vs checkpoint 15-menit SEBELUMNYA
+    (bukan vs harga pertama hari itu) -- "naik" = beruntun genuine staircase,
+    bukan cuma "masih di atas pagi ini". consecutive_up reset ke 0 begitu
+    ada checkpoint yg TIDAK naik (flat/turun) -- sesuai speks "kalau side,
+    fading, falldown, tidak perlu fire".
+
+    Suppression: begitu current_price >= ceiling_price, tier BARU dihentikan
+    (room sudah exhausted relatif ceiling backtest) -- KECUALI pola pullback-
+    lalu-swing-naik-lagi terdeteksi (current < session_high [pernah pullback
+    dari titik tertinggi hari itu] DAN current > ref_price [masih di atas
+    closing kemarin] DAN sedang on a fresh up-streak) -- fire SEKALI sbg
+    "pullback re-entry", echo filosofi REBOUND.
+    """
+    events = []
+    t_state["session_high"] = max(t_state.get("session_high", current_price), current_price)
+    last_checkpoint = t_state.get("last_checkpoint_price")
+
+    if last_checkpoint is None:
+        t_state["last_checkpoint_price"] = current_price
+        t_state["consecutive_up"] = 0
+        return events
+
+    if current_price > last_checkpoint:
+        t_state["consecutive_up"] = t_state.get("consecutive_up", 0) + 1
+    else:
+        t_state["consecutive_up"] = 0
+    t_state["last_checkpoint_price"] = current_price
+
+    beyond_ceiling = current_price >= ceiling_price
+    consecutive_up = t_state["consecutive_up"]
+
+    if not beyond_ceiling:
+        tiers_fired = t_state.get("tiers_fired", 0)
+        potential_tier = consecutive_up // CONVICTION_SWEEP_CONSECUTIVE_UP_REQUIRED
+        if potential_tier > tiers_fired and potential_tier <= CONVICTION_SWEEP_MAX_TIERS:
+            t_state["tiers_fired"] = potential_tier
+            events.append(("tier", potential_tier))
+    elif (
+        CONVICTION_SWEEP_PULLBACK_EXCEPTION_ENABLED
+        and not t_state.get("pullback_exception_fired")
+        and consecutive_up >= CONVICTION_SWEEP_CONSECUTIVE_UP_REQUIRED
+        and t_state["session_high"] > current_price
+        and current_price > ref_price
+    ):
+        t_state["pullback_exception_fired"] = True
+        events.append(("pullback_exception",))
+
+    return events
+
+
+def _build_conviction_sweep_message(ticker: str, tag: str, tier: int, current_price: float,
+                                     ref_price: float, ceiling_price: float, ceiling_pct: float,
+                                     tp_info: dict | None = None) -> str:
+    gain_from_ref = (current_price - ref_price) / ref_price * 100
+    if tp_info:
+        tp_line = "\n".join(lane_confidence.format_tp_lines(tp_info, current_price=current_price))
+    else:
+        tp_line = (f"Estimasi max TP {ceiling_price:,.0f} (+{ceiling_pct:.0f}%, ceiling backtest hit-rate>=50% dlm 5 hari bursa "
+                   f"sejak kualifikasi lane -- BUKAN janji hari ini juga)")
+    return (
+        f"📈 {ticker} MOMENTUM MEMBANGUN (tier {tier}) — {tag}\n"
+        f"Harga {current_price:,.0f} ({gain_from_ref:+.1f}% dari closing kemarin {ref_price:,.0f})\n"
+        f"{tp_line}\n"
+        f"Radar: 2x checkpoint 15-menit naik beruntun -- pola live, verifikasi sebelum entry."
+    )
+
+
+def _build_conviction_pullback_exception_message(ticker: str, tag: str, current_price: float,
+                                                   ref_price: float, ceiling_price: float,
+                                                   tp_info: dict | None = None) -> str:
+    gain_from_ref = (current_price - ref_price) / ref_price * 100
+    label = f"{tp_info['tp2_price']:,.0f}" if tp_info and "tp2_price" in tp_info else f"{ceiling_price:,.0f}"
+    return (
+        f"🔁 {ticker} PULLBACK RE-ENTRY (sudah lewat estimasi ceiling {label}) — {tag}\n"
+        f"Harga {current_price:,.0f} ({gain_from_ref:+.1f}% dari closing kemarin {ref_price:,.0f}), sempat pullback dari puncak hari ini lalu naik lagi\n"
+        f"⚠️ Room ke target awal sudah tipis/habis — ini radar reaktivasi, bukan target baru, verifikasi live."
+    )
+
+
+async def run_conviction_sweep_once() -> dict:
+    """
+    One-shot CLI (`python bot.py --conviction-sweep`), dipanggil via
+    JobQueue tiap 15 menit (lihat build_app() engine/legacy_core.py).
+    State terpisah dari scanalert_state.json (hindari race condition
+    baca-ubah-tulis bareng --scanalert utama yg jalan tiap 3 menit).
+    """
+    summary = {"skipped_reason": None, "scanned": 0, "tier_alerts_sent": 0, "pullback_exception_sent": 0}
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (CONVICTION_SWEEP_WINDOW_START <= now_wib.time() <= CONVICTION_SWEEP_WINDOW_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+    if await asyncio.to_thread(core.is_idx_market_holiday_today):
+        summary["skipped_reason"] = "holiday"
+        return summary
+    if not is_scan_alert_enabled():
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+
+    state = _ensure_conviction_daily_reset(_load_conviction_state())
+
+    if state.get("universe") is None:
+        main_state = _load_state()
+        universe_tags = await asyncio.to_thread(_build_conviction_universe_tags, main_state)
+        if not universe_tags:
+            state["universe"] = {}
+            _save_conviction_state(state)
+            summary["skipped_reason"] = "no_universe"
+            return summary
+        ref_prices = await asyncio.to_thread(_fetch_conviction_ref, list(universe_tags.keys()))
+        universe = {}
+        n_suppressed = 0
+        for t, info in universe_tags.items():
+            ref_price = ref_prices.get(t)
+            if not ref_price:
+                continue
+            tag = info["tag"]
+            tp_info = None
+            if tag in lane_confidence.SUPPORTED_LANES:
+                tp_info = lane_confidence.compute_tp1_tp2(tag, info["features"], ref_price)
+                if tp_info is None:
+                    n_suppressed += 1
+                    continue  # confidence individual <50% di level terdekat -- tidak diproduksi jadi sinyal
+            universe[t] = {"tag": tag, "ref_price": ref_price, "tp_info": tp_info}
+        state["universe"] = universe
+        print(f"✅ Conviction-sweep universe hari ini: {len(universe)} ticker ({n_suppressed} di-suppress, WR<50%).")
+    else:
+        universe = state["universe"]
+
+    if not universe:
+        summary["skipped_reason"] = "no_universe"
+        _save_conviction_state(state)
+        return summary
+
+    data = await asyncio.to_thread(_fetch_today_1m, list(universe.keys()))
+    tickers_state = state.setdefault("tickers", {})
+    bot = None
+    if core.TELEGRAM_BOT_TOKEN:
+        import telegram
+        bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
+
+    for t, info in universe.items():
+        tag = info["tag"]
+        ref_price = info["ref_price"]
+        tp_info = info.get("tp_info")
+        if not ref_price:
+            continue
+        sym = t + ".JK"
+        try:
+            bars = data[sym].dropna(how="all").sort_index()
+        except Exception:
+            continue
+        if bars.empty:
+            continue
+        summary["scanned"] += 1
+        current_price = float(bars["Close"].astype(float).iloc[-1])
+
+        t_state = tickers_state.setdefault(t, {})
+        if tp_info:
+            ceiling_pct = tp_info.get("tp2_level", tp_info["tp1_level"])
+            ceiling_price = tp_info.get("tp2_price", tp_info["tp1_price"])
+        else:
+            ceiling_pct = CONVICTION_TP_CEILING_PCT.get(tag, CONVICTION_TP_CEILING_DEFAULT_PCT)
+            ceiling_price = ref_price * (1 + ceiling_pct / 100.0)
+
+        events = _process_conviction_ticker(t_state, current_price, ref_price, ceiling_price)
+        for event in events:
+            kind = event[0]
+            if kind == "tier":
+                tier = event[1]
+                msg = _build_conviction_sweep_message(t, tag, tier, current_price, ref_price, ceiling_price, ceiling_pct, tp_info=tp_info)
+                summary["tier_alerts_sent"] += 1
+            else:
+                msg = _build_conviction_pullback_exception_message(t, tag, current_price, ref_price, ceiling_price, tp_info=tp_info)
+                summary["pullback_exception_sent"] += 1
+            if bot is not None:
+                await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+            else:
+                print(f"[NO TELEGRAM TOKEN] {msg}")
+
+    _save_conviction_state(state)
+    print(f"✅ Conviction-sweep selesai: {summary['scanned']} ticker dicek, "
+          f"{summary['tier_alerts_sent']} tier alert, {summary['pullback_exception_sent']} pullback-exception.")
     return summary

@@ -33,6 +33,7 @@ import engine.scoring as scoring_engine
 import engine.market as market_engine
 import engine.nightly as nightly_engine
 import engine.backbone as backbone_engine
+import engine.lane_confidence as lane_confidence
 
 
 async def check_stock(update, context):
@@ -307,6 +308,12 @@ async def check_stock(update, context):
     # RECOVERY/ABOVE_MOMENTUM. Angka Hit+6%/+10% D5 sama dgn yg ditampilkan
     # di /screendaytrade (LANE_INFO, commands/scan.py) -- EARLY_RECOVERY
     # derivasi (BELOW_FAST3 - BELOW_NEAR_FAST3), lihat catatan di sana.
+    # MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker,
+    # boleh muncul di /check juga): ref_price = closing hari ini (harga
+    # yg dipakai compute_factor_scoring, konsisten dgn konvensi TP seluruh
+    # sesi -- BUKAN harga live terpisah). current_price=None (sama spt EOD)
+    # -- /check TIDAK live-intraday-tracking, selalu tampilkan WR%.
+    _ref_price = result.get("price")
     macd_approach_tier = result.get("macd_approach_tier")
     if macd_approach_tier == "FAST_RECOVERY":
         bb_line += (
@@ -319,10 +326,89 @@ async def check_stock(update, context):
             f"historis Hit+6% ~59% / Hit+10% ~43% dlm 5 hari (derivasi, n≈262)"
         )
     elif macd_approach_tier == "ABOVE_MOMENTUM":
-        bb_line += (
-            f"\n📐 MACD ABOVE MOMENTUM (BACKTEST): pre-cross, ABOVE centerline, momentum menguat — "
-            f"historis Hit+6% ~41% / Hit+10% ~28% dlm 5 hari (n=61)"
-        )
+        _tp = lane_confidence.compute_tp1_tp2(
+            "ABOVE_MOMENTUM", {"dist_to_sma20": result.get("price_vs_sma20_pct"), "pct_b": result.get("pct_b")}, _ref_price
+        ) if _ref_price else None
+        if _tp:
+            _tp_lines = "\n   ".join(lane_confidence.format_tp_lines(_tp))
+            bb_line += (
+                f"\n📐 MACD ABOVE MOMENTUM (BACKTEST): pre-cross, ABOVE centerline, momentum menguat — "
+                f"confidence individual (dist_to_sma20/pct_b ticker ini, +gate dist_to_sma20≥12%):\n   {_tp_lines}"
+            )
+        else:
+            bb_line += (
+                f"\n📐 MACD ABOVE MOMENTUM (BACKTEST): pre-cross, ABOVE centerline, momentum menguat, TAPI confidence individual "
+                f"<50% di level terdekat (+6%) — historis grup hit6~65.3%/hit10~50.7% (n=300, +gate dist_to_sma20≥12%) TIDAK berlaku ke ticker ini spesifik, hati-hati"
+            )
+    # MBSS v2 (user request 2026-08-27 -- FCM/CONTINUATION/VALIDATION/
+    # MOMENTUM_EXTENDED juga boleh muncul di /check, PERSIS kriteria
+    # commands/scan.py -- jangan drift). macd_approach_tier di atas HANYA
+    # utk pre-cross (mutually exclusive thd 4 lane post-cross ini by
+    # construction), tapi FCM & CONTINUATION/VALIDATION bisa overlap satu
+    # sama lain (cross<=2hr DAN gain 6-10% sekaligus bisa terjadi) --
+    # prioritas: FCM ("act hari ini") > CONTINUATION > VALIDATION >
+    # MOMENTUM_EXTENDED ("episode lebih lama"), tampilkan SATU saja spy
+    # tidak numpuk, sama pola dgn _conviction_tag scanalert.py.
+    _MACD_LANE_DIST_SMA20_MIN_PCT = 12.0
+    _macd_ret10_pre = result.get("macd_ret10_pre_cross_pct")
+    _macd_gain_since_cross = result.get("macd_gain_since_cross_pct")
+    _macd_cross_days_ago = result.get("macd_cross_days_ago")
+    _macd_dist_sma20 = result.get("price_vs_sma20_pct")
+    if (
+        result.get("macd_cross_direction") == "bullish" and _macd_cross_days_ago is not None
+        and _macd_cross_days_ago <= 2 and _macd_ret10_pre is not None and _macd_ret10_pre > 15.0
+    ):
+        _tp = lane_confidence.compute_tp1_tp2(
+            "FCM", {"ret10_pre_cross_pct": _macd_ret10_pre, "pct_b": result.get("pct_b")}, _ref_price
+        ) if _ref_price else None
+        bb_line += f"\n🔥 FRESH CROSS MOMENTUM (BACKTEST): cross {_macd_cross_days_ago} hari lalu, momentum pre-cross +{_macd_ret10_pre:.1f}% (10 hari)"
+        if _tp:
+            bb_line += "\n   " + "\n   ".join(lane_confidence.format_tp_lines(_tp))
+        else:
+            bb_line += " — confidence individual <50% di level terdekat, hati-hati (bukan sinyal kuat meski masuk kriteria grup)"
+    elif (
+        result.get("macd_cross_direction") == "bullish" and _macd_cross_days_ago is not None and _macd_cross_days_ago <= 5
+        and _macd_gain_since_cross is not None and _macd_dist_sma20 is not None and _macd_dist_sma20 >= _MACD_LANE_DIST_SMA20_MIN_PCT
+        and 6.0 <= _macd_gain_since_cross < 10.0
+    ):
+        _tp = lane_confidence.compute_tp1_tp2(
+            "CONTINUATION", {"dist_to_sma20": _macd_dist_sma20, "pct_b": result.get("pct_b")}, _ref_price
+        ) if _ref_price else None
+        bb_line += f"\n📈 CONTINUATION (BACKTEST): cross {_macd_cross_days_ago} hari lalu, +{_macd_gain_since_cross:.1f}% sejak cross (target +10%)"
+        if _tp:
+            bb_line += "\n   " + "\n   ".join(lane_confidence.format_tp_lines(_tp))
+        else:
+            bb_line += " — confidence individual <50% di level terdekat, hati-hati (bukan sinyal kuat meski masuk kriteria grup)"
+    elif (
+        result.get("macd_cross_direction") == "bullish" and _macd_cross_days_ago is not None and _macd_cross_days_ago <= 5
+        and _macd_gain_since_cross is not None and _macd_dist_sma20 is not None and _macd_dist_sma20 >= _MACD_LANE_DIST_SMA20_MIN_PCT
+        and 3.0 <= _macd_gain_since_cross < 6.0
+    ):
+        _tp = lane_confidence.compute_tp1_tp2(
+            "VALIDATION", {"dist_to_sma20": _macd_dist_sma20, "pct_b": result.get("pct_b")}, _ref_price
+        ) if _ref_price else None
+        bb_line += f"\n📊 VALIDATION (BACKTEST): cross {_macd_cross_days_ago} hari lalu, +{_macd_gain_since_cross:.1f}% sejak cross"
+        if _tp:
+            bb_line += "\n   " + "\n   ".join(lane_confidence.format_tp_lines(_tp))
+        else:
+            bb_line += " — confidence individual <50% di level terdekat, hati-hati (bukan sinyal kuat meski masuk kriteria grup)"
+    elif (
+        result.get("macd_regime") == "ABOVE_CENTERLINE" and result.get("macd_episode_had_volume_breakout") is True
+        and _macd_cross_days_ago is not None and 6 <= _macd_cross_days_ago <= 40
+        and result.get("macd_gap_slope_3d") is not None and result["macd_gap_slope_3d"] >= 0.3106
+        and result.get("ret_1d_pct") is not None and result["ret_1d_pct"] > 2.5
+    ):
+        _tp = lane_confidence.compute_tp1_tp2(
+            "MOMENTUM_EXTENDED",
+            {"dist_to_sma20": _macd_dist_sma20, "pct_b": result.get("pct_b"), "gap_slope_3d": result.get("macd_gap_slope_3d")},
+            _ref_price,
+        ) if _ref_price else None
+        bb_line += f"\n🚀 MOMENTUM EXTENDED (BACKTEST): episode {_macd_cross_days_ago} hari, MACD akselerasi + harga konfirmasi hari ini (+{result['ret_1d_pct']:.1f}%)"
+        if _tp:
+            bb_line += "\n   " + "\n   ".join(lane_confidence.format_tp_lines(_tp))
+        else:
+            bb_line += " — confidence individual <50% di level terdekat, hati-hati (bukan sinyal kuat meski masuk kriteria grup)"
+
     # MBSS v2 (user request — HC-appropriate, BEDA dari macd_approach_tier di
     # atas yang untuk SDT pre-breakout): konfirmasi centerline cross yang
     # SUDAH terjadi HARI INI, backtest research_macd_centerline_breakout_

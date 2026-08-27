@@ -51,6 +51,23 @@ import engine.broker as broker_engine
 import engine.scoring as scoring_engine
 import engine.market as market_engine
 import engine.backbone as backbone_engine
+import engine.lane_confidence as lane_confidence
+
+
+# MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker, boleh
+# muncul di EOD juga untuk semua setup MACD): dipakai FRESH CROSS MOMENTUM/
+# ABOVE MOMENTUM (/screendaytrade) & CONTINUATION/VALIDATION/MOMENTUM
+# EXTENDED (/hc). current_price=None (belum ada harga live malam hari) --
+# selalu tampil WR%, TIDAK PERNAH "Tercapai!" di konteks EOD ini. Return ""
+# kalau lane tak didukung (FAST_RECOVERY/EARLY_RECOVERY) atau fitur/ref_price
+# tak lengkap -- caller fallback ke teks WR historis statis lama.
+def _lane_tp_suffix(lane_tag: str, features: dict, ref_price) -> str:
+    if lane_tag not in lane_confidence.SUPPORTED_LANES or not ref_price:
+        return ""
+    tp_info = lane_confidence.compute_tp1_tp2(lane_tag, features, ref_price)
+    if tp_info is None:
+        return ""
+    return "\n   " + "\n   ".join(lane_confidence.format_tp_lines(tp_info, current_price=None))
 
 
 # ---------------------------------------------------------------------
@@ -394,7 +411,20 @@ async def screen_daytrade(update, context):
         bb = (backbone_result or {}).get("all_scored", {}).get(ticker) if backbone_result else None
         return bb.get("probability_score", 0) if bb else 0
 
-    lane_candidates = [r for r in results if r.get("macd_approach_tier") in LANE_INFO]
+    # MBSS v2 (user request 2026-08-27 -- confidence individual per ticker,
+    # suppress kalau <50% di level terdekat): HANYA berlaku utk ABOVE_MOMENTUM
+    # (satu2nya lane didukung lane_confidence di antara 3 lane pra-breakout
+    # ini) -- FAST_RECOVERY/EARLY_RECOVERY TIDAK disaring (belum didukung).
+    def _above_momentum_suppressed(r):
+        if r.get("macd_approach_tier") != "ABOVE_MOMENTUM":
+            return False
+        ref_price = r.get("price")
+        if not ref_price:
+            return False
+        features = {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}
+        return lane_confidence.compute_tp1_tp2("ABOVE_MOMENTUM", features, ref_price) is None
+
+    lane_candidates = [r for r in results if r.get("macd_approach_tier") in LANE_INFO and not _above_momentum_suppressed(r)]
     lane_candidates.sort(key=lambda r: (LANE_INFO[r["macd_approach_tier"]]["order"], -_bb_prob(r["ticker"])))
 
     if sort_mode:
@@ -429,8 +459,14 @@ async def screen_daytrade(update, context):
 
         n_note = " (derivasi 2 angka published)" if info["derived"] else ""
         rr_str = f"{rr_now:.2f}" if rr_now is not None else "-"
+        tp_suffix = _lane_tp_suffix(lane, {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}, price)
+        header = (
+            f"{bullet}{r['ticker']} — {info['label']} (confidence individual di bawah){tp_suffix}"
+            if tp_suffix else
+            f"{bullet}{r['ticker']} — {info['label']} (potensi +6% ~{info['hit6']:.0f}% / +10% ~{info['hit10']:.0f}% dlm 5 hari, n={info['n']}{n_note})"
+        )
         return (
-            f"{bullet}{r['ticker']} — {info['label']} (potensi +6% ~{info['hit6']:.0f}% / +10% ~{info['hit10']:.0f}% dlm 5 hari, n={info['n']}{n_note})\n"
+            f"{header}\n"
             f"   Entry ~{price} (ref: open sesi berikutnya) | TP {tp1} (+6%) | SL {sl} | RR {rr_str}"
             f"{''.join(extra)}{market_engine.format_sector_tag(r.get('sector'))}"
         )
@@ -504,6 +540,13 @@ async def screen_daytrade(update, context):
         and r["macd_ret10_pre_cross_pct"] > MACD_FRESH_CROSS_MOMENTUM_RET10_PRE_MIN
     ]
     fresh_cross_momentum_candidates.sort(key=lambda r: r["macd_ret10_pre_cross_pct"], reverse=True)
+    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat)
+    fresh_cross_momentum_candidates = [
+        r for r in fresh_cross_momentum_candidates
+        if r.get("price") and lane_confidence.compute_tp1_tp2(
+            "FCM", {"ret10_pre_cross_pct": r.get("macd_ret10_pre_cross_pct"), "pct_b": r.get("pct_b")}, r["price"]
+        ) is not None
+    ]
     fresh_cross_momentum_candidates = fresh_cross_momentum_candidates[:8]
 
     lines.append("\n🔥 FRESH CROSS MOMENTUM — cross MACD hari ini/kemarin, momentum kuat sebelum cross (>15% dlm 10 hari) — sinyal 'act hari ini'\n")
@@ -519,9 +562,10 @@ async def screen_daytrade(update, context):
             danger_note = ""
             if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= DANGER_WARNING_THRESHOLD:
                 danger_note = f"\n   ⚠️ Danger score {bb_info['predicted_danger']:.0f}/100 (di atas rata-rata malam ini)"
+            tp_suffix = _lane_tp_suffix("FCM", {"ret10_pre_cross_pct": r.get("macd_ret10_pre_cross_pct"), "pct_b": r.get("pct_b")}, price)
             lines.append(
-                f"  {r['ticker']} — cross {r.get('macd_cross_days_ago', 0)} hari lalu, momentum pre-cross +{r['macd_ret10_pre_cross_pct']:.1f}% (10 hari)\n"
-                f"   Entry ~{price} (ref: open sesi berikutnya) | TP {tp1} (+6%) | SL {sl}"
+                f"  {r['ticker']} — cross {r.get('macd_cross_days_ago', 0)} hari lalu, momentum pre-cross +{r['macd_ret10_pre_cross_pct']:.1f}% (10 hari){tp_suffix}\n"
+                f"   Entry ~{price} (ref: open sesi berikutnya) | SL {sl}"
                 f"{danger_note}{market_engine.format_sector_tag(r.get('sector'))}"
             )
         await asyncio.to_thread(
@@ -1492,12 +1536,19 @@ async def high_conviction_command(update, context):
         and r["price_vs_sma20_pct"] >= MACD_LANE_DIST_SMA20_MIN_PCT
     ]
     continuation_candidates.sort(key=lambda r: r["macd_gain_since_cross_pct"], reverse=True)
+    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat)
+    continuation_candidates = [
+        r for r in continuation_candidates
+        if r.get("price") and lane_confidence.compute_tp1_tp2(
+            "CONTINUATION", {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}, r["price"]
+        ) is not None
+    ]
     continuation_candidates = continuation_candidates[:8]
 
     if continuation_candidates:
         lines.append(
             f"\n📈 CONTINUATION — {len(continuation_candidates)} kandidat (sudah cross bullish & sudah hit +6%, masih potensi +10%)\n"
-            f"WR historis (+dist_to_sma20≥12%): hit6~60.2% / hit10~46.4% (n=530, 576 ISSI/2thn)\n"
+            f"Confidence individual per ticker (dist_to_sma20/pct_b masing2, bukan rata-rata grup):\n"
         )
         for r in continuation_candidates:
             t = r.get("targets", {})
@@ -1505,10 +1556,11 @@ async def high_conviction_command(update, context):
             danger_note = ""
             if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= 50:
                 danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
+            tp_suffix = _lane_tp_suffix("CONTINUATION", {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}, r.get("price"))
             lines.append(
                 f"• {r['ticker']} — cross {r.get('macd_cross_days_ago', '-')} hari lalu, "
-                f"+{r['macd_gain_since_cross_pct']:.1f}% sejak cross (target +10%) | "
-                f"Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
+                f"+{r['macd_gain_since_cross_pct']:.1f}% sejak cross (target +10%){tp_suffix}\n"
+                f"   Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
                 f"{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
             )
         try:
@@ -1543,12 +1595,19 @@ async def high_conviction_command(update, context):
         and r["price_vs_sma20_pct"] >= MACD_LANE_DIST_SMA20_MIN_PCT
     ]
     validation_candidates.sort(key=lambda r: r["macd_gain_since_cross_pct"], reverse=True)
+    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat)
+    validation_candidates = [
+        r for r in validation_candidates
+        if r.get("price") and lane_confidence.compute_tp1_tp2(
+            "VALIDATION", {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}, r["price"]
+        ) is not None
+    ]
     validation_candidates = validation_candidates[:8]
 
     if validation_candidates:
         lines.append(
             f"\n📊 VALIDATION — {len(validation_candidates)} kandidat (sudah cross bullish, +3-6% sejak cross)\n"
-            f"WR historis (+dist_to_sma20≥12%): hit6~57.6% / hit10~43.2% (n=340, 576 ISSI/2thn)\n"
+            f"Confidence individual per ticker (dist_to_sma20/pct_b masing2, bukan rata-rata grup):\n"
         )
         for r in validation_candidates:
             t = r.get("targets", {})
@@ -1556,10 +1615,11 @@ async def high_conviction_command(update, context):
             danger_note = ""
             if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= 50:
                 danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
+            tp_suffix = _lane_tp_suffix("VALIDATION", {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}, r.get("price"))
             lines.append(
                 f"• {r['ticker']} — cross {r.get('macd_cross_days_ago', '-')} hari lalu, "
-                f"+{r['macd_gain_since_cross_pct']:.1f}% sejak cross | "
-                f"Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
+                f"+{r['macd_gain_since_cross_pct']:.1f}% sejak cross{tp_suffix}\n"
+                f"   Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
                 f"{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
             )
         try:
@@ -1628,6 +1688,15 @@ async def high_conviction_command(update, context):
         and r.get("ret_1d_pct") is not None and r["ret_1d_pct"] > MACD_MOMENTUM_RET1D_MIN
     ]
     momentum_extended_candidates.sort(key=lambda r: r["ret_1d_pct"], reverse=True)
+    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat)
+    momentum_extended_candidates = [
+        r for r in momentum_extended_candidates
+        if r.get("price") and lane_confidence.compute_tp1_tp2(
+            "MOMENTUM_EXTENDED",
+            {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b"), "gap_slope_3d": r.get("macd_gap_slope_3d")},
+            r["price"],
+        ) is not None
+    ]
     momentum_extended_candidates = momentum_extended_candidates[:8]
 
     if momentum_extended_candidates:
@@ -1639,10 +1708,15 @@ async def high_conviction_command(update, context):
             if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= 50:
                 danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
             quality_tag = " 🥇kualitas tinggi" if r["ret_1d_pct"] >= MACD_MOMENTUM_RET1D_HIGH_QUALITY else ""
+            tp_suffix = _lane_tp_suffix(
+                "MOMENTUM_EXTENDED",
+                {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b"), "gap_slope_3d": r.get("macd_gap_slope_3d")},
+                r.get("price"),
+            )
             lines.append(
                 f"• {r['ticker']} — cross {r.get('macd_cross_days_ago', '-')} hari lalu, "
-                f"+{r['ret_1d_pct']:.1f}% hari ini{quality_tag} | "
-                f"Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
+                f"+{r['ret_1d_pct']:.1f}% hari ini{quality_tag}{tp_suffix}\n"
+                f"   Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
                 f"{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
             )
         try:

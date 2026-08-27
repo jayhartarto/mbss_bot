@@ -1655,6 +1655,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     bb_signal_note = None
     bollinger_squeeze = None
     bollinger_bandwidth_percentile = None
+    percent_b = None
     if len(close_prices) >= 20:
         _bb_sma20_series = close_prices.rolling(20).mean()
         _bb_std20_series = close_prices.rolling(20).std()
@@ -2182,6 +2183,7 @@ def compute_factor_scoring(ticker, include_quote_check=True):
         "is_weak_trend": is_weak_trend,
         "bollinger_squeeze": bollinger_squeeze,  # True kalau bandwidth BB di persentil <=20 histori ~6bln — sinyal PRA-breakout, lihat catatan di atas
         "bollinger_bandwidth_percentile": bollinger_bandwidth_percentile,
+        "pct_b": round(float(percent_b), 4) if percent_b is not None else None,  # posisi relatif ke band (0=lower,1=upper) -- MBSS v2 2026-08-27, dipakai engine/lane_confidence.py
         "bb_signal_note": bb_signal_note,  # near_lower_band_bounce_candidate / near_upper_band_caution / band_walking_up / band_walking_down / None
         "macd_cross_days_ago": macd_cross_days_ago,
         "macd_cross_direction": macd_cross_direction,

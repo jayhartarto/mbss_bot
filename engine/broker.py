@@ -563,6 +563,55 @@ def fetch_zapi_stock_summary(ticker: str, date_str: str = None) -> dict:
         return None
 
 
+# MBSS v2 (user request 2026-08-27 -- riset foreign-flow, shift dari
+# smart-money whitelist-sweep RapidAPI yg cuma 11 hari data terkumpul):
+# endpoint DEDIKASI finance:idx/foreign-flow (BEDA dari fetch_zapi_stock_
+# summary's finance:idx/stock-summary di atas) -- `code` OPSIONAL (kosong =
+# market-wide, sampai `length` baris diurutkan `sort`), jadi SATU call per
+# tanggal bisa cakup s/d 200 ticker sekaligus, BUKAN per-ticker spt yg
+# sempat diasumsikan. Backfill 60 hari historis via loop tanggal (1 call =
+# 1 hari = 1 kuota Zapi, TERLEPAS dari berapa banyak ticker dikembalikan)
+# jauh lebih murah drpd smart-money whitelist sweep's per-broker approach.
+# BELUM PERNAH dipanggil live -- verifikasi bentuk respons dgn 1 call murah
+# dulu sebelum backfill penuh (kuota Zapi SHARED dgn semua endpoint lain
+# di file ini, 600/bulan).
+def fetch_zapi_foreign_flow(date_str: str = None, code: str = None, sort: str = "net",
+                             length: int = 200, start: int = 0) -> dict | None:
+    """
+    GET /finance:idx/foreign-flow. `date` = YYYYMMDD atau YYYY-MM-DD
+    (default hari bursa terakhir kalau None). `code` kosong = seluruh
+    bursa. `sort`: net (asing beli bersih terbesar, default) | buy | sell |
+    code. `length` maks 200 (default 200 di sini, BEDA dari default API 50
+    -- kita hampir selalu mau cakupan penuh utk riset). Return payload
+    mentah (belum di-reshape, bentuk persis belum dikonfirmasi live) atau
+    None kalau gagal/kuota habis.
+    """
+    if not core._zapi_quota_check_and_increment("foreign-flow"):
+        return None
+    try:
+        params = {"sort": sort, "length": length, "start": start}
+        if date_str:
+            params["date"] = date_str
+        if code:
+            params["code"] = code
+        resp = requests.get(
+            f"{core.ZAPI_BASE_URL}/finance:idx/foreign-flow",
+            params=params, headers=core.ZAPI_HEADERS, timeout=20,
+        )
+        if resp.status_code == 429:
+            print(f"⚠️ Zapi rate-limited (429) untuk foreign-flow (date={date_str}) — backing off.")
+            return None
+        if resp.status_code != 200:
+            print(f"⚠️ Zapi foreign-flow (date={date_str}): HTTP {resp.status_code}")
+            return None
+        return resp.json()
+    except Exception as e:
+        print(f"⚠️ Zapi foreign-flow fetch gagal (date={date_str}): {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)  # respect confirmed 1 req/sec limit -- sama pola fetch_zapi_orderbook/running_trades, penting utk loop backfill multi-hari
+
+
 def fetch_zapi_orderbook(ticker: str) -> dict | None:
     """
     MBSS v2 (user request, real find — endpoint order book ASLI dari Zapi,
