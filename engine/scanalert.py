@@ -1516,31 +1516,32 @@ async def run_scan_alert_once() -> dict:
                 return daily_ref[t]["prev_close"]
             return extra_ref.get(t)
 
+        # BUGFIX (user report 2026-08-27, live case VERN -- lihat catatan
+        # panjang di lane_confidence.py's should_suppress): should_suppress
+        # (BUKAN `compute_tp1_tp2(...) is None`) -- fitur tak lengkap TIDAK
+        # BOLEH dianggap sama dgn "gagal ambang WR", atau SEMUA ticker bisa
+        # ke-suppress begitu ada 1 fitur baru yg belum terisi di sumber data.
         n_suppressed = 0
         for t, entry in list(fcm_watchlist.items()):
             ref_price = _lane_ref_price(t)
-            tp_info = lane_confidence.compute_tp1_tp2(
-                "FCM", {"ret10_pre_cross_pct": entry.get("ret10_pre_cross_pct"), "pct_b": entry.get("pct_b")}, ref_price
-            ) if ref_price else None
-            if tp_info is None:
+            features = {"ret10_pre_cross_pct": entry.get("ret10_pre_cross_pct"), "pct_b": entry.get("pct_b")}
+            if lane_confidence.should_suppress("FCM", features, ref_price):
                 del fcm_watchlist[t]
                 n_suppressed += 1
-            else:
-                entry["tp_info"] = tp_info
+            elif ref_price:
+                entry["tp_info"] = lane_confidence.compute_tp1_tp2("FCM", features, ref_price)
 
         for t, entry in list(pre_continuation_watchlist.items()):
             lane_tag = entry["detail"] if entry["lane"] == "PRE" else entry["lane"]
             if lane_tag not in lane_confidence.SUPPORTED_LANES:
                 continue  # FAST_RECOVERY/EARLY_RECOVERY -- tetap tanpa tp_info, fallback statis
             ref_price = _lane_ref_price(t)
-            tp_info = lane_confidence.compute_tp1_tp2(
-                lane_tag, {"dist_to_sma20": entry.get("dist_to_sma20"), "pct_b": entry.get("pct_b")}, ref_price
-            ) if ref_price else None
-            if tp_info is None:
+            features = {"dist_to_sma20": entry.get("dist_to_sma20"), "pct_b": entry.get("pct_b")}
+            if lane_confidence.should_suppress(lane_tag, features, ref_price):
                 del pre_continuation_watchlist[t]
                 n_suppressed += 1
-            else:
-                entry["tp_info"] = tp_info
+            elif ref_price:
+                entry["tp_info"] = lane_confidence.compute_tp1_tp2(lane_tag, features, ref_price)
 
         state["fresh_cross_momentum_watchlist"] = fcm_watchlist
         state["pre_continuation_watchlist"] = pre_continuation_watchlist
@@ -2049,11 +2050,13 @@ async def run_conviction_sweep_once() -> dict:
                 continue
             tag = info["tag"]
             tp_info = None
+            # BUGFIX (user report 2026-08-27, live case VERN): should_suppress,
+            # BUKAN `compute_tp1_tp2(...) is None` -- lihat catatan lane_confidence.py
+            if lane_confidence.should_suppress(tag, info["features"], ref_price):
+                n_suppressed += 1
+                continue  # confidence individual <50% di level terdekat -- tidak diproduksi jadi sinyal
             if tag in lane_confidence.SUPPORTED_LANES:
                 tp_info = lane_confidence.compute_tp1_tp2(tag, info["features"], ref_price)
-                if tp_info is None:
-                    n_suppressed += 1
-                    continue  # confidence individual <50% di level terdekat -- tidak diproduksi jadi sinyal
             universe[t] = {"tag": tag, "ref_price": ref_price, "tp_info": tp_info}
         state["universe"] = universe
         print(f"✅ Conviction-sweep universe hari ini: {len(universe)} ticker ({n_suppressed} di-suppress, WR<50%).")

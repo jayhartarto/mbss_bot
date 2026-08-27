@@ -89,6 +89,38 @@ def compute_level_probabilities(lane: str, features: dict) -> dict[int, float | 
     return {lvl: _predict_prob(lane, lvl, features) for lvl in LEVELS}
 
 
+# MBSS v2 (BUGFIX, user report 2026-08-27 -- live case VERN: setelah push,
+# /screendaytrade & /hc jadi KOSONG TOTAL, padahal /check masih benar
+# menampilkan VERN FCM). Root cause: caller (commands/scan.py, engine/
+# scanalert.py) menyamakan compute_tp1_tp2()==None dgn "suppress ticker
+# ini" -- tapi None JUGA muncul kalau fitur (pct_b dkk) TIDAK LENGKAP,
+# bukan cuma kalau WR genuinely <50%. Cache /eodscan semalam dihitung
+# SEBELUM pct_b ditambahkan ke compute_factor_scoring, jadi SEMUA ticker
+# di cache itu punya pct_b=None -> compute_tp1_tp2 selalu None -> SEMUA
+# ticker ke-suppress, bukan cuma yg genuinely lemah. /check tidak kena
+# krn dia compute_factor_scoring LIVE (fresh, kode baru, pct_b terisi).
+# should_suppress() memisahkan dua kasus ini secara eksplisit -- caller
+# WAJIB pakai INI utk keputusan suppress, BUKAN `compute_tp1_tp2(...) is
+# None` (konsisten "missing=neutral, never penalize" convention codebase
+# ini, lihat skill finance). compute_tp1_tp2 sendiri TETAP bisa return
+# None utk fitur tak lengkap -- itu OK utk PENAMPILAN (fallback ke teks
+# statis lama), tapi TIDAK BOLEH dipakai utk keputusan suppress lagi.
+def should_suppress(lane: str, features: dict, ref_price: float | None) -> bool:
+    """
+    True HANYA kalau lane didukung, ref_price ada, fitur LENGKAP, DAN WR
+    individual di level terdekat (+6%) < TP2_WR_FLOOR_PCT -- genuinely
+    gagal ambang. False (JANGAN suppress) kalau data tidak lengkap/lane
+    tak didukung -- caller fallback ke perilaku lama (tampil dgn teks WR
+    grup statis), bukan hilang begitu saja.
+    """
+    if lane not in SUPPORTED_LANES or not ref_price:
+        return False
+    nearest = _predict_prob(lane, LEVELS[0], features)
+    if nearest is None:  # fitur tak lengkap -- TIDAK BISA dihitung, beda dari "gagal ambang"
+        return False
+    return nearest * 100 < TP2_WR_FLOOR_PCT
+
+
 def compute_tp1_tp2(lane: str, features: dict, ref_price: float) -> dict | None:
     """
     ref_price = closing HARI ticker qualify untuk lane ini (basis TP,
@@ -96,7 +128,11 @@ def compute_tp1_tp2(lane: str, features: dict, ref_price: float) -> dict | None:
     live/hari ini).
 
     Return None kalau: lane tidak didukung, fitur tidak lengkap, ATAU
-    level terdekat (+6%) individual WR < TP2_WR_FLOOR_PCT -- SUPPRESSION,
+    level terdekat (+6%) individual WR < TP2_WR_FLOOR_PCT. PENTING: caller
+    TIDAK BOLEH pakai `is None` di sini utk keputusan SUPPRESS (lihat
+    should_suppress() di atas) -- fungsi ini murni utk PENAMPILAN, None di
+    sini artinya "tidak ada angka utk ditampilkan", bukan otomatis "ticker
+    ini harus disembunyikan".
     caller TIDAK BOLEH memproduksi sinyal sama sekali untuk kasus ini
     (bukan tampil dengan angka di bawah floor).
     """

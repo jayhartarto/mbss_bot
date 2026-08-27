@@ -422,7 +422,7 @@ async def screen_daytrade(update, context):
         if not ref_price:
             return False
         features = {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}
-        return lane_confidence.compute_tp1_tp2("ABOVE_MOMENTUM", features, ref_price) is None
+        return lane_confidence.should_suppress("ABOVE_MOMENTUM", features, ref_price)
 
     lane_candidates = [r for r in results if r.get("macd_approach_tier") in LANE_INFO and not _above_momentum_suppressed(r)]
     lane_candidates.sort(key=lambda r: (LANE_INFO[r["macd_approach_tier"]]["order"], -_bb_prob(r["ticker"])))
@@ -540,12 +540,14 @@ async def screen_daytrade(update, context):
         and r["macd_ret10_pre_cross_pct"] > MACD_FRESH_CROSS_MOMENTUM_RET10_PRE_MIN
     ]
     fresh_cross_momentum_candidates.sort(key=lambda r: r["macd_ret10_pre_cross_pct"], reverse=True)
-    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat)
+    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat.
+    # BUGFIX sore ini: should_suppress (BUKAN compute_tp1_tp2(...) is None) -- fitur tak lengkap
+    # [mis. cache /eodscan lama sebelum pct_b ada] harus TIDAK disuppress, lihat lane_confidence.py)
     fresh_cross_momentum_candidates = [
         r for r in fresh_cross_momentum_candidates
-        if r.get("price") and lane_confidence.compute_tp1_tp2(
-            "FCM", {"ret10_pre_cross_pct": r.get("macd_ret10_pre_cross_pct"), "pct_b": r.get("pct_b")}, r["price"]
-        ) is not None
+        if not lane_confidence.should_suppress(
+            "FCM", {"ret10_pre_cross_pct": r.get("macd_ret10_pre_cross_pct"), "pct_b": r.get("pct_b")}, r.get("price")
+        )
     ]
     fresh_cross_momentum_candidates = fresh_cross_momentum_candidates[:8]
 
@@ -563,9 +565,10 @@ async def screen_daytrade(update, context):
             if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= DANGER_WARNING_THRESHOLD:
                 danger_note = f"\n   ⚠️ Danger score {bb_info['predicted_danger']:.0f}/100 (di atas rata-rata malam ini)"
             tp_suffix = _lane_tp_suffix("FCM", {"ret10_pre_cross_pct": r.get("macd_ret10_pre_cross_pct"), "pct_b": r.get("pct_b")}, price)
+            tp_entry_note = "" if tp_suffix else " | TP {} (+6%)".format(tp1)  # fallback -- confidence individual tak bisa dihitung (fitur tak lengkap), bukan disuppress
             lines.append(
                 f"  {r['ticker']} — cross {r.get('macd_cross_days_ago', 0)} hari lalu, momentum pre-cross +{r['macd_ret10_pre_cross_pct']:.1f}% (10 hari){tp_suffix}\n"
-                f"   Entry ~{price} (ref: open sesi berikutnya) | SL {sl}"
+                f"   Entry ~{price} (ref: open sesi berikutnya){tp_entry_note} | SL {sl}"
                 f"{danger_note}{market_engine.format_sector_tag(r.get('sector'))}"
             )
         await asyncio.to_thread(
@@ -1536,12 +1539,13 @@ async def high_conviction_command(update, context):
         and r["price_vs_sma20_pct"] >= MACD_LANE_DIST_SMA20_MIN_PCT
     ]
     continuation_candidates.sort(key=lambda r: r["macd_gain_since_cross_pct"], reverse=True)
-    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat)
+    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat.
+    # BUGFIX: should_suppress, bukan compute_tp1_tp2(...) is None -- lihat catatan lane_confidence.py)
     continuation_candidates = [
         r for r in continuation_candidates
-        if r.get("price") and lane_confidence.compute_tp1_tp2(
-            "CONTINUATION", {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}, r["price"]
-        ) is not None
+        if not lane_confidence.should_suppress(
+            "CONTINUATION", {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}, r.get("price")
+        )
     ]
     continuation_candidates = continuation_candidates[:8]
 
@@ -1595,12 +1599,13 @@ async def high_conviction_command(update, context):
         and r["price_vs_sma20_pct"] >= MACD_LANE_DIST_SMA20_MIN_PCT
     ]
     validation_candidates.sort(key=lambda r: r["macd_gain_since_cross_pct"], reverse=True)
-    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat)
+    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat.
+    # BUGFIX: should_suppress, bukan compute_tp1_tp2(...) is None -- lihat catatan lane_confidence.py)
     validation_candidates = [
         r for r in validation_candidates
-        if r.get("price") and lane_confidence.compute_tp1_tp2(
-            "VALIDATION", {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}, r["price"]
-        ) is not None
+        if not lane_confidence.should_suppress(
+            "VALIDATION", {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}, r.get("price")
+        )
     ]
     validation_candidates = validation_candidates[:8]
 
@@ -1688,14 +1693,15 @@ async def high_conviction_command(update, context):
         and r.get("ret_1d_pct") is not None and r["ret_1d_pct"] > MACD_MOMENTUM_RET1D_MIN
     ]
     momentum_extended_candidates.sort(key=lambda r: r["ret_1d_pct"], reverse=True)
-    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat)
+    # MBSS v2 (user request 2026-08-27 -- suppress kalau confidence individual <50% di level terdekat.
+    # BUGFIX: should_suppress, bukan compute_tp1_tp2(...) is None -- lihat catatan lane_confidence.py)
     momentum_extended_candidates = [
         r for r in momentum_extended_candidates
-        if r.get("price") and lane_confidence.compute_tp1_tp2(
+        if not lane_confidence.should_suppress(
             "MOMENTUM_EXTENDED",
             {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b"), "gap_slope_3d": r.get("macd_gap_slope_3d")},
-            r["price"],
-        ) is not None
+            r.get("price"),
+        )
     ]
     momentum_extended_candidates = momentum_extended_candidates[:8]
 
