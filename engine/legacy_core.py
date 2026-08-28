@@ -7568,6 +7568,7 @@ def build_app():
     app.add_handler(CommandHandler("screendaytrade", commands_scan.screen_daytrade))
     app.add_handler(CommandHandler("gptpick", commands_scan.gptpick_command))
     app.add_handler(CommandHandler(["hc", "highconviction"], commands_scan.high_conviction_command))
+    app.add_handler(CommandHandler(["allsetup", "allsetups"], commands_scan.all_setup_candidates_command))
     app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.strong_buy_command))
     app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
     app.add_handler(CommandHandler("fast", commands_scan.fast_candidates_command))

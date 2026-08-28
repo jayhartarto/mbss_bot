@@ -162,6 +162,151 @@ def rank_by_live_activity(candidates: list, count: int = 12) -> list:
     return live_ready[:count]
 
 
+# MBSS v2 (user request 2026-08-28 -- "fungsi untuk panggil kandidat all
+# setup", langsung dari kasus audit whitelist-staleness malam ini): view
+# gabungan SEMUA 7 lane MACD (FAST_RECOVERY/EARLY_RECOVERY/ABOVE_MOMENTUM
+# dari SDT, FCM juga dari SDT, CONTINUATION/VALIDATION/MOMENTUM_EXTENDED
+# dari HC) dalam SATU command, PERSIS kriteria yang sudah dipakai
+# /screendaytrade & /hc (REUSE murni via reimplementasi kriteria yang
+# sama persis -- kedua command itu mendefinisikan kriterianya sbg
+# konstanta LOKAL di dalam fungsi masing2, jadi tidak bisa diimpor
+# langsung; kalau kriteria di sana berubah, samakan juga di sini).
+#
+# Beda penting dari /screendaytrade & /hc: candidate yg confidence
+# individual-nya <50% (lane_confidence.should_suppress) TETAP ditampilkan
+# di sini, ditandai eksplisit "[suppressed]" -- bukan disembunyikan spt
+# di 2 command lain. Tujuannya genuinely diagnostic (real case: audit
+# 2026-08-28 -- VERN/INET muncul di /check tapi nihil di /screendaytrade &
+# /hc, ternyata karena whitelist stale, bukan suppression -- command ini
+# akan langsung kelihatan bedanya kalau soal serupa terjadi lagi).
+#
+# Murni baca cache /eodscan malam terakhir (load_daily_scan_cache_allow_
+# stale), TIDAK fetch apa pun -- instan, sama seperti /hc.
+async def all_setup_candidates_command(update, context):
+    """
+    /allsetup — pandangan gabungan semua 7 lane MACD (PRE tiers, FCM,
+    CONTINUATION, VALIDATION, MOMENTUM_EXTENDED) dalam satu command, untuk
+    audit cepat "kandidat mana yg genuinely ada malam ini di semua setup
+    sekaligus" tanpa perlu jalankan /screendaytrade + /hc lalu bandingkan
+    manual. Lihat catatan panjang di atas untuk detail kenapa & bedanya
+    dari 2 command itu.
+    """
+    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
+    if not scored:
+        await core.safe_reply(update.message, staleness_note or "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
+        return
+
+    backbone_result, _ = nightly_engine.load_backbone_daily_allow_stale()
+    all_values = list(scored.values())
+    # PRE tiers + FCM (SDT): PERSIS /screendaytrade, dari gate survivor.
+    # CONTINUATION/VALIDATION/MOMENTUM_EXTENDED (HC): PERSIS /hc, TANPA gate filter.
+    gate_survivors = backbone_engine.filter_to_gate_survivors(all_values, backbone_result) if backbone_result else all_values
+
+    _DIST_SMA20_MIN = 12.0
+    _FCM_MAX_DAYS_AGO = 2
+    _FCM_RET10_PRE_MIN = 15.0
+    _CONT_MAX_CROSS_DAYS = 5
+    _EXT_MIN_DAYS_AGO = 6
+    _EXT_MAX_DAYS_AGO = 40
+    _EXT_GAP_SLOPE_Q4 = 0.3106
+    _EXT_RET1D_MIN = 2.5
+
+    lanes = {name: [] for name in
+             ["FAST_RECOVERY", "EARLY_RECOVERY", "ABOVE_MOMENTUM", "FCM", "CONTINUATION", "VALIDATION", "MOMENTUM_EXTENDED"]}
+
+    for r in gate_survivors:
+        tier = r.get("macd_approach_tier")
+        if tier in lanes:
+            lanes[tier].append(r)
+        if (
+            r.get("macd_cross_direction") == "bullish" and r.get("macd_cross_days_ago") is not None
+            and r["macd_cross_days_ago"] <= _FCM_MAX_DAYS_AGO
+            and r.get("macd_ret10_pre_cross_pct") is not None and r["macd_ret10_pre_cross_pct"] > _FCM_RET10_PRE_MIN
+        ):
+            lanes["FCM"].append(r)
+
+    for r in all_values:
+        gain = r.get("macd_gain_since_cross_pct")
+        dist_sma20 = r.get("price_vs_sma20_pct")
+        if (
+            r.get("macd_cross_direction") == "bullish" and r.get("macd_cross_days_ago") is not None
+            and r["macd_cross_days_ago"] <= _CONT_MAX_CROSS_DAYS
+            and gain is not None and dist_sma20 is not None and dist_sma20 >= _DIST_SMA20_MIN
+        ):
+            if 6.0 <= gain < 10.0:
+                lanes["CONTINUATION"].append(r)
+            elif 3.0 <= gain < 6.0:
+                lanes["VALIDATION"].append(r)
+        if (
+            r.get("macd_regime") == "ABOVE_CENTERLINE" and r.get("macd_episode_had_volume_breakout") is True
+            and r.get("macd_cross_days_ago") is not None and _EXT_MIN_DAYS_AGO <= r["macd_cross_days_ago"] <= _EXT_MAX_DAYS_AGO
+            and r.get("macd_gap_slope_3d") is not None and r["macd_gap_slope_3d"] >= _EXT_GAP_SLOPE_Q4
+            and r.get("ret_1d_pct") is not None and r["ret_1d_pct"] > _EXT_RET1D_MIN
+        ):
+            lanes["MOMENTUM_EXTENDED"].append(r)
+
+    total = sum(len(v) for v in lanes.values())
+    lines = [f"🌐 ALL SETUP MACD — {total} kandidat total dari {len(scored)} ticker discan malam terakhir"]
+    if staleness_note:
+        lines.insert(0, staleness_note)
+    lines.append(
+        "Gabungan 7 lane (SDT pra-breakout + HC continuation/validation/extended), PERSIS kriteria "
+        "/screendaytrade & /hc. Beda dari 2 command itu: candidate confidence individual <50% TETAP "
+        "muncul di sini, ditandai [suppressed] -- bukan disembunyikan.\n"
+    )
+
+    LANE_EMOJI = {
+        "FAST_RECOVERY": "⚡", "EARLY_RECOVERY": "🔄", "ABOVE_MOMENTUM": "📐", "FCM": "🔥",
+        "CONTINUATION": "📈", "VALIDATION": "📊", "MOMENTUM_EXTENDED": "🚀",
+    }
+    STATIC_WR = {
+        "FAST_RECOVERY": "hit6~62.4%/hit10~38.8% (n=85)",
+        "EARLY_RECOVERY": "hit6~59.2%/hit10~43.1% (derivasi, n≈262)",
+    }
+
+    for lane_name, candidates in lanes.items():
+        lines.append(f"\n{LANE_EMOJI[lane_name]} {lane_name} ({len(candidates)})")
+        if not candidates:
+            lines.append("  (kosong)")
+            continue
+        for r in candidates:
+            t = r["ticker"]
+            price = r.get("price")
+            if lane_name == "FCM":
+                features = {"ret10_pre_cross_pct": r.get("macd_ret10_pre_cross_pct"), "pct_b": r.get("pct_b")}
+                detail = f"cross {r.get('macd_cross_days_ago', '-')}h lalu, pre-cross +{(r.get('macd_ret10_pre_cross_pct') or 0):.1f}%"
+            elif lane_name in ("CONTINUATION", "VALIDATION"):
+                features = {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}
+                detail = f"cross {r.get('macd_cross_days_ago', '-')}h lalu, +{(r.get('macd_gain_since_cross_pct') or 0):.1f}% sejak cross"
+            elif lane_name == "MOMENTUM_EXTENDED":
+                features = {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b"), "gap_slope_3d": r.get("macd_gap_slope_3d")}
+                detail = f"episode {r.get('macd_cross_days_ago', '-')}h, +{(r.get('ret_1d_pct') or 0):.1f}% hari ini"
+            elif lane_name == "ABOVE_MOMENTUM":
+                features = {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}
+                detail = "pre-cross, momentum menguat"
+            else:  # FAST_RECOVERY/EARLY_RECOVERY -- tak didukung lane_confidence
+                features = None
+                detail = "pre-cross, BELOW centerline"
+
+            line = f"  • {t} — {detail} | Harga {price}"
+            if features is not None:
+                if lane_confidence.should_suppress(lane_name, features, price):
+                    line += " [suppressed: confidence individual <50%]"
+                else:
+                    tp = lane_confidence.compute_tp1_tp2(lane_name, features, price) if price else None
+                    if tp:
+                        line += "\n     " + " / ".join(lane_confidence.format_tp_lines(tp))
+                    else:
+                        line += " [confidence individual belum bisa dihitung -- data tak lengkap]"
+            else:
+                line += f" | {STATIC_WR.get(lane_name, '')}"
+            lines.append(line)
+
+    all_tickers = [r["ticker"] for cands in lanes.values() for r in cands]
+    buttons = core.build_check_buttons(all_tickers)
+    await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
+
+
 async def screen_daytrade(update, context):
     """
     Screening khusus day trade — TERPISAH dari brief pagi (bobot berbeda: fokus
