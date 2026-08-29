@@ -398,11 +398,11 @@ def _build_gap_rebound_message(ticker: str, tier: float, fire_price: float, runn
     sl = round(fire_price * (1 + GAP_REBOUND_SL_PCT / 100.0))
     danger_line = f"\n{danger_tag}" if danger_tag else ""
     return (
+        f"DAY TRADE\n"
         f"🔥 {ticker} REBOUND +{tier:.1f}% dari dip — entry {fire_price:,.0f}\n"
         f"Gap open +{gap_pct:.1f}% (open {day_open:,.0f}), sempat dip {dip_pct:+.1f}% ke {running_low:,.0f}\n"
         f"TP1 {tp1:,.0f} (+{GAP_REBOUND_TP1_PCT:.0f}%) | TP2 {tp2:,.0f} (+{GAP_REBOUND_TP2_PCT:.0f}%) — max {GAP_REBOUND_MAX_HOLD_MIN} menit\n"
-        f"SL {sl:,.0f} ({GAP_REBOUND_SL_PCT:+.1f}%)\n"
-        f"Historis tier {tier:.1f}%: closing median positif, hit-rate ~{'68.9%' if tier==0.5 else '64.4%' if tier==1.0 else '60.9%' if tier==1.5 else '59.8%'} (n=107-122, backtest 27hr bursa){danger_line}"
+        f"SL {sl:,.0f} ({GAP_REBOUND_SL_PCT:+.1f}%){danger_line}"
     )
 
 
@@ -605,19 +605,31 @@ def _detect_buy_power_surge(bars: pd.DataFrame, avg_vol_20d: float | None) -> di
     return {"vol_pace_ratio": vol_pace_ratio, "volume_so_far": volume_so_far, "current_price": current_price}
 
 
+# MBSS v2 (user request 2026-08-29 -- TP1 BESOK): reuse angka median-high
+# yg SUDAH divalidasi (BSJP-ARA sleeper n=2027 episode/2thn; second-wave
+# n dari data yg sama, historis lebih lemah) -- stat aslinya "median high
+# BESOK relatif ke OPEN besok", yg belum diketahui saat alert fire HARI
+# INI. TP1_BESOK di sini pakai harga SEKARANG sbg proksi open besok
+# (estimasi, BUKAN harga pasti -- gap besok bisa beda dari closing/harga
+# hari ini) -- caller HARUS tandai "(estimasi)" di pesan.
+BSJP_ARA_MEDIAN_HIGH_FROM_OPEN_PCT = 4.9
+BSJP_SECOND_WAVE_MEDIAN_HIGH_FROM_OPEN_PCT = 4.1
+
+
 def _build_buy_power_surge_message(ticker: str, detection: dict, source: str, extra: dict) -> str:
     if source == "bsjp_ara":
-        stats = "sleeper+katalis, historis gap-positif besok ~69.5%, median high +4.9% dari open (n=2027 episode ARA-like, 2 tahun)"
+        median_high_pct = BSJP_ARA_MEDIAN_HIGH_FROM_OPEN_PCT
         source_label = f"BSJP-ARA sleeper (katalis: {extra.get('catalyst_category', '-')})"
     else:
-        stats = "gelombang KEDUA (pernah ARA {:.0f}% dlm 10hr terakhir) -- historis LEBIH LEMAH dari sleeper murni: gap-positif besok ~57.9%, median high +4.1% dari open".format(extra.get("max_ret_1d_pct_10d", 0))
-        source_label = "BSJP reaktivasi (second-wave)"
+        median_high_pct = BSJP_SECOND_WAVE_MEDIAN_HIGH_FROM_OPEN_PCT
+        source_label = "BSJP reaktivasi (second-wave, pernah ARA {:.0f}% dlm 10hr terakhir)".format(extra.get("max_ret_1d_pct_10d", 0))
+    tp1_besok = detection["current_price"] * (1 + median_high_pct / 100.0)
     return (
+        f"BSJP\n"
         f"🔥 {ticker} BUY POWER KUAT — {source_label}\n"
         f"Volume pace {detection['vol_pace_ratio']:.1f}x normal | harga {detection['current_price']:,.0f}\n"
-        f"{stats}\n"
-        f"Exit guidance: jual dekat open/awal sesi BESOK, JANGAN tahan sampai closing — "
-        f"median closing besok justru negatif dari open (giveback), makin besar volume hari ini makin besar giveback-nya."
+        f"TP1 BESOK (estimasi): {tp1_besok:,.0f}\n"
+        f"Exit guidance: jual dekat open/awal sesi BESOK, JANGAN tahan sampai closing — makin besar volume hari ini makin besar giveback-nya."
     )
 
 
@@ -700,7 +712,21 @@ GAP_UP_MIN_PCT = 5.0
 GAP_UP_MAX_PCT = 12.0
 GAP_UP_HOLD_CHECK_BARS = 5
 GAP_UP_HOLD_MAX_DROP_PCT = -3.0
-GAP_UP_SWEET_SPOT_NOTE = "🥇 sweet spot historis (further-gain median +16.5%, 66.7% EOD positif — n=15 holds, sample kecil)"
+
+# MBSS v2 (user request 2026-08-29 -- "DAY TRADE" TP1/NO CHASE): backtest 1m
+# riil (174 ticker gap-candidate, 27 hari bursa, n=97 event gap 5-12% dgn
+# data 1m lengkap). TP1=+4% dari OPEN: tersentuh 51.5% event (>50%, level
+# TERJAUH yg masih layak -- +5% turun ke 45.4%). NO_CHASE=+2% dari open:
+# level PERTAMA yg dites, degradasi entry-ke-closing SUDAH kelihatan di sini
+# (median return dari entry ke closing -1.12%, cuma 38.2% positif) --
+# TIDAK monoton membaik di level lebih rendah (belum dites <2%), tapi +2%
+# adalah titik test pertama yg sudah loss-making, jadi dipakai sbg cutoff
+# konservatif. HC_GAP_WATCH (beda populasi -- gap>=3% pasca-HC-flag, bukan
+# gap 5-12% umum) REUSE angka yg sama -- belum ada backtest 1m terpisah
+# khusus utk populasi itu, sama spirit dgn CHASE_WARN_GAIN_FROM_OPEN_PCT
+# yg direuse ke conviction sweep.
+DAY_TRADE_GAP_TP1_PCT = 4.0
+DAY_TRADE_NO_CHASE_PCT = 2.0
 
 
 def _detect_gap_up(bars: pd.DataFrame, prev_close: float) -> dict | None:
@@ -717,17 +743,25 @@ def _detect_gap_up(bars: pd.DataFrame, prev_close: float) -> dict | None:
         return None  # tunggu cukup bar dulu sebelum menilai "holds" -- first-touch tetap terjaga via state gap_checked
     low_so_far = float(check_bars["Low"].astype(float).min())
     holds = (low_so_far - day_open) / day_open * 100 >= GAP_UP_HOLD_MAX_DROP_PCT
-    return {"gap_pct": gap_pct, "day_open": day_open, "holds": holds, "bucket_note": GAP_UP_SWEET_SPOT_NOTE}
+    current_price = float(bars["Close"].astype(float).iloc[-1])
+    return {"gap_pct": gap_pct, "day_open": day_open, "holds": holds, "current_price": current_price}
 
 
 def _build_gap_up_message(ticker: str, detection: dict, conviction: str = "", risk_tags: list[str] | None = None) -> str:
     hold_txt = "bertahan" if detection["holds"] else "belum jelas bertahan (sempat turun >3% dari open)"
-    note = f"\n{detection['bucket_note']}" if detection["bucket_note"] else ""
+    day_open = detection["day_open"]
+    tp1 = day_open * (1 + DAY_TRADE_GAP_TP1_PCT / 100.0)
+    no_chase = day_open * (1 + DAY_TRADE_NO_CHASE_PCT / 100.0)
     conviction_line = f"\n{conviction}" if conviction else ""
     risk_lines = "".join(f"\n{tag}" for tag in (risk_tags or []))
     return (
-        f"🌅 {ticker} GAP-UP +{detection['gap_pct']:.1f}% di pembukaan ({hold_txt}) | open {detection['day_open']:,.0f}"
-        f"{note}\nInformational — sample historis kecil, bukan sinyal beli.{conviction_line}{risk_lines}"
+        f"DAY TRADE\n"
+        f"🌅 {ticker} GAP-UP +{detection['gap_pct']:.1f}% di pembukaan ({hold_txt})\n"
+        f"open : {day_open:,.0f}\n"
+        f"Now  : {detection['current_price']:,.0f}\n"
+        f"TP 1 : {tp1:,.0f}\n"
+        f"NO CHASE > {no_chase:,.0f}"
+        f"{conviction_line}{risk_lines}"
     )
 
 
@@ -968,7 +1002,7 @@ def _danger_gate_tag(ticker: str, danger_lookup: dict) -> str | None:
         return None
     danger = info.get("predicted_danger")
     danger_str = f"{danger:.0f}/100" if danger is not None else "-"
-    return f"🧱 DITOLAK DANGER GATE malam sebelumnya (danger {danger_str}) — sistem sudah menandai berisiko SEBELUM rally/breakout ini terjadi"
+    return f"🧱 DITOLAK DANGER GATE malam sebelumnya (danger {danger_str})"
 
 
 def _chase_risk_tag(current_price: float, day_open: float) -> str | None:
@@ -980,10 +1014,7 @@ def _chase_risk_tag(current_price: float, day_open: float) -> str | None:
         return None
     gain_from_open = (current_price - day_open) / day_open * 100
     if gain_from_open >= CHASE_WARN_GAIN_FROM_OPEN_PCT:
-        return (
-            f"⚠️ CHASE RISK: sudah +{gain_from_open:.1f}% dari open — di atas +{CHASE_WARN_GAIN_FROM_OPEN_PCT:.0f}% "
-            f"drawdown lanjutan historis melompat (median -6% s/d -10% ke closing sesi)"
-        )
+        return f"⚠️ CHASE RISK: sudah +{gain_from_open:.1f}% dari open"
     return None
 
 
@@ -1000,11 +1031,7 @@ def _fail_signal_tag(current_price: float, day_open: float, day_high_so_far: flo
         return None
     if day_high_so_far <= day_open or current_price > day_open:
         return None
-    return (
-        f"🔻 FAIL SIGNAL: sempat naik ke {day_high_so_far:,.0f} tapi sekarang sudah balik ke/di bawah open ({day_open:,.0f}) "
-        f"— pola serupa 'extended+reversal candle' historis: mean fwd5d -2.4% vs +3.8% baseline, "
-        f"P(turun>=5% dlm 5hr bursa) 46% vs 35% (n=925 vs 6332, backtest 2thn) — verifikasi live, ini warning dini bukan sinyal exit otomatis"
-    )
+    return f"🔻 FAIL SIGNAL: sempat naik ke {day_high_so_far:,.0f} tapi sekarang sudah balik ke/di bawah open ({day_open:,.0f})"
 
 
 def _risk_tags(bars: pd.DataFrame, ref: dict | None, now_wib: datetime.datetime,
@@ -1022,17 +1049,11 @@ def _risk_tags(bars: pd.DataFrame, ref: dict | None, now_wib: datetime.datetime,
         if chase_tag:
             tags.append(chase_tag)
     if now_wib.time() < RISKY_TIME_WINDOW_END:
-        tags.append(
-            f"⚠️ JAM BERISIKO: fire sebelum {RISKY_TIME_WINDOW_END.strftime('%H:%M')} — "
-            f"historis 44% kasus turun >=3% & 22% turun >=5% dlm 60 menit (vs ~15%/5% di jam lain)"
-        )
+        tags.append(f"⚠️ JAM BERISIKO: fire sebelum {RISKY_TIME_WINDOW_END.strftime('%H:%M')}")
     if ref is not None:
         avg_vt = ref.get("avg_value_traded_20d")
         if avg_vt is not None and avg_vt < SCANALERT_LIQUIDITY_WARN_FLOOR_IDR:
-            tags.append(
-                f"⚠️ LIKUIDITAS TIPIS: avg value traded 20hr Rp{avg_vt/1e9:.2f}M — "
-                f"di bawah floor Rp{SCANALERT_LIQUIDITY_WARN_FLOOR_IDR/1e9:.2f}M scalping, risiko slippage/spread lebih besar"
-            )
+            tags.append(f"⚠️ LIKUIDITAS TIPIS: avg value traded 20hr Rp{avg_vt/1e9:.2f}M")
     return tags
 
 
@@ -1347,14 +1368,14 @@ def _build_h1_strong_body_message(ticker: str, detection: dict, watchlist_entry:
     lane_label = {"PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)"}.get(lane, lane)
     tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
     if tp_suffix:
-        hist_line = f"Confidence individual (dist_to_sma20/pct_b ticker ini, bukan rata-rata grup):{tp_suffix}"
+        hist_line = tp_suffix.lstrip("\n")
     else:
-        hist_label = {"PRE": "PRE hit6~50-56%", "CONTINUATION": "CONTINUATION hit6~60.2%", "VALIDATION": "VALIDATION hit6~57.6%"}.get(lane, "-")
-        hist_line = f"Historis: {hist_label} (+dist_to_sma20>=12%) — verifikasi live sebelum entry."
+        hist_label = {"PRE": "hit6~50-56%", "CONTINUATION": "hit6~60.2%", "VALIDATION": "hit6~57.6%"}.get(lane, "-")
+        hist_line = f"Historis: {hist_label}"
     return (
+        f"SWING TRADE\n"
         f"📈 {ticker} MENJELANG CLOSING — {lane_label}, {detail}\n"
         f"Body hijau +{detection['gain_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f}\n"
-        f"Volume hari ini: {detection['vol_so_far']:,.0f} lembar (informational, bukan gate)\n"
         f"{hist_line}"
     )
 
@@ -1369,13 +1390,21 @@ def _detect_hc_gap_watch(bars: pd.DataFrame, prev_close: float) -> dict | None:
     gap_pct = (day_open - prev_close) / prev_close * 100
     if gap_pct < HC_GAP_WATCH_MIN_GAP_PCT:
         return None
-    return {"gap_pct": gap_pct, "day_open": day_open, "prev_close": prev_close}
+    current_price = float(bars["Close"].astype(float).iloc[-1])
+    return {"gap_pct": gap_pct, "day_open": day_open, "prev_close": prev_close, "current_price": current_price}
 
 
 def _build_hc_gap_watch_message(ticker: str, detection: dict) -> str:
+    day_open = detection["day_open"]
+    tp1 = day_open * (1 + DAY_TRADE_GAP_TP1_PCT / 100.0)
+    no_chase = day_open * (1 + DAY_TRADE_NO_CHASE_PCT / 100.0)
     return (
-        f"🔥 {ticker} HC GAP-UP +{detection['gap_pct']:.1f}% dari closing malam HC diflag ({detection['prev_close']:,.0f}) — buka {detection['day_open']:,.0f}\n"
-        f"Historis: gap>=3% pasca-HC-Minervini hit6~62.7% (n=51, backtest 2 tahun) — jauh di atas baseline HC 33% tanpa filter ini.\n"
+        f"DAY TRADE\n"
+        f"🔥 {ticker} HC GAP-UP +{detection['gap_pct']:.1f}% dari closing malam HC diflag ({detection['prev_close']:,.0f})\n"
+        f"open : {day_open:,.0f}\n"
+        f"Now  : {detection['current_price']:,.0f}\n"
+        f"TP 1 : {tp1:,.0f}\n"
+        f"NO CHASE > {no_chase:,.0f}\n"
         f"Cek 1x, tidak dipantau lagi hari berikutnya kalau tidak fire hari ini."
     )
 
@@ -1409,10 +1438,10 @@ def _build_pullback_entry_message(ticker: str, detection: dict, watchlist_entry:
     zone_label = "🎯 SEHAT (dlm p25)" if detection["zone"] == "healthy" else "⚠️ HATI-HATI (mendekati batas p10)"
     tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
     return (
+        f"SWING TRADE\n"
         f"🔥 {ticker} PULLBACK ENTRY — FRESH CROSS MOMENTUM ({watchlist_entry['cross_days_ago']} hari lalu, "
         f"momentum pre-cross +{watchlist_entry['ret10_pre_cross_pct']:.1f}%)\n"
-        f"Pullback {detection['pullback_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f} | {zone_label}\n"
-        f"Tervalidasi: median MAE trade menang -4.0%, p25 -9.0%, p10 -14.3% (n=635) — bukan sinyal beli otomatis, verifikasi live."
+        f"Pullback {detection['pullback_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f} | {zone_label}"
         f"{tp_suffix}"
     )
 
@@ -1448,10 +1477,10 @@ def _detect_confirmation_entry(bars: pd.DataFrame) -> dict | None:
 def _build_confirmation_entry_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
     tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
     return (
+        f"SWING TRADE\n"
         f"🚀 {ticker} CONFIRMATION ENTRY — FRESH CROSS MOMENTUM ({watchlist_entry['cross_days_ago']} hari lalu, "
         f"momentum pre-cross +{watchlist_entry['ret10_pre_cross_pct']:.1f}%)\n"
-        f"Lanjut naik +{detection['gain_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f}\n"
-        f"Sinyal konfirmasi (bukan pullback) — historis kombinasi momentum+konfirmasi hari sama hit6~69% (konteks episode extended, ekstrapolasi ke FCM) — verifikasi live."
+        f"Lanjut naik +{detection['gain_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f}"
         f"{tp_suffix}"
     )
 
@@ -1479,10 +1508,10 @@ def _detect_open_buy(bars: pd.DataFrame) -> dict | None:
 def _build_open_buy_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
     tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
     return (
+        f"SWING TRADE\n"
         f"🔔 {ticker} BELI DI OPEN — FRESH CROSS MOMENTUM ({watchlist_entry['cross_days_ago']} hari lalu, "
         f"momentum pre-cross +{watchlist_entry['ret10_pre_cross_pct']:.1f}%)\n"
         f"Open {detection['day_open']:,.0f} — skrg {detection['current_price']:,.0f} ({detection['gain_from_open']:+.1f}% dari open)\n"
-        f"Riset: entry di open lebih baik dari nunggu konfirmasi/pullback (hit rate flat s/d +3% chase, tapi fill-rate anjlok di atas +2%) — "
         f"JANGAN KEJAR kalau sudah naik >{FCM_OPEN_BUY_CHASE_CAP_PCT:.0f}% dari open ini."
         f"{tp_suffix}"
     )
@@ -2033,6 +2062,18 @@ def _process_conviction_ticker(t_state: dict, current_price: float, ref_price: f
     return events
 
 
+# MBSS v2 (user request 2026-08-29 -- kategori DAY TRADE/SWING TRADE/BSJP di
+# baris pertama tiap pesan): conviction sweep SELALU pakai ceiling 5-hari
+# bursa (SWING horizon) utk lane MACD -- BSJP_ARA/BSJP_SECOND_WAVE dikategori
+# "BSJP" biar konsisten dgn _build_buy_power_surge_message meski ceiling-nya
+# di sini masih ceiling generik 5-hari, BUKAN framing "besok" spt alert BSJP
+# dedicated -- catatan konsistensi, bukan sinkron penuh (beda mekanisme).
+def _conviction_sweep_category(tag: str) -> str:
+    if tag in ("BSJP_ARA", "BSJP_SECOND_WAVE"):
+        return "BSJP"
+    return "SWING TRADE"
+
+
 def _build_conviction_sweep_message(ticker: str, tag: str, tier: int, current_price: float,
                                      ref_price: float, ceiling_price: float, ceiling_pct: float,
                                      tp_info: dict | None = None, extra_tags: list[str] | None = None) -> str:
@@ -2040,14 +2081,14 @@ def _build_conviction_sweep_message(ticker: str, tag: str, tier: int, current_pr
     if tp_info:
         tp_line = "\n".join(lane_confidence.format_tp_lines(tp_info, current_price=current_price))
     else:
-        tp_line = (f"Estimasi max TP {ceiling_price:,.0f} (+{ceiling_pct:.0f}%, ceiling backtest hit-rate>=50% dlm 5 hari bursa "
-                   f"sejak kualifikasi lane -- BUKAN janji hari ini juga)")
+        tp_line = f"Estimasi max TP {ceiling_price:,.0f}"
     warn_lines = "".join(f"\n{t}" for t in (extra_tags or []))
     return (
+        f"{_conviction_sweep_category(tag)}\n"
         f"📈 {ticker} MOMENTUM MEMBANGUN (tier {tier}) — {tag}\n"
         f"Harga {current_price:,.0f} ({gain_from_ref:+.1f}% dari closing kemarin {ref_price:,.0f})\n"
         f"{tp_line}\n"
-        f"Radar: 2x checkpoint 15-menit naik beruntun -- pola live, verifikasi sebelum entry.{warn_lines}"
+        f"Radar: 2x checkpoint 15-menit naik beruntun{warn_lines}"
     )
 
 
@@ -2058,9 +2099,9 @@ def _build_conviction_pullback_exception_message(ticker: str, tag: str, current_
     label = f"{tp_info['tp2_price']:,.0f}" if tp_info and "tp2_price" in tp_info else f"{ceiling_price:,.0f}"
     warn_lines = "".join(f"\n{t}" for t in (extra_tags or []))
     return (
+        f"{_conviction_sweep_category(tag)}\n"
         f"🔁 {ticker} PULLBACK RE-ENTRY (sudah lewat estimasi ceiling {label}) — {tag}\n"
-        f"Harga {current_price:,.0f} ({gain_from_ref:+.1f}% dari closing kemarin {ref_price:,.0f}), sempat pullback dari puncak hari ini lalu naik lagi\n"
-        f"⚠️ Room ke target awal sudah tipis/habis — ini radar reaktivasi, bukan target baru, verifikasi live.{warn_lines}"
+        f"Harga {current_price:,.0f} ({gain_from_ref:+.1f}% dari closing kemarin {ref_price:,.0f}), sempat pullback dari puncak hari ini lalu naik lagi{warn_lines}"
     )
 
 
