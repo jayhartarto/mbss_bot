@@ -971,6 +971,42 @@ def _danger_gate_tag(ticker: str, danger_lookup: dict) -> str | None:
     return f"🧱 DITOLAK DANGER GATE malam sebelumnya (danger {danger_str}) — sistem sudah menandai berisiko SEBELUM rally/breakout ini terjadi"
 
 
+def _chase_risk_tag(current_price: float, day_open: float) -> str | None:
+    """
+    Extracted dari _risk_tags -- reusable tanpa perlu bars/ref/danger_lookup
+    penuh (dipakai conviction sweep juga, bukan cuma Alert A/B/gap-up).
+    """
+    if not day_open or day_open <= 0:
+        return None
+    gain_from_open = (current_price - day_open) / day_open * 100
+    if gain_from_open >= CHASE_WARN_GAIN_FROM_OPEN_PCT:
+        return (
+            f"⚠️ CHASE RISK: sudah +{gain_from_open:.1f}% dari open — di atas +{CHASE_WARN_GAIN_FROM_OPEN_PCT:.0f}% "
+            f"drawdown lanjutan historis melompat (median -6% s/d -10% ke closing sesi)"
+        )
+    return None
+
+
+def _fail_signal_tag(current_price: float, day_open: float, day_high_so_far: float | None, lane_tag: str) -> str | None:
+    """
+    MBSS v2 (user request 2026-08-29, live case PDES/TMPO) -- lihat catatan
+    FAIL_SIGNAL_EXTENDED_LANES di atas utk backtest lengkap. Proxy LIVE:
+    harga SEMPAT naik dari open (High so far > open) tapi SEKARANG sudah
+    balik ke/di bawah open -- deteksi dini, bukan nunggu closing -10% confirm.
+    """
+    if lane_tag not in FAIL_SIGNAL_EXTENDED_LANES:
+        return None
+    if not day_open or day_open <= 0 or day_high_so_far is None:
+        return None
+    if day_high_so_far <= day_open or current_price > day_open:
+        return None
+    return (
+        f"🔻 FAIL SIGNAL: sempat naik ke {day_high_so_far:,.0f} tapi sekarang sudah balik ke/di bawah open ({day_open:,.0f}) "
+        f"— pola serupa 'extended+reversal candle' historis: mean fwd5d -2.4% vs +3.8% baseline, "
+        f"P(turun>=5% dlm 5hr bursa) 46% vs 35% (n=925 vs 6332, backtest 2thn) — verifikasi live, ini warning dini bukan sinyal exit otomatis"
+    )
+
+
 def _risk_tags(bars: pd.DataFrame, ref: dict | None, now_wib: datetime.datetime,
                 ticker: str = "", danger_lookup: dict | None = None) -> list[str]:
     """Tag informational (lihat CHASE_WARN_GAIN_FROM_OPEN_PCT dkk) -- tidak pernah menekan/menunda alert, cuma ditempel."""
@@ -982,13 +1018,9 @@ def _risk_tags(bars: pd.DataFrame, ref: dict | None, now_wib: datetime.datetime,
     if not bars.empty:
         day_open = float(bars["Open"].astype(float).iloc[0])
         current_price = float(bars["Close"].astype(float).iloc[-1])
-        if day_open > 0:
-            gain_from_open = (current_price - day_open) / day_open * 100
-            if gain_from_open >= CHASE_WARN_GAIN_FROM_OPEN_PCT:
-                tags.append(
-                    f"⚠️ CHASE RISK: sudah +{gain_from_open:.1f}% dari open — di atas +{CHASE_WARN_GAIN_FROM_OPEN_PCT:.0f}% "
-                    f"drawdown lanjutan historis melompat (median -6% s/d -10% ke closing sesi)"
-                )
+        chase_tag = _chase_risk_tag(current_price, day_open)
+        if chase_tag:
+            tags.append(chase_tag)
     if now_wib.time() < RISKY_TIME_WINDOW_END:
         tags.append(
             f"⚠️ JAM BERISIKO: fire sebelum {RISKY_TIME_WINDOW_END.strftime('%H:%M')} — "
@@ -1152,6 +1184,27 @@ HC_GAP_WATCH_MIN_GAP_PCT = 3.0
 #      drpd day-trade/swing multi-hari yg dilindungi floor Rp1M itu.
 CHASE_WARN_GAIN_FROM_OPEN_PCT = 3.0
 RISKY_TIME_WINDOW_END = datetime.time(9, 30)
+
+# MBSS v2 (user request 2026-08-29 -- live case PDES 7 Agst: gap-up +16% dari
+# prev close, TAPI closing -23.3% dari open hari itu, follow-through beberapa
+# hari lemah; user juga cite TMPO 12->21 Agst pola serupa): backtest 576
+# ISSI/2thn, populasi "sudah extended" (ret5d_trailing>=20% SEBELUM hari ini)
+# x "candle hari ini reversal dalam" (close<=-10% dari open) -- n=925, mean
+# fwd5d=-2.41% (vs baseline "extended tapi candle normal" n=6332, mean
+# fwd5d=+3.78%), P(fwd5d<=-5%) 46.3% vs 34.9%, median worst Low 3hr -9.65%
+# vs -5.26%. RSI/volume-decline/consecutive-up-days TIDAK prediktif (dites
+# terpisah) -- shape candle hari itu sendiri yang justru sinyal paling kuat
+# ditemukan di seluruh eksplorasi risiko sesi ini.
+#
+# FAIL_SIGNAL di bawah = proxy LIVE dari temuan EOD di atas: deteksi dini
+# saat harga baru MULAI kembali ke/di bawah open (bukan nunggu closing -10%
+# confirm) -- trade-off sengaja: lebih banyak false positive (bisa rebound
+# sebelum closing), krn tujuan tag ini WARNING dini, bukan sinyal exit
+# otomatis. Digate ke lane yg SUDAH "extended" by construction (MOMENTUM_
+# EXTENDED/BSJP_ARA/BSJP_SECOND_WAVE) -- lane FCM/ABOVE_MOMENTUM/CONTINUATION/
+# VALIDATION BELUM tentu "sudah lari jauh" jadi TIDAK match populasi backtest
+# di atas, sengaja tidak ikut digate.
+FAIL_SIGNAL_EXTENDED_LANES = ("MOMENTUM_EXTENDED", "BSJP_ARA", "BSJP_SECOND_WAVE")
 
 # MBSS v2 (user request 2026-08-26): floor likuiditas KHUSUS tag Alert A/B/
 # gap-up, SENGAJA lebih longgar dari core.LIQUIDITY_FLOOR_VALUE_TRADED_IDR
@@ -1982,30 +2035,32 @@ def _process_conviction_ticker(t_state: dict, current_price: float, ref_price: f
 
 def _build_conviction_sweep_message(ticker: str, tag: str, tier: int, current_price: float,
                                      ref_price: float, ceiling_price: float, ceiling_pct: float,
-                                     tp_info: dict | None = None) -> str:
+                                     tp_info: dict | None = None, extra_tags: list[str] | None = None) -> str:
     gain_from_ref = (current_price - ref_price) / ref_price * 100
     if tp_info:
         tp_line = "\n".join(lane_confidence.format_tp_lines(tp_info, current_price=current_price))
     else:
         tp_line = (f"Estimasi max TP {ceiling_price:,.0f} (+{ceiling_pct:.0f}%, ceiling backtest hit-rate>=50% dlm 5 hari bursa "
                    f"sejak kualifikasi lane -- BUKAN janji hari ini juga)")
+    warn_lines = "".join(f"\n{t}" for t in (extra_tags or []))
     return (
         f"📈 {ticker} MOMENTUM MEMBANGUN (tier {tier}) — {tag}\n"
         f"Harga {current_price:,.0f} ({gain_from_ref:+.1f}% dari closing kemarin {ref_price:,.0f})\n"
         f"{tp_line}\n"
-        f"Radar: 2x checkpoint 15-menit naik beruntun -- pola live, verifikasi sebelum entry."
+        f"Radar: 2x checkpoint 15-menit naik beruntun -- pola live, verifikasi sebelum entry.{warn_lines}"
     )
 
 
 def _build_conviction_pullback_exception_message(ticker: str, tag: str, current_price: float,
                                                    ref_price: float, ceiling_price: float,
-                                                   tp_info: dict | None = None) -> str:
+                                                   tp_info: dict | None = None, extra_tags: list[str] | None = None) -> str:
     gain_from_ref = (current_price - ref_price) / ref_price * 100
     label = f"{tp_info['tp2_price']:,.0f}" if tp_info and "tp2_price" in tp_info else f"{ceiling_price:,.0f}"
+    warn_lines = "".join(f"\n{t}" for t in (extra_tags or []))
     return (
         f"🔁 {ticker} PULLBACK RE-ENTRY (sudah lewat estimasi ceiling {label}) — {tag}\n"
         f"Harga {current_price:,.0f} ({gain_from_ref:+.1f}% dari closing kemarin {ref_price:,.0f}), sempat pullback dari puncak hari ini lalu naik lagi\n"
-        f"⚠️ Room ke target awal sudah tipis/habis — ini radar reaktivasi, bukan target baru, verifikasi live."
+        f"⚠️ Room ke target awal sudah tipis/habis — ini radar reaktivasi, bukan target baru, verifikasi live.{warn_lines}"
     )
 
 
@@ -2100,14 +2155,26 @@ async def run_conviction_sweep_once() -> dict:
             ceiling_price = ref_price * (1 + ceiling_pct / 100.0)
 
         events = _process_conviction_ticker(t_state, current_price, ref_price, ceiling_price)
+        if events:
+            # MBSS v2 (user request 2026-08-29 -- wire CHASE_RISK & FAIL_SIGNAL
+            # ke conviction sweep, sebelumnya cuma dipakai Alert A/B/gap-up)
+            day_open = float(bars["Open"].astype(float).iloc[0])
+            day_high_so_far = float(bars["High"].astype(float).max())
+            extra_tags = []
+            chase_tag = _chase_risk_tag(current_price, day_open)
+            if chase_tag:
+                extra_tags.append(chase_tag)
+            fail_tag = _fail_signal_tag(current_price, day_open, day_high_so_far, tag)
+            if fail_tag:
+                extra_tags.append(fail_tag)
         for event in events:
             kind = event[0]
             if kind == "tier":
                 tier = event[1]
-                msg = _build_conviction_sweep_message(t, tag, tier, current_price, ref_price, ceiling_price, ceiling_pct, tp_info=tp_info)
+                msg = _build_conviction_sweep_message(t, tag, tier, current_price, ref_price, ceiling_price, ceiling_pct, tp_info=tp_info, extra_tags=extra_tags)
                 summary["tier_alerts_sent"] += 1
             else:
-                msg = _build_conviction_pullback_exception_message(t, tag, current_price, ref_price, ceiling_price, tp_info=tp_info)
+                msg = _build_conviction_pullback_exception_message(t, tag, current_price, ref_price, ceiling_price, tp_info=tp_info, extra_tags=extra_tags)
                 summary["pullback_exception_sent"] += 1
             if bot is not None:
                 await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
