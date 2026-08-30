@@ -103,15 +103,16 @@ def _build_context_bundle(scored: dict, staleness_note, portfolio: dict, live_da
         "risk_reward_at_max": r.get("targets", {}).get("risk_reward_at_max"),
     } for r in qualifying[:TANYA_CONSENSUS_TOP_N]]
 
-    hc_candidates = [r for r in scored.values() if scoring_engine.is_high_conviction_regime_aware(r, market_regime)]
-    for r in hc_candidates:
-        r["_daytrade_score_hc"] = core.compute_daytrade_score(r)
-    hc_candidates.sort(key=lambda r: r["_daytrade_score_hc"], reverse=True)
+    # MBSS v2 (user request 2026-08-30): is_high_conviction GANTI TOTAL ke
+    # commands_scan._daytrade_wr_tp1 -- lihat docstring helper itu utk
+    # alasan/riwayat audit Task #21. WR individual dari model dipakai
+    # langsung (bukan lagi compute_daytrade_score momentum-murni).
+    hc_wr_pairs = commands_scan._compute_daytrade_wr_candidates(list(scored.values()))
     hc_summary = [{
-        "ticker": r["ticker"], "daytrade_score": round(r["_daytrade_score_hc"], 1),
+        "ticker": r["ticker"], "wr_pct": info["wr_pct"], "tp1_price": info["price"],
         "final_score": r.get("scores", {}).get("final"),
         "risk_reward_at_max": r.get("targets", {}).get("risk_reward_at_max"),
-    } for r in hc_candidates[:TANYA_HC_TOP_N]]
+    } for r, info in hc_wr_pairs[:TANYA_HC_TOP_N]]
 
     positions = portfolio.get("positions", {})
     portfolio_summary = {

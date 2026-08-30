@@ -1,6 +1,14 @@
 """
 MBSS v2 (user request) — push alert intraday "breaking" utk scalping, 2 tahap:
 
+  *** Alert A & Alert B DI BAWAH INI SUDAH DEAD (ALERT_A_B_PUSH_ENABLED=
+  False sejak 2026-08-27 -- backtest 1m riil 27 hari TERBUKTI edge nyaris
+  0, lihat catatan di ALERT_A_B_PUSH_ENABLED). Kode deteksi/pesan TETAP
+  ADA tapi TIDAK PERNAH push, deskripsi di bawah BUKAN cerminan behavior
+  produksi saat ini. Gap-up/GAP-REBOUND (setelahnya di bawah) sudah
+  di-MERGE 2026-08-30 -- lihat catatan GAP_REBOUND_MIN_PCT/GAP_HOLD_MIN_
+  VOL_RATIO_PARTIAL utk state final. ***
+
   Alert A ("worth watching", gratis): price_spike>=4% (3 bar) DAN
     volume_ratio>=5x baseline (3 bar) — first-touch hari itu, informational,
     BUKAN sinyal beli. Threshold divalidasi backtest 1m riil (19 hari bursa,
@@ -46,10 +54,10 @@ beda (lihat konstanta terkait utk detail riset):
     HANYA mulai jam 14:00 (PRE_CONTINUATION_SCAN_START), begitu body candle
     hari berjalan hijau >=1% dari open (PRE_CONTINUATION_BODY_MIN_PCT).
     Volume informational saja, bukan gate.
-  - HC Minervini: di-hide dari /hc langsung (win rate rendah), dipantau
-    live SEKALI esok harinya utk gap-up >=3% (HC_GAP_WATCH_MIN_GAP_PCT) dari
-    closing malam saat pertama diflag -- watchlist dari engine/nightly.py
-    save_hc_gap_watch/load_hc_gap_watch_for_today.
+  - HC Minervini gap-watch: RETIRED 2026-08-30 -- lihat engine/nightly.py
+    utk riwayat lengkap (backtest ulang dgn populasi WR model baru
+    membuktikan sinyal ini tidak bertahan, mayoritas cuma dari gap-nya
+    sendiri, give-back close-based parah).
 
 Bisa dipanggil sbg one-shot CLI (`python bot.py --scanalert`, ikut pola
 `--eodscan` yg sudah ada). TAPI di deployment produksi SEBENARNYA (GCP,
@@ -83,6 +91,7 @@ import asyncio
 import datetime
 import json
 import os
+import pickle
 import time
 
 import pandas as pd
@@ -147,8 +156,26 @@ SCAN_WINDOW_END = datetime.time(15, 55)
 # rebound LEBIH KECIL = kualitas forward LEBIH BAIK (0.5%: +15m close
 # median +1.83%/68.9% positif -- TERBAIK dari seluruh eksplorasi sesi
 # ini; 2.0%: +1.60%/59.8% -- masih oke tapi mulai menurun, cutoff wajar).
+#
+# MBSS v2 (user request 2026-08-30, MERGE -- "explore poin 1-3 apakah bisa
+# di merge dan simplify tapi WR tetap bagus"): fresh 1m backtest (30 hari
+# retensi Yahoo, 89 event gap [4,12)% pd 18 hari bursa Agustus 2026, n=130
+# observasi -- lihat riwayat chat sesi ini utk detail lengkap) membandingkan
+# REBOUND vs GAP_UP lama (_detect_gap_up, "beli langsung di open") pd
+# horizon SAMA (5/10/15/30/60m + EOD, bukan cuma horizon masing2 spt
+# validasi asli): REBOUND positif di SEMUA horizon (+0.24% s/d +1.20%
+# close-based, 51-65% positif), GAP_UP flat-negatif di semua horizon (0%
+# s/d -2.51% EOD, 32-48% positif) -- give-back klasik. Overlap populasi
+# 92% (46/50 event GAP_UP JUGA fire REBOUND, tier 0.5% cukup longgar utk
+# menangkap hampir semua "holds" case juga). GAP_UP & Alert A/B (sudah
+# mati sejak ALERT_A_B_PUSH_ENABLED=False) DIHAPUS TOTAL, GAP_REBOUND jadi
+# SATU-SATUNYA sinyal gap live, range diperlebar 4-10% -> 4-12% (warisi
+# upper range GAP_UP, tidak ada bukti 10-12% lebih lemah). Range bawah HOLD
+# check (GAP_UP_HOLD_CHECK_BARS/GAP_UP_HOLD_MAX_DROP_PCT di bawah, dipakai
+# _detect_gap_hold BARU) DIPERTAHANKAN sbg mekanisme KEDUA -- lihat
+# GAP_HOLD_MIN_VOL_RATIO_PARTIAL utk alasan.
 GAP_REBOUND_MIN_PCT = 4.0     # gap open dari prev_close, batas bawah (sweet spot 5-8% tapi 4-10% dites juga oke)
-GAP_REBOUND_MAX_PCT = 10.0    # di atas ini masuk wilayah "instant pop lalu fade EOD" -- beda populasi/karakter, exclude dari REBOUND
+GAP_REBOUND_MAX_PCT = 12.0    # diperlebar dari 10.0 (merge 2026-08-30) -- warisi upper range GAP_UP lama, tidak ada bukti 10-12% lebih lemah
 GAP_REBOUND_TIERS = (0.5, 1.0, 1.5, 2.0)
 GAP_REBOUND_DETECT_WINDOW_MIN = 10   # cari rebound HANYA 10 menit pertama sejak open, konsisten dgn riset
 GAP_REBOUND_TP1_PCT = 4.0     # median MFE ~4-5% di horizon 5-10m dari entry rebound
@@ -158,6 +185,25 @@ GAP_REBOUND_MAX_HOLD_MIN = 20  # window realisasi TP1/TP2, sesuai riset "siku" d
 GAP_REBOUND_SCAN_WINDOW_START = datetime.time(9, 0)
 GAP_REBOUND_SCAN_WINDOW_END = datetime.time(9, 10)
 STATE_FILE_REBOUND = os.path.join(core.PROJECT_ROOT, "scanalert_rebound_state.json")
+
+# MBSS v2 (user request 2026-08-30, "worth checking kombinasi gap up dan
+# vol" -- mekanisme KEDUA merge, PENGGANTI _detect_gap_up lama): dari n=50
+# event GAP_UP lama, volume 5 menit pertama (dinormalisasi ke laju volume
+# 20-hari sendiri, vol_ratio_partial = vol_window/(avg_vol_20d/330menit*5))
+# corr POSITIF ke return (+0.38 di 15m, +0.37 di 30m) -- tercile: LOW
+# (n=17) EOD median -3.81%/5.9% positif (JELEK), MID (n=16) +2.28%/56.2%
+# positif (BAGUS), HIGH (n=17) +short-term oke tapi fade EOD -1.54%/35.3%
+# positif. Floor diambil dari batas tercile LOW/MID empiris (~11.7,
+# dibulatkan 12.0) -- HANYA exclude sepertiga TERBURUK, MID+HIGH tetap
+# lolos (exit disiplin cepat sudah jadi warning wajib, jadi fade EOD di
+# HIGH tercile less relevant selama TP diambil cepat). CATATAN: floor ini
+# TIDAK diterapkan ke REBOUND (vol_ratio_partial REBOUND kena artifact
+# data -- >=60/80 observasi volume bar pertama tercatat 0 dari Yahoo,
+# BUKAN genuinely nol, corr null-nya TIDAK bisa dipercaya) -- REBOUND
+# sudah cukup baik tanpa filter tambahan, jangan tambah filter belum teruji.
+# n=50 (18 hari bursa) -- directional/pilot, bukan setara confidence
+# backtest 2 tahun daily lain di sesi ini, sample masih kecil.
+GAP_HOLD_MIN_VOL_RATIO_PARTIAL = 12.0
 
 # MBSS v2 (user request 2026-08-27 -- "conviction sweep": pantau UNION
 # watchlist harian [FCM, PRE-CROSS/CONTINUATION/VALIDATION, HC gap-watch,
@@ -185,14 +231,16 @@ CONVICTION_SWEEP_PULLBACK_EXCEPTION_ENABLED = True
 # tersedia sebelum baris yg baca dict ini dieksekusi. Sisa 2 entri
 # (FAST_RECOVERY/EARLY_RECOVERY) TETAP relevan -- lane_confidence SENGAJA
 # tidak mendukungnya (angka resmi 62.35%/59.2% beda dari quick-recompute
-# sandbox sesi ini, belum diinvestigasi) -- begitu juga DEFAULT_PCT
-# (fallback HC_GAP_WATCH/BSJP_ARA/BSJP_SECOND_WAVE, lane di luar cakupan
-# lane_confidence sama sekali).
+# sandbox sesi ini, belum diinvestigasi) -- BSJP_ARA/BSJP_SECOND_WAVE
+# DIHAPUS dari daftar ini, MBSS v2 user request 2026-08-29: BSJP bukan lagi
+# lane conviction-sweep. HC_GAP_WATCH (dulu justifikasi utama DEFAULT_PCT
+# di bawah) RETIRED 2026-08-30, lihat engine/nightly.py -- DEFAULT_PCT
+# dipertahankan sbg fallback generik utk tag lain di luar dict ini.
 CONVICTION_TP_CEILING_PCT = {
     "FAST_RECOVERY": 8.0,
     "EARLY_RECOVERY": 8.0,
 }
-CONVICTION_TP_CEILING_DEFAULT_PCT = 8.0  # HC_GAP_WATCH / BSJP_ARA / BSJP_SECOND_WAVE -- populasi gabungan ~49.4% di +8%, blm ada ceiling spesifik tervalidasi utk lane2 ini
+CONVICTION_TP_CEILING_DEFAULT_PCT = 8.0
 
 STATE_FILE_CONVICTION = os.path.join(core.PROJECT_ROOT, "conviction_sweep_state.json")
 
@@ -412,8 +460,19 @@ async def run_gap_rebound_scan_once() -> dict:
     run_scan_alert_once() -- lihat catatan konstanta GAP_REBOUND_* di atas
     utk alasan (cadence 1 menit khusus jendela 09:00-09:10, state file
     sendiri hindari race condition baca-ubah-tulis bareng --scanalert utama).
+
+    MBSS v2 (user request 2026-08-30, MERGE): SEKARANG mengirim DUA
+    mekanisme independen per ticker (nama fungsi/job/state file TETAP
+    "rebound" -- historical, bukan lagi literal cakupannya, lihat catatan
+    GAP_REBOUND_MIN_PCT/GAP_HOLD_MIN_VOL_RATIO_PARTIAL utk alasan merge):
+    1. REBOUND (tier 0.5/1.0/1.5/2.0% dari dip) -- TIDAK berubah.
+    2. HOLD (gap holds >=5 menit + volume gate) -- PENGGANTI _detect_gap_up/
+       Alert A/B lama (retired total, terbukti give-back parah di backtest
+       ulang 2026-08-30).
+    Keduanya independen (satu ticker bisa fire salah satu, keduanya, atau
+    tidak sama sekali), sama pola dgn FCM open-buy vs pullback-entry.
     """
-    summary = {"skipped_reason": None, "scanned": 0, "rebound_sent": 0}
+    summary = {"skipped_reason": None, "scanned": 0, "rebound_sent": 0, "hold_sent": 0}
     now_wib = datetime.datetime.now(core.WIB)
     if now_wib.weekday() >= 5:
         summary["skipped_reason"] = "weekend"
@@ -481,28 +540,43 @@ async def run_gap_rebound_scan_once() -> dict:
         if not (GAP_REBOUND_MIN_PCT <= gap_pct < GAP_REBOUND_MAX_PCT):
             continue
 
-        t_state = tickers_state.setdefault(t, {"running_low": day_open, "tiers_fired": [], "done": False})
-        if t_state.get("done"):
-            continue
+        t_state = tickers_state.setdefault(t, {"running_low": day_open, "tiers_fired": [], "done": False, "hold_sent": False})
+        t_state.setdefault("hold_sent", False)  # ticker lama di state file blm punya field ini
 
-        detect_bars = bars.iloc[:GAP_REBOUND_DETECT_WINDOW_MIN + 1]
-        new_low, newly_fired = _detect_gap_rebound_tiers(detect_bars, day_open, t_state["running_low"], t_state["tiers_fired"])
-        t_state["running_low"] = new_low
+        if not t_state.get("done"):
+            detect_bars = bars.iloc[:GAP_REBOUND_DETECT_WINDOW_MIN + 1]
+            new_low, newly_fired = _detect_gap_rebound_tiers(detect_bars, day_open, t_state["running_low"], t_state["tiers_fired"])
+            t_state["running_low"] = new_low
 
-        for tier, fire_price in newly_fired:
-            t_state["tiers_fired"].append(tier)
-            danger_tag = _danger_gate_tag(t, danger_lookup)
-            msg = _build_gap_rebound_message(t, tier, fire_price, new_low, day_open, gap_pct, danger_tag)
-            if bot is not None:
-                await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
-            else:
-                print(f"[NO TELEGRAM TOKEN] {msg}")
-            summary["rebound_sent"] += 1
-            if tier >= max(GAP_REBOUND_TIERS):
-                t_state["done"] = True
+            for tier, fire_price in newly_fired:
+                t_state["tiers_fired"].append(tier)
+                danger_tag = _danger_gate_tag(t, danger_lookup)
+                msg = _build_gap_rebound_message(t, tier, fire_price, new_low, day_open, gap_pct, danger_tag)
+                if bot is not None:
+                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                else:
+                    print(f"[NO TELEGRAM TOKEN] {msg}")
+                summary["rebound_sent"] += 1
+                if tier >= max(GAP_REBOUND_TIERS):
+                    t_state["done"] = True
+
+        # MBSS v2 (user request 2026-08-30, MERGE): mekanisme KEDUA, independen
+        # dari REBOUND di atas -- lihat docstring fungsi ini/_detect_gap_hold.
+        if not t_state["hold_sent"]:
+            det_hold = _detect_gap_hold(bars, prev_close, ref.get("avg_vol_20d"))
+            if det_hold:
+                danger_tag = _danger_gate_tag(t, danger_lookup)
+                risk_tags = [danger_tag] if danger_tag else []
+                msg = _build_gap_hold_message(t, det_hold, risk_tags=risk_tags)
+                if bot is not None:
+                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                else:
+                    print(f"[NO TELEGRAM TOKEN] {msg}")
+                t_state["hold_sent"] = True
+                summary["hold_sent"] += 1
 
     _save_rebound_state(state)
-    print(f"✅ Gap-rebound scan selesai: {summary['scanned']} ticker discan, {summary['rebound_sent']} alert REBOUND terkirim.")
+    print(f"✅ Gap scan selesai: {summary['scanned']} ticker discan, {summary['rebound_sent']} alert REBOUND + {summary['hold_sent']} alert HOLD terkirim.")
     return summary
 
 
@@ -542,95 +616,230 @@ def _fetch_daily_ref(tickers: list[str]) -> dict:
         volumes = d["Volume"].reindex(closes.index).fillna(0).astype(float)
         value_traded = (closes * volumes).tail(20)
         avg_value_traded_20d = float(value_traded.mean()) if len(value_traded) else None
-        ref[t] = {"prev_close": prev_close, "ret_3d": ret_3d, "avg_value_traded_20d": avg_value_traded_20d}
+        # MBSS v2 (user request 2026-08-30, merge gap-up/gap-rebound): avg
+        # volume MENTAH (bukan value_traded) -- basis vol_ratio_partial di
+        # _detect_gap_hold, sama window/tail(20) dgn avg_value_traded_20d
+        # di atas (konsisten dgn toleransi "20d" yg sudah dipakai field itu).
+        vol_tail20 = volumes.tail(20)
+        avg_vol_20d = float(vol_tail20.mean()) if len(vol_tail20) else None
+        ref[t] = {
+            "prev_close": prev_close, "ret_3d": ret_3d,
+            "avg_value_traded_20d": avg_value_traded_20d, "avg_vol_20d": avg_vol_20d,
+        }
     return ref
 
 
-# MBSS v2 (user request 2026-08-27 -- riset BSJP buy-power backtest 2 tahun
-# 576 ISSI: rasio volume hari ARA vs rata2 20 hari adalah prediktor
-# terbaik, titik efektif >=10x [median high besok naik dari ~2-5% ke
-# 6-9%, gap-positif 68-69% vs 62-64%]): monitor live BSJP-ARA (sleeper,
-# engine/nightly.py load_bsjp_ara_candidates) + second-wave (load_second_
-# wave_watch_for_today) utk rasio volume PACE-ADJUSTED (skala waktu
-# sesi berjalan, BUKAN rasio end-of-day yg divalidasi -- ekstrapolasi
-# beralasan, sama spirit dgn Alert B's ARA_TP -- info di message).
-BUY_POWER_STRONG_VOL_RATIO = 10.0
-BSJP_TYPICAL_SESSION_MINUTES = 330  # sesi IDX S1+S2 penuh, sama konvensi fetch_opening_dynamics
+# MBSS v2 (user request 2026-08-29, REVISI TOTAL -- unified BSJP, blend
+# ARA/second-wave jadi SATU sinyal, "Beli Sore Jual Pagi"): full parameter
+# sweep (ret_1d band, volume multiplier, price-near-high tightness, volume
+# vs MA200 -- 162 kombinasi, validasi CLOSE-based/exit-efficiency bukan
+# touch-rate, daily_2y_issi_raw.pkl chronological discovery/validation
+# split) menemukan gap-reaction TERBAIK justru saat SEMUA 4 kriteria
+# berikut terpenuhi bersamaan:
+#   1. ret_1d > 18% (bukan 20% ala ARA lama -- granular sweep 15-20%
+#      nunjukkan 18-19% n/hari lebih banyak, kualitas identik ke 20%)
+#   2. Volume > 1.5x volume kemarin
+#   3. High < 1.01x harga sekarang ("clean close" -- proksi close_pos_
+#      today, korelasi TERKUAT ke gap besok yg ditemukan sesi ini, 0.327
+#      Spearman, jauh di atas fitur lain yg diuji)
+#   4. Volume > 1.0x rata-rata volume 200 hari
+# Median gap reaction (Open besok vs harga saat SEMUA 4 lolos) = 3.1%,
+# n=196-208 validation, out-of-sample. TIDAK ada individual WR yg
+# justified (semua korelasi fitur lanjutan <0.25 setelah gate ini) --
+# TP1 pakai angka grup, bukan model per-ticker.
+#
+# ARSITEKTUR 2-FASE (user request, "kalau EOD-only, belum tentu open besok
+# up dari close, jadi ketinggalan kereta"): entry sebenarnya SORE INI
+# (SEBELUM gap terjadi), BUKAN besok pagi (setelah gap, sudah kemahalan) --
+# deteksi HARUS live intraday:
+#   Fase 1 (/bsjp, user-trigger akhir sesi 1): scan SELURUH universe,
+#     simpan yg lolos 4 kriteria sbg shortlist.
+#   Fase 2 (run_bsjp_recheck_once, JobQueue tiap 30 menit 14:00-15:50):
+#     re-cek HANYA shortlist (murah), kirim alert final ke ticker yg MASIH
+#     lolos SEMUA 4 kriteria (proyeksi makin akurat makin sore) & belum
+#     pernah dialert hari ini.
+# Alert = sinyal "beli SEKARANG", bukan sekadar konfirmasi pasif. TP1 =
+# harga saat alert x (1+3.1%), jual besok pagi begitu tersentuh (atau,
+# kalau belum sempat entry sore, besok pagi masih ada room ke TP1 -> boleh
+# masuk/averaging up; sudah dekat/lewat TP1 -> jangan kejar). JANGAN tahan
+# ke closing besok -- gap fade cepat (D1 CLOSE median -5.93% pd threshold
+# ini, jauh lebih dalam dari gap reaction-nya sendiri).
+BSJP_RET1D_MIN_PCT = 18.0
+BSJP_VOL_VS_PREV_DAY_MULT = 1.5
+BSJP_CLEAN_CLOSE_MULT = 1.01
+BSJP_VOL_VS_MA200_MULT = 1.0
+BSJP_TP1_MEDIAN_GAP_PCT = 3.1
+BSJP_RECHECK_WINDOW_START = datetime.time(14, 0)
+BSJP_RECHECK_WINDOW_END = datetime.time(15, 50)
+BSJP_RECHECK_INTERVAL_SEC = 1800  # 30 menit
+BSJP_MIN_HISTORY_DAYS = 260  # >200 hari (MA200) + buffer hari libur/data hilang
+
+STATE_FILE_BSJP = os.path.join(core.PROJECT_ROOT, "bsjp_shortlist_state.json")
 
 
-def _fetch_volume_ref(tickers: list[str]) -> dict:
+def _load_bsjp_state() -> dict:
+    if not os.path.exists(STATE_FILE_BSJP):
+        return {}
+    try:
+        with open(STATE_FILE_BSJP) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_bsjp_state(state: dict):
+    with open(STATE_FILE_BSJP, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
     """
-    Sama pola dgn _fetch_daily_ref, TAPI TANPA filter harga 60-600 -- BSJP-
-    ARA/second-wave TIDAK dibatasi band harga scanalert biasa (BSJP-ARA
-    sendiri pakai batas Rp1000, second-wave malah tanpa batas harga sama
-    sekali). Cuma butuh avg_vol_20d (volume LEMBAR, bukan value rupiah --
-    beda dari _fetch_daily_ref's avg_value_traded_20d) utk hitung pace-
-    adjusted volume ratio.
+    SATU bulk fetch daily (period cukup utk MA200 + hari ini) -- yfinance
+    selama jam bursa berjalan mengembalikan bar HARI INI sbg baris TERAKHIR
+    yg live-updating (Open=open hari ini, High/Low=sejauh ini, Close=harga
+    terakhir, Volume=volume sejauh ini) -- SATU fetch ini cukup utk semua
+    4 kriteria, tidak perlu fetch intraday terpisah.
     """
     symbols = [t + ".JK" for t in tickers]
-    data = yf.download(symbols, period="20d", interval="1d", group_by="ticker", threads=True, progress=False)
-    ref = {}
+    data = yf.download(symbols, period=f"{BSJP_MIN_HISTORY_DAYS}d", interval="1d", group_by="ticker", threads=True, progress=False)
+    snap = {}
     for t in tickers:
         sym = t + ".JK"
         try:
             d = data[sym].dropna(how="all")
         except Exception:
             continue
-        volumes = d["Volume"].dropna().astype(float)
-        if len(volumes) < 2:
+        if len(d) < 201:  # butuh >=200 hari SEBELUM hari ini + hari ini sendiri
             continue
-        ref[t] = {"avg_vol_20d": float(volumes.tail(20).mean())}
-    return ref
+        today = d.iloc[-1]
+        prior = d.iloc[:-1]
+        current_price = float(today["Close"])
+        high_so_far = float(today["High"])
+        volume_so_far = float(today["Volume"]) if not pd.isna(today["Volume"]) else 0.0
+        prev_close = float(prior["Close"].iloc[-1])
+        prev_volume = float(prior["Volume"].iloc[-1])
+        vol_ma200 = float(prior["Volume"].tail(200).mean())
+        if prev_close <= 0:
+            continue
+        snap[t] = {
+            "current_price": current_price, "high_so_far": high_so_far, "volume_so_far": volume_so_far,
+            "prev_close": prev_close, "prev_volume": prev_volume, "vol_ma200": vol_ma200,
+            "ret_1d_pct": (current_price / prev_close - 1) * 100,
+        }
+    return snap
 
 
-def _detect_buy_power_surge(bars: pd.DataFrame, avg_vol_20d: float | None) -> dict | None:
-    """
-    First-touch: pace-adjusted volume ratio (volume hari ini SEJAUH INI vs
-    ekspektasi pace normal) >= BUY_POWER_STRONG_VOL_RATIO. Pace pakai
-    len(bars) sbg proksi menit sesi berjalan -- bar 1m yfinance sudah
-    otomatis skip jeda istirahat 12:00-13:30 (dikonfirmasi dari data riil),
-    jadi hitungan baris = menit sesi genuine, bukan wall-clock.
-    """
-    if bars.empty or not avg_vol_20d or avg_vol_20d <= 0:
-        return None
-    minutes_elapsed = max(5, len(bars))
-    expected_vol_so_far = avg_vol_20d * (minutes_elapsed / BSJP_TYPICAL_SESSION_MINUTES)
-    if expected_vol_so_far <= 0:
-        return None
-    volume_so_far = float(bars["Volume"].fillna(0).astype(float).sum())
-    vol_pace_ratio = volume_so_far / expected_vol_so_far
-    if vol_pace_ratio < BUY_POWER_STRONG_VOL_RATIO:
-        return None
-    current_price = float(bars["Close"].astype(float).iloc[-1])
-    return {"vol_pace_ratio": vol_pace_ratio, "volume_so_far": volume_so_far, "current_price": current_price}
+def _check_bsjp_criteria(snap: dict) -> bool:
+    """SEMUA 4 kriteria wajib (AND) -- lihat catatan BSJP_RET1D_MIN_PCT di atas."""
+    ret_1d = snap.get("ret_1d_pct")
+    prev_volume = snap.get("prev_volume")
+    vol_ma200 = snap.get("vol_ma200")
+    volume_so_far = snap.get("volume_so_far")
+    current_price = snap.get("current_price")
+    high_so_far = snap.get("high_so_far")
+    if None in (ret_1d, prev_volume, vol_ma200, volume_so_far, current_price, high_so_far):
+        return False
+    if ret_1d <= BSJP_RET1D_MIN_PCT:
+        return False
+    if not prev_volume or volume_so_far <= BSJP_VOL_VS_PREV_DAY_MULT * prev_volume:
+        return False
+    if not vol_ma200 or volume_so_far <= BSJP_VOL_VS_MA200_MULT * vol_ma200:
+        return False
+    if not current_price or high_so_far >= BSJP_CLEAN_CLOSE_MULT * current_price:
+        return False
+    return True
 
 
-# MBSS v2 (user request 2026-08-29 -- TP1 BESOK): reuse angka median-high
-# yg SUDAH divalidasi (BSJP-ARA sleeper n=2027 episode/2thn; second-wave
-# n dari data yg sama, historis lebih lemah) -- stat aslinya "median high
-# BESOK relatif ke OPEN besok", yg belum diketahui saat alert fire HARI
-# INI. TP1_BESOK di sini pakai harga SEKARANG sbg proksi open besok
-# (estimasi, BUKAN harga pasti -- gap besok bisa beda dari closing/harga
-# hari ini) -- caller HARUS tandai "(estimasi)" di pesan.
-BSJP_ARA_MEDIAN_HIGH_FROM_OPEN_PCT = 4.9
-BSJP_SECOND_WAVE_MEDIAN_HIGH_FROM_OPEN_PCT = 4.1
-
-
-def _build_buy_power_surge_message(ticker: str, detection: dict, source: str, extra: dict) -> str:
-    if source == "bsjp_ara":
-        median_high_pct = BSJP_ARA_MEDIAN_HIGH_FROM_OPEN_PCT
-        source_label = f"BSJP-ARA sleeper (katalis: {extra.get('catalyst_category', '-')})"
-    else:
-        median_high_pct = BSJP_SECOND_WAVE_MEDIAN_HIGH_FROM_OPEN_PCT
-        source_label = "BSJP reaktivasi (second-wave, pernah ARA {:.0f}% dlm 10hr terakhir)".format(extra.get("max_ret_1d_pct_10d", 0))
-    tp1_besok = detection["current_price"] * (1 + median_high_pct / 100.0)
+def _build_bsjp_message(ticker: str, snap: dict) -> str:
+    current_price = snap["current_price"]
+    tp1_price = current_price * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0)
+    vol_vs_prev = snap["volume_so_far"] / max(snap["prev_volume"], 1.0)
     return (
         f"BSJP\n"
-        f"🔥 {ticker} BUY POWER KUAT — {source_label}\n"
-        f"Volume pace {detection['vol_pace_ratio']:.1f}x normal | harga {detection['current_price']:,.0f}\n"
-        f"TP1 BESOK (estimasi): {tp1_besok:,.0f}\n"
-        f"Exit guidance: jual dekat open/awal sesi BESOK, JANGAN tahan sampai closing — makin besar volume hari ini makin besar giveback-nya."
+        f"🔥 {ticker} BUY POWER KUAT — vol {vol_vs_prev:.1f}x kemarin, harga dekat high hari ini\n"
+        f"Harga sekarang: {current_price:,.0f}\n"
+        f"TP1 (estimasi): {tp1_price:,.0f}\n"
+        f"BELI SORE INI. Jual besok pagi begitu TP1 tersentuh."
     )
+
+
+async def run_bsjp_shortlist_scan(tickers: list[str]) -> list[dict]:
+    """
+    FASE 1 (/bsjp, user-trigger akhir sesi 1): scan SELURUH universe thd 4
+    kriteria, simpan yg lolos sbg shortlist utk di-recheck Fase 2. Return
+    list kandidat (dict lengkap termasuk snapshot) utk ditampilkan
+    langsung di reply command.
+    """
+    snapshot = await asyncio.to_thread(_fetch_bsjp_universe_snapshot, tickers)
+    passed = [{"ticker": t, **snap} for t, snap in snapshot.items() if _check_bsjp_criteria(snap)]
+
+    state = _load_bsjp_state()
+    today = _today_str()
+    if state.get("trading_day_marker") != today:
+        state = {"trading_day_marker": today, "shortlist": [], "alerted": []}
+    state["shortlist"] = sorted(set(state.get("shortlist", [])) | {c["ticker"] for c in passed})
+    state.setdefault("alerted", [])
+    _save_bsjp_state(state)
+    return passed
+
+
+async def run_bsjp_recheck_once() -> dict:
+    """
+    FASE 2 (JobQueue, tiap BSJP_RECHECK_INTERVAL_SEC, no-op murah di luar
+    jendela BSJP_RECHECK_WINDOW_START-END): re-cek HANYA shortlist Fase 1,
+    kirim alert final ke ticker yg MASIH lolos SEMUA 4 kriteria & belum
+    pernah dialert hari ini (dedup via state["alerted"]).
+    """
+    now_wib = datetime.datetime.now(core.WIB)
+    if not (BSJP_RECHECK_WINDOW_START <= now_wib.time() <= BSJP_RECHECK_WINDOW_END):
+        return {"checked": 0, "alerted": 0}
+
+    state = _load_bsjp_state()
+    today = _today_str()
+    if state.get("trading_day_marker") != today:
+        return {"checked": 0, "alerted": 0}  # belum /bsjp hari ini -- tidak ada shortlist utk di-recheck
+
+    alerted_already = set(state.get("alerted", []))
+    shortlist = [t for t in state.get("shortlist", []) if t not in alerted_already]
+    if not shortlist:
+        return {"checked": 0, "alerted": 0}
+
+    snapshot = await asyncio.to_thread(_fetch_bsjp_universe_snapshot, shortlist)
+    bot = None
+    if core.TELEGRAM_BOT_TOKEN:
+        import telegram
+        bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
+
+    n_alerted = 0
+    alerted_list = state.setdefault("alerted", [])
+    fired = []
+    for t in shortlist:
+        snap = snapshot.get(t)
+        if not snap or not _check_bsjp_criteria(snap):
+            continue
+        msg = _build_bsjp_message(t, snap)
+        if bot is not None:
+            await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+        else:
+            print(f"[NO TELEGRAM TOKEN] {msg}")
+        alerted_list.append(t)
+        n_alerted += 1
+        # MBSS v2 (user request -- lock HANYA saat alert BENERAN fire, bukan
+        # di shortlist Fase 1 yg belum tentu konfirmasi): cut_loss pakai
+        # prev_close (thesis "buy power" gagal kalau balik ke bawah closing
+        # kemarin) -- proksi wajar, bukan angka backtest terpisah.
+        fired.append({
+            "ticker": t, "current_price": snap["current_price"],
+            "targets": {"tp_1": snap["current_price"] * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0), "cut_loss": snap["prev_close"]},
+        })
+
+    _save_bsjp_state(state)
+    if fired:
+        try:
+            await asyncio.to_thread(core.lock_daily_daytrade_picks, fired, "bsjp")
+        except Exception as e:
+            print(f"⚠️ Gagal mengunci picks BSJP untuk /winrate: {e}")
+    return {"checked": len(shortlist), "alerted": n_alerted}
 
 
 # MBSS v2 (user request 2026-08-27 -- live case: "248 Failed downloads" SEMUA
@@ -693,25 +902,17 @@ def _compute_current_session_vwap(bars: pd.DataFrame) -> float | None:
 # MBSS v2 (user request 2026-08-24, live case FIRE: gap-up +13.4% di
 # pembukaan, TIDAK KETANGKAP Alert A/B karena keduanya cuma bandingkan bar
 # SESAMA hari itu -- gap yg terjadi SEBELUM bar pertama secara struktural
-# tidak pernah terlihat). Informational-only tag, BUKAN alert baru dgn
-# klaim prediktif -- dites thd data 1m riil (344 ticker, 19 hari bursa,
-# n=4003 gap-day event) TAPI per-bucket n KECIL (n=15 holds di sweet spot),
-# jauh di bawah confidence temuan lain sesi ini (puluhan ribu sampel).
-# HANYA bucket 5-12% (gabungan 5-8%+8-12%) yg ditampilkan -- further-gain
-# median +16.5%, 66.7% EOD positif thd open. Di LUAR range ini SENGAJA
-# tidak fire sama sekali (user request -- "kalau >12% masih bahaya spt
-# >15%, drop; <5% no meaningful gain, drop juga"): gap<5% historis lemah
-# (n=85, cuma 29.3% EOD positif bahkan yg holds), gap>=12% (persis kasus
-# FIRE sendiri) JUSTRU paling lemah (+6.3%, cuma 20% EOD positif, n=5) --
-# FIRE profitable hari itu TIDAK berarti gap besar reliably bagus, dan
-# gap>=12% juga cepat mendekati wilayah NO_ROOM_GAIN_PCT (exhaust) yg
-# sudah terbukti berisiko tinggi (lihat catatan no-room di atas). "Holds"
-# = harga tidak jatuh >3% dari open dlm 5 bar pertama yg tersedia (sama
-# persis metodologi backtest-nya).
-GAP_UP_MIN_PCT = 5.0
-GAP_UP_MAX_PCT = 12.0
+# tidak pernah terlihat). Awalnya informational-only tag (dites thd 344
+# ticker/19 hari, n=4003 gap-day event, further-gain median +16.5%/66.7%
+# EOD positif di bucket 5-12% "holds" tapi n=15 kecil) -- lihat riwayat lama
+# utk detail. RETIRED sbg mekanisme SENDIRI 2026-08-30, DIGABUNG ke
+# GAP_REBOUND_MIN_PCT/MAX_PCT di atas (satu range gap, bukan dua yg
+# overlap) -- "holds" checknya (GAP_UP_HOLD_CHECK_BARS/MAX_DROP_PCT di
+# bawah) tetap dipertahankan, dipakai _detect_gap_hold (mekanisme KEDUA,
+# lihat GAP_HOLD_MIN_VOL_RATIO_PARTIAL).
 GAP_UP_HOLD_CHECK_BARS = 5
 GAP_UP_HOLD_MAX_DROP_PCT = -3.0
+GAP_HOLD_SESSION_MINUTES = 330  # aproksimasi menit sesi IDX (09:00-16:00 dikurangi istirahat ~90 menit) -- basis normalisasi vol_ratio_partial
 
 # MBSS v2 (user request 2026-08-29 -- "DAY TRADE" TP1/NO CHASE): backtest 1m
 # riil (174 ticker gap-candidate, 27 hari bursa, n=97 event gap 5-12% dgn
@@ -721,34 +922,51 @@ GAP_UP_HOLD_MAX_DROP_PCT = -3.0
 # (median return dari entry ke closing -1.12%, cuma 38.2% positif) --
 # TIDAK monoton membaik di level lebih rendah (belum dites <2%), tapi +2%
 # adalah titik test pertama yg sudah loss-making, jadi dipakai sbg cutoff
-# konservatif. HC_GAP_WATCH (beda populasi -- gap>=3% pasca-HC-flag, bukan
-# gap 5-12% umum) REUSE angka yg sama -- belum ada backtest 1m terpisah
-# khusus utk populasi itu, sama spirit dgn CHASE_WARN_GAIN_FROM_OPEN_PCT
-# yg direuse ke conviction sweep.
+# konservatif. (HC_GAP_WATCH dulu me-reuse angka yg sama utk populasinya
+# sendiri -- RETIRED 2026-08-30, lihat engine/nightly.py.) Sekarang dipakai
+# _build_gap_hold_message (PENGGANTI _build_gap_up_message lama).
 DAY_TRADE_GAP_TP1_PCT = 4.0
 DAY_TRADE_NO_CHASE_PCT = 2.0
 
 
-def _detect_gap_up(bars: pd.DataFrame, prev_close: float) -> dict | None:
+def _detect_gap_hold(bars: pd.DataFrame, prev_close: float, avg_vol_20d: float | None) -> dict | None:
+    """
+    Mekanisme KEDUA gap signal (MERGE 2026-08-30, PENGGANTI _detect_gap_up
+    lama -- lihat catatan GAP_HOLD_MIN_VOL_RATIO_PARTIAL utk riset
+    lengkap). Beda dari versi lama: (1) TIDAK fire kalau holds=False sama
+    sekali (dulu tetap fire dgn catatan "belum jelas bertahan" -- versi
+    lama TERBUKTI give-back parah, jadi sekarang genuinely gate, bukan
+    cuma informational), (2) WAJIB lolos floor volume vol_ratio_partial
+    (missing avg_vol_20d = TIDAK fire, bukan neutral -- filter volume
+    justru INTI perbaikan mekanisme ini, sama disiplin dgn daytrade_hc_
+    confidence.compute_tp1 "fitur tak lengkap -> None").
+    """
     if bars.empty or not prev_close or prev_close <= 0:
         return None
     day_open = float(bars["Open"].astype(float).iloc[0])
     if day_open <= 0:
         return None
     gap_pct = (day_open - prev_close) / prev_close * 100
-    if gap_pct < GAP_UP_MIN_PCT or gap_pct >= GAP_UP_MAX_PCT:
-        return None  # di luar sweet spot 5-12% -- sengaja tidak fire, bukan cuma diberi catatan lemah
+    if gap_pct < GAP_REBOUND_MIN_PCT or gap_pct >= GAP_REBOUND_MAX_PCT:
+        return None
     check_bars = bars.iloc[:GAP_UP_HOLD_CHECK_BARS]
     if len(check_bars) < GAP_UP_HOLD_CHECK_BARS:
-        return None  # tunggu cukup bar dulu sebelum menilai "holds" -- first-touch tetap terjaga via state gap_checked
+        return None  # tunggu cukup bar dulu sebelum menilai "holds" -- first-touch tetap terjaga via state gap_hold_sent
     low_so_far = float(check_bars["Low"].astype(float).min())
     holds = (low_so_far - day_open) / day_open * 100 >= GAP_UP_HOLD_MAX_DROP_PCT
+    if not holds:
+        return None
+    if not avg_vol_20d:
+        return None
+    vol_window = float(check_bars["Volume"].fillna(0).astype(float).sum())
+    vol_ratio_partial = vol_window / (avg_vol_20d / GAP_HOLD_SESSION_MINUTES * GAP_UP_HOLD_CHECK_BARS)
+    if vol_ratio_partial < GAP_HOLD_MIN_VOL_RATIO_PARTIAL:
+        return None
     current_price = float(bars["Close"].astype(float).iloc[-1])
-    return {"gap_pct": gap_pct, "day_open": day_open, "holds": holds, "current_price": current_price}
+    return {"gap_pct": gap_pct, "day_open": day_open, "current_price": current_price, "vol_ratio_partial": vol_ratio_partial}
 
 
-def _build_gap_up_message(ticker: str, detection: dict, conviction: str = "", risk_tags: list[str] | None = None) -> str:
-    hold_txt = "bertahan" if detection["holds"] else "belum jelas bertahan (sempat turun >3% dari open)"
+def _build_gap_hold_message(ticker: str, detection: dict, conviction: str = "", risk_tags: list[str] | None = None) -> str:
     day_open = detection["day_open"]
     tp1 = day_open * (1 + DAY_TRADE_GAP_TP1_PCT / 100.0)
     no_chase = day_open * (1 + DAY_TRADE_NO_CHASE_PCT / 100.0)
@@ -756,7 +974,7 @@ def _build_gap_up_message(ticker: str, detection: dict, conviction: str = "", ri
     risk_lines = "".join(f"\n{tag}" for tag in (risk_tags or []))
     return (
         f"DAY TRADE\n"
-        f"🌅 {ticker} GAP-UP +{detection['gap_pct']:.1f}% di pembukaan ({hold_txt})\n"
+        f"🌅 {ticker} GAP-UP +{detection['gap_pct']:.1f}% HOLDS (vol {detection['vol_ratio_partial']:.1f}x laju normal)\n"
         f"open : {day_open:,.0f}\n"
         f"Now  : {detection['current_price']:,.0f}\n"
         f"TP 1 : {tp1:,.0f}\n"
@@ -973,16 +1191,17 @@ def _compute_tp_targets(prev_close: float, ara_price: float | None) -> tuple[flo
 # itu genuinely spike telanjang tanpa dukungan apa pun -- user bisa lebih
 # hati-hati/kurangi ukuran. Bukan filter/exclude (tidak mengubah kapan alert
 # fire), murni informational tag ditempel di SEMUA alert teknikal.
-def _conviction_tag(ticker: str, fcm_watchlist: dict, pre_continuation_watchlist: dict, hc_gap_watch_list: dict) -> str:
+def _conviction_tag(ticker: str, fcm_watchlist: dict, pre_continuation_watchlist: dict) -> str:
     if ticker in fcm_watchlist:
         w = fcm_watchlist[ticker]
         return f"✅ ADA SETUP: FRESH CROSS MOMENTUM ({w['cross_days_ago']}hr lalu, pre-cross +{w['ret10_pre_cross_pct']:.0f}%)"
     if ticker in pre_continuation_watchlist:
         w = pre_continuation_watchlist[ticker]
-        lane_label = {"PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)"}.get(w["lane"], w["lane"])
+        lane_label = {
+            "PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)",
+            "MOMENTUM_EXTENDED": "MOMENTUM EXTENDED (Swing)",
+        }.get(w["lane"], w["lane"])
         return f"✅ ADA SETUP: {lane_label}, {w['detail']}"
-    if ticker in hc_gap_watch_list:
-        return "✅ ADA SETUP: HC Minervini (diflag malam sebelumnya)"
     return "⚠️ NO SETUP — spike teknikal murni, tidak ada dukungan sinyal sistem (FCM/PRE/CONTINUATION/HC)"
 
 
@@ -1170,17 +1389,23 @@ PRE_CONTINUATION_BODY_MIN_PCT = 1.0
 PRE_CONTINUATION_SCAN_START = datetime.time(14, 0)
 MACD_CONTINUATION_MAX_CROSS_DAYS_AGO = 5    # PERSIS commands/scan.py high_conviction_command -- jangan drift
 
-# MBSS v2 (user request 2026-08-26): HC Minervini-8-kriteria di-HIDE dari
-# /hc langsung (win rate historis rendah, hit6=33.0% vs 50%+ lane lain, lihat
-# commands/scan.py high_conviction_command) -- SEBAGAI GANTI, dipantau live
-# esok harinya: gap-up dari closing malam ini (saat HC pertama diflag) >=3%
-# di pembukaan -> hit6=62.7% (n=51), jauh di atas baseline 33%. Watchlist
-# datang dari engine/nightly.py save_hc_gap_watch/load_hc_gap_watch_for_today
-# (overwrite tiap malam, HANYA valid utk H+1 -- window >H+1 belum
-# tervalidasi, sengaja TIDAK dipantau lebih lama, lihat load_hc_gap_watch_
-# for_today docstring). Definisi SENGAJA tidak mensyaratkan ticker tetap HC
-# di hari+1 (dites, subset itu n=14 malah lebih rendah hit6=50%).
-HC_GAP_WATCH_MIN_GAP_PCT = 3.0
+# MBSS v2 (user request 2026-08-30 -- "sinyal intraday lainnya sudah selaras
+# dengan swingtrade, masukkan MOMENTUM_EXTENDED juga"): lane ke-6 /go SWING
+# TRADE ini SEBELUMNYA absen dari watchlist live (_get_pre_continuation_
+# watchlist di bawah) -- gap murni, bukan disengaja. Konstanta PERSIS
+# commands/scan.py go_command/screen_daytrade -- jangan drift. Menambahkan
+# ini SEKALIGUS mengaktifkan _fail_signal_tag/FAIL_SIGNAL_EXTENDED_LANES
+# (sudah ditulis 2026-08-29, tapi selama ini TIDAK PERNAH match apa pun
+# krn tag "MOMENTUM_EXTENDED" belum pernah diproduksi di sini).
+MACD_EXTENDED_MIN_CROSS_DAYS_AGO = 6
+MACD_EXTENDED_MAX_CROSS_DAYS_AGO = 40
+MACD_GAP_SLOPE_Q4_THRESHOLD = 0.3106
+MACD_MOMENTUM_RET1D_MIN = 2.5
+
+# MBSS v2 (user request 2026-08-30): HC_GAP_WATCH_MIN_GAP_PCT + _detect_hc_
+# gap_watch/_build_hc_gap_watch_message DIHAPUS -- lihat engine/nightly.py
+# utk riwayat lengkap kenapa (backtest ulang dgn populasi WR model baru
+# membuktikan sinyal ini tidak bertahan sbg compound signal terpisah).
 
 # MBSS v2 (user request 2026-08-26 — "defense mechanism chasing", live case
 # beli di puncak NZIA/dkk sebelum 09:30): 3 tag informational (BUKAN filter/
@@ -1222,10 +1447,13 @@ RISKY_TIME_WINDOW_END = datetime.time(9, 30)
 # confirm) -- trade-off sengaja: lebih banyak false positive (bisa rebound
 # sebelum closing), krn tujuan tag ini WARNING dini, bukan sinyal exit
 # otomatis. Digate ke lane yg SUDAH "extended" by construction (MOMENTUM_
-# EXTENDED/BSJP_ARA/BSJP_SECOND_WAVE) -- lane FCM/ABOVE_MOMENTUM/CONTINUATION/
-# VALIDATION BELUM tentu "sudah lari jauh" jadi TIDAK match populasi backtest
-# di atas, sengaja tidak ikut digate.
-FAIL_SIGNAL_EXTENDED_LANES = ("MOMENTUM_EXTENDED", "BSJP_ARA", "BSJP_SECOND_WAVE")
+# EXTENDED) -- lane FCM/ABOVE_MOMENTUM/CONTINUATION/VALIDATION BELUM tentu
+# "sudah lari jauh" jadi TIDAK match populasi backtest di atas, sengaja
+# tidak ikut digate. BSJP_ARA/BSJP_SECOND_WAVE DIHAPUS dari sini (MBSS v2,
+# user request 2026-08-29) -- BSJP bukan lagi lane conviction-sweep, sudah
+# punya disiplin exit sendiri ("beli sore jual pagi", lihat run_bsjp_
+# recheck_once), tidak lewat jalur fail-signal ini lagi.
+FAIL_SIGNAL_EXTENDED_LANES = ("MOMENTUM_EXTENDED",)
 
 # MBSS v2 (user request 2026-08-26): floor likuiditas KHUSUS tag Alert A/B/
 # gap-up, SENGAJA lebih longgar dari core.LIQUIDITY_FLOOR_VALUE_TRADED_IDR
@@ -1271,9 +1499,12 @@ def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
 def _get_pre_continuation_watchlist(universe: list[str]) -> dict:
     """
     Reuse PERSIS kriteria PRE-CROSS lane (macd_approach_tier, engine/
-    scoring.py) dan CONTINUATION/VALIDATION (macd_cross_direction bullish,
+    scoring.py), CONTINUATION/VALIDATION (macd_cross_direction bullish,
     cross<=5hr, gain_since_cross 6-10%/3-6%, commands/scan.py high_
-    conviction_command) -- dihitung ulang di sini via compute_factor_
+    conviction_command), dan MOMENTUM_EXTENDED (cross 6-40hr, gap_slope_3d>=
+    Q4, ret_1d>2.5%, commands/scan.py go_command -- ditambah 2026-08-30
+    supaya SEMUA 6 lane /go SWING TRADE tercakup live, bukan cuma 5) --
+    dihitung ulang di sini via compute_factor_
     scoring, pola SAMA dgn _get_fresh_cross_momentum_watchlist di atas
     (independen dari command lain sudah jalan atau belum hari ini).
 
@@ -1301,6 +1532,23 @@ def _get_pre_continuation_watchlist(universe: list[str]) -> dict:
             watchlist[t] = {
                 "lane": "PRE", "detail": tier,
                 "dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b"),
+            }
+            continue
+        # MOMENTUM_EXTENDED (lane ke-6 /go SWING TRADE, ditambah 2026-08-30)
+        # -- gate SENDIRI, TIDAK pakai MACD_LANE_DIST_SMA20_MIN_PCT (beda dari
+        # CONTINUATION/VALIDATION di bawah, PERSIS commands/scan.py go_command
+        # swing_candidates loop -- jangan tambah gate yg tidak ada di sana).
+        if (
+            r.get("macd_regime") == "ABOVE_CENTERLINE" and r.get("macd_episode_had_volume_breakout") is True
+            and r.get("macd_cross_days_ago") is not None
+            and MACD_EXTENDED_MIN_CROSS_DAYS_AGO <= r["macd_cross_days_ago"] <= MACD_EXTENDED_MAX_CROSS_DAYS_AGO
+            and r.get("macd_gap_slope_3d") is not None and r["macd_gap_slope_3d"] >= MACD_GAP_SLOPE_Q4_THRESHOLD
+            and r.get("ret_1d_pct") is not None and r["ret_1d_pct"] > MACD_MOMENTUM_RET1D_MIN
+        ):
+            watchlist[t] = {
+                "lane": "MOMENTUM_EXTENDED", "detail": f"cross {r['macd_cross_days_ago']}hr lalu, ret1d +{r['ret_1d_pct']:.1f}%",
+                "dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b"),
+                "gap_slope_3d": r.get("macd_gap_slope_3d"),
             }
             continue
         sma_dist = r.get("price_vs_sma20_pct")
@@ -1365,47 +1613,24 @@ def _tp_lines_suffix(watchlist_entry: dict, current_price: float | None) -> str:
 
 def _build_h1_strong_body_message(ticker: str, detection: dict, watchlist_entry: dict) -> str:
     lane, detail = watchlist_entry["lane"], watchlist_entry["detail"]
-    lane_label = {"PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)"}.get(lane, lane)
+    lane_label = {
+        "PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)",
+        "MOMENTUM_EXTENDED": "MOMENTUM EXTENDED (Swing)",
+    }.get(lane, lane)
     tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
     if tp_suffix:
         hist_line = tp_suffix.lstrip("\n")
     else:
-        hist_label = {"PRE": "hit6~50-56%", "CONTINUATION": "hit6~60.2%", "VALIDATION": "hit6~57.6%"}.get(lane, "-")
+        hist_label = {
+            "PRE": "hit6~50-56%", "CONTINUATION": "hit6~60.2%", "VALIDATION": "hit6~57.6%",
+            "MOMENTUM_EXTENDED": "hit6~69.4-70.2%",
+        }.get(lane, "-")
         hist_line = f"Historis: {hist_label}"
     return (
         f"SWING TRADE\n"
         f"📈 {ticker} MENJELANG CLOSING — {lane_label}, {detail}\n"
         f"Body hijau +{detection['gain_pct']:.1f}% dari open ({detection['day_open']:,.0f}) — skrg {detection['current_price']:,.0f}\n"
         f"{hist_line}"
-    )
-
-
-def _detect_hc_gap_watch(bars: pd.DataFrame, prev_close: float) -> dict | None:
-    """Gap-up di pembukaan dari closing malam saat pertama diflag HC (lihat HC_GAP_WATCH_MIN_GAP_PCT)."""
-    if bars.empty or not prev_close or prev_close <= 0:
-        return None
-    day_open = float(bars["Open"].astype(float).iloc[0])
-    if day_open <= 0:
-        return None
-    gap_pct = (day_open - prev_close) / prev_close * 100
-    if gap_pct < HC_GAP_WATCH_MIN_GAP_PCT:
-        return None
-    current_price = float(bars["Close"].astype(float).iloc[-1])
-    return {"gap_pct": gap_pct, "day_open": day_open, "prev_close": prev_close, "current_price": current_price}
-
-
-def _build_hc_gap_watch_message(ticker: str, detection: dict) -> str:
-    day_open = detection["day_open"]
-    tp1 = day_open * (1 + DAY_TRADE_GAP_TP1_PCT / 100.0)
-    no_chase = day_open * (1 + DAY_TRADE_NO_CHASE_PCT / 100.0)
-    return (
-        f"DAY TRADE\n"
-        f"🔥 {ticker} HC GAP-UP +{detection['gap_pct']:.1f}% dari closing malam HC diflag ({detection['prev_close']:,.0f})\n"
-        f"open : {day_open:,.0f}\n"
-        f"Now  : {detection['current_price']:,.0f}\n"
-        f"TP 1 : {tp1:,.0f}\n"
-        f"NO CHASE > {no_chase:,.0f}\n"
-        f"Cek 1x, tidak dipantau lagi hari berikutnya kalau tidak fire hari ini."
     )
 
 
@@ -1525,8 +1750,7 @@ async def run_scan_alert_once() -> dict:
     """
     summary = {
         "skipped_reason": None, "alert_a_sent": 0, "alert_b_sent": 0, "scanned": 0, "excluded_no_room": 0,
-        "gap_up_sent": 0, "pullback_entry_sent": 0, "open_buy_sent": 0, "pre_continuation_sent": 0, "hc_gap_sent": 0,
-        "buy_power_sent": 0,
+        "pullback_entry_sent": 0, "open_buy_sent": 0, "pre_continuation_sent": 0,
     }
 
     now_wib = datetime.datetime.now(core.WIB)
@@ -1630,15 +1854,6 @@ async def run_scan_alert_once() -> dict:
         state["lane_tp_computed"] = True
         print(f"✅ Confidence individual (TP1/TP2) dihitung -- {n_suppressed} ticker di-suppress (WR<50% di level terdekat).")
 
-    if state.get("hc_gap_watch_list") is None:
-        import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
-        hc_watch_rows = await asyncio.to_thread(nightly_engine.load_hc_gap_watch_for_today)
-        hc_gap_watch_list = {row["ticker"]: row["prev_close"] for row in hc_watch_rows if row.get("prev_close")}
-        state["hc_gap_watch_list"] = hc_gap_watch_list
-        print(f"✅ HC gap-watch hari ini: {len(hc_gap_watch_list)} ticker (dari HC Minervini malam kemarin).")
-    else:
-        hc_gap_watch_list = state["hc_gap_watch_list"]
-
     # MBSS v2 (user request 2026-08-26, live case NZIA: Alert B fire kuat tapi
     # Danger Gate malam sebelumnya SUDAH menolaknya) -- baca predicted_danger/
     # passed_danger_gate dari backbone_daily malam terakhir (bukan hitung
@@ -1659,45 +1874,21 @@ async def run_scan_alert_once() -> dict:
     else:
         danger_lookup = state["danger_lookup"]
 
-    # MBSS v2 (user request 2026-08-27 -- BSJP buy-power monitor): BSJP-ARA
-    # (sleeper+katalis, sudah dihitung nightly) + second-wave (reaktivasi,
-    # sudah dihitung nightly) digabung jadi satu lookup {ticker: source_info}
-    # -- keduanya dipantau pace volume live yg SAMA (_detect_buy_power_surge),
-    # bedanya cuma pesan/statistik yg ditampilkan.
-    if state.get("bsjp_watch_lookup") is None:
-        import engine.nightly as nightly_engine
-        bsjp_ara_rows = await asyncio.to_thread(nightly_engine.load_bsjp_ara_candidates)
-        second_wave_rows = await asyncio.to_thread(nightly_engine.load_second_wave_watch_for_today)
-        bsjp_watch_lookup = {}
-        for row in bsjp_ara_rows:
-            if row.get("ticker"):
-                bsjp_watch_lookup[row["ticker"]] = {"source": "bsjp_ara", "catalyst_category": row.get("catalyst_category")}
-        for row in second_wave_rows:
-            if row.get("ticker") and row["ticker"] not in bsjp_watch_lookup:  # BSJP-ARA prioritas kalau ticker sama kebetulan masuk dua-duanya
-                bsjp_watch_lookup[row["ticker"]] = {"source": "second_wave", "max_ret_1d_pct_10d": row.get("max_ret_1d_pct_10d")}
-        state["bsjp_watch_lookup"] = bsjp_watch_lookup
-        if bsjp_watch_lookup:
-            vol_ref = await asyncio.to_thread(_fetch_volume_ref, list(bsjp_watch_lookup.keys()))
-            state["bsjp_vol_ref"] = vol_ref
-        else:
-            state["bsjp_vol_ref"] = {}
-        print(f"✅ BSJP watch hari ini: {len(bsjp_ara_rows)} BSJP-ARA + {len(second_wave_rows)} second-wave = {len(bsjp_watch_lookup)} ticker dipantau buy-power.")
-    else:
-        bsjp_watch_lookup = state["bsjp_watch_lookup"]
-    bsjp_vol_ref = state.get("bsjp_vol_ref", {})
+    # MBSS v2 (user request 2026-08-29, REVISI): BSJP watch-lookup DIHAPUS
+    # dari state loop bersama ini -- lihat run_bsjp_shortlist_scan/
+    # run_bsjp_recheck_once utk mekanisme BSJP yang baru (2-fase, state
+    # & cadence sendiri).
 
-    # Union -- FCM/PRE-CONTINUATION/HC-gap-watch/BSJP-watch BISA di luar band
-    # harga 60-600 (tidak ada floor harga di definisi masing-masing), jadi
-    # tidak selalu subset alert_universe.
+    # Union -- FCM/PRE-CONTINUATION BISA di luar band harga 60-600 (tidak
+    # ada floor harga di definisi masing-masing), jadi tidak selalu subset
+    # alert_universe.
     alert_universe = list(daily_ref.keys())
     full_ticker_set = sorted(
         set(alert_universe) | set(fcm_watchlist.keys()) | set(pre_continuation_watchlist.keys())
-        | set(hc_gap_watch_list.keys()) | set(bsjp_watch_lookup.keys())
     )
     print(
         f"🔍 Scan-alert: {len(full_ticker_set)} ticker ({len(alert_universe)} alert + {len(fcm_watchlist)} FCM + "
-        f"{len(pre_continuation_watchlist)} PRE/CONTINUATION + {len(hc_gap_watch_list)} HC gap-watch + "
-        f"{len(bsjp_watch_lookup)} BSJP-watch), fetch bar 1m..."
+        f"{len(pre_continuation_watchlist)} PRE/CONTINUATION), fetch bar 1m..."
     )
     data = await asyncio.to_thread(_fetch_today_1m, full_ticker_set)
 
@@ -1724,32 +1915,17 @@ async def run_scan_alert_once() -> dict:
         vwap_now = _compute_current_session_vwap(bars)
 
         t_state = tickers_state.setdefault(
-            t, {"excluded_no_room": False, "alert_a_sent": False, "alert_b_sent": False, "gap_up_sent": False, "watchlist_entry_sent": False}
+            t, {"excluded_no_room": False, "alert_a_sent": False, "alert_b_sent": False, "watchlist_entry_sent": False}
         )
-        t_state.setdefault("gap_up_sent", False)  # ticker lama di state file blm punya field ini
         t_state.setdefault("watchlist_entry_sent", False)
         t_state.setdefault("open_buy_sent", False)
         t_state.setdefault("pre_continuation_sent", False)
-        t_state.setdefault("hc_gap_sent", False)
-        t_state.setdefault("buy_power_sent", False)
 
-        # BSJP-ARA (sleeper) / second-wave (reaktivasi): pace volume live
-        # >=BUY_POWER_STRONG_VOL_RATIO -- jalan SEPANJANG hari (bukan cuma
-        # jendela waktu tertentu spt FCM/PRE-CONTINUATION), krn buy-power
-        # bisa muncul kapan saja & justru itu yg mau ditangkap SEDINI mungkin
-        # (persis kasus EKAD, entry mid-day bukan di jam spesifik).
-        if t in bsjp_watch_lookup and not t_state["buy_power_sent"]:
-            watch_info = bsjp_watch_lookup[t]
-            avg_vol_20d = (bsjp_vol_ref.get(t) or {}).get("avg_vol_20d")
-            det_power = _detect_buy_power_surge(bars, avg_vol_20d)
-            if det_power:
-                msg = _build_buy_power_surge_message(t, det_power, watch_info["source"], watch_info)
-                if bot is not None:
-                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
-                else:
-                    print(f"[NO TELEGRAM TOKEN] {msg}")
-                t_state["buy_power_sent"] = True
-                summary["buy_power_sent"] = summary.get("buy_power_sent", 0) + 1
+        # MBSS v2 (user request 2026-08-29, REVISI): BSJP DIKELUARKAN dari
+        # loop scan-alert bersama ini -- sekarang sinyal 2-fase sendiri
+        # (run_bsjp_shortlist_scan via /bsjp akhir sesi 1, run_bsjp_
+        # recheck_once tiap 30 menit 14:00-15:50), state & cadence
+        # sendiri, tidak lagi numpang fetch 1m bar loop 3-menitan ini.
 
         # FCM: beli di open, jendela pendek (FCM_OPEN_BUY_WINDOW_END) --
         # dicek SEBELUM confirmation/pullback (independen, bisa dua-duanya
@@ -1782,19 +1958,8 @@ async def run_scan_alert_once() -> dict:
                 t_state["pre_continuation_sent"] = True
                 summary["pre_continuation_sent"] += 1
 
-        # HC Minervini gap-watch -- ticker ini di-hide dari /hc malam
-        # kemarin, dipantau SEKALI utk gap>=3% pagi ini (lihat
-        # HC_GAP_WATCH_MIN_GAP_PCT).
-        if t in hc_gap_watch_list and not t_state["hc_gap_sent"]:
-            det_hc_gap = _detect_hc_gap_watch(bars, hc_gap_watch_list[t])
-            if det_hc_gap:
-                msg = _build_hc_gap_watch_message(t, det_hc_gap)
-                if bot is not None:
-                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
-                else:
-                    print(f"[NO TELEGRAM TOKEN] {msg}")
-                t_state["hc_gap_sent"] = True
-                summary["hc_gap_sent"] += 1
+        # MBSS v2 (user request 2026-08-30): HC Minervini gap-watch DIHAPUS --
+        # lihat engine/nightly.py utk riwayat lengkap.
 
         # FRESH CROSS MOMENTUM watchlist entry -- DUA sisi (user correction:
         # bukan cuma pullback), independen dari prev_close/Alert A-B
@@ -1824,21 +1989,17 @@ async def run_scan_alert_once() -> dict:
                     summary["pullback_entry_sent"] += 1
 
         if ref is None:
-            continue  # ticker ini HANYA di fcm_watchlist/pre_continuation_watchlist/hc_gap_watch_list (di luar band 60-600) -- Alert A/B/gap-up di bawah butuh prev_close, sisanya di-skip
+            continue  # ticker ini HANYA di fcm_watchlist/pre_continuation_watchlist (di luar band 60-600) -- Alert A/B di bawah butuh prev_close, sisanya di-skip
 
-        conviction = _conviction_tag(t, fcm_watchlist, pre_continuation_watchlist, hc_gap_watch_list)
+        conviction = _conviction_tag(t, fcm_watchlist, pre_continuation_watchlist)
         risk_tags = _risk_tags(bars, ref, now_wib, ticker=t, danger_lookup=danger_lookup)
 
-        if not t_state["gap_up_sent"]:
-            det_gap = _detect_gap_up(bars, prev_close)
-            if det_gap:
-                msg = _build_gap_up_message(t, det_gap, conviction=conviction, risk_tags=risk_tags)
-                if bot is not None:
-                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
-                else:
-                    print(f"[NO TELEGRAM TOKEN] {msg}")
-                t_state["gap_up_sent"] = True
-                summary["gap_up_sent"] = summary.get("gap_up_sent", 0) + 1
+        # MBSS v2 (user request 2026-08-30, MERGE): gap-up/gap-hold DIPINDAH
+        # total ke run_gap_rebound_scan_once (job 1-menit, window 09:00-09:10)
+        # -- lihat catatan GAP_HOLD_MIN_VOL_RATIO_PARTIAL/_detect_gap_hold.
+        # Tidak lagi di sini (job 3-menitan ini, sepanjang hari) krn deteksi
+        # "holds" SELALU cuma butuh 5 menit pertama, window sempit REBOUND
+        # job sudah cukup & lebih presisi (cadence 1 menit vs 3 menit).
 
         if not t_state["excluded_no_room"] and not t_state["alert_a_sent"] and not t_state["alert_b_sent"]:
             day_open = float(bars["Open"].astype(float).iloc[0])
@@ -1897,8 +2058,6 @@ async def run_scan_alert_once() -> dict:
           f"{summary['open_buy_sent']} FCM open-buy, "
           f"{summary['pullback_entry_sent']} FCM pullback/confirmation, "
           f"{summary['pre_continuation_sent']} PRE/CONTINUATION menjelang closing, "
-          f"{summary['hc_gap_sent']} HC gap-watch, "
-          f"{summary['buy_power_sent']} BSJP buy-power surge, "
           f"{summary['excluded_no_room']} di-exclude (no room).")
     return summary
 
@@ -1931,9 +2090,8 @@ def _ensure_conviction_daily_reset(state: dict) -> dict:
 def _fetch_conviction_ref(tickers: list[str]) -> dict:
     """
     Closing kemarin (basis "estimasi max TP"), TANPA filter harga 60-600 --
-    sama alasan dgn _fetch_volume_ref: universe conviction sweep (FCM/PRE/
-    CONTINUATION/VALIDATION/HC-gap-watch/BSJP-watch) tidak dibatasi band
-    harga scanalert biasa.
+    universe conviction sweep (FCM/PRE/CONTINUATION/VALIDATION/HC-gap-watch)
+    tidak dibatasi band harga scanalert biasa.
     """
     symbols = [t + ".JK" for t in tickers]
     data = yf.download(symbols, period="10d", interval="1d", group_by="ticker", threads=True, progress=False)
@@ -1954,8 +2112,8 @@ def _fetch_conviction_ref(tickers: list[str]) -> dict:
 def _build_conviction_universe_tags(main_state: dict) -> dict:
     """
     ticker -> {"tag": lane, "features": {...}}. features kosong ({}) utk
-    lane yg tak didukung engine/lane_confidence.py (HC_GAP_WATCH/BSJP_ARA/
-    BSJP_SECOND_WAVE/FAST_RECOVERY/EARLY_RECOVERY) -- caller fallback ke
+    lane yg tak didukung engine/lane_confidence.py (BSJP_ARA/BSJP_SECOND_
+    WAVE/FAST_RECOVERY/EARLY_RECOVERY) -- caller fallback ke
     CONVICTION_TP_CEILING_PCT utk lane2 itu. Baca watchlist yg SUDAH di-
     cache run_scan_alert_once() di scanalert_state.json (lihat catatan
     CONVICTION_SWEEP_WINDOW_START) -- fallback hitung sendiri kalau state
@@ -1980,30 +2138,14 @@ def _build_conviction_universe_tags(main_state: dict) -> dict:
         lane_tag = w["detail"] if w["lane"] == "PRE" else w["lane"]  # PRE -> FAST_RECOVERY/EARLY_RECOVERY/ABOVE_MOMENTUM
         tags[t] = {"tag": lane_tag, "features": {"dist_to_sma20": w.get("dist_to_sma20"), "pct_b": w.get("pct_b")}}
 
-    import engine.nightly as nightly_engine
-    hc_gap_watch_list = main_state.get("hc_gap_watch_list")
-    if hc_gap_watch_list is None:
-        hc_watch_rows = nightly_engine.load_hc_gap_watch_for_today()
-        hc_gap_watch_list = {row["ticker"]: row["prev_close"] for row in hc_watch_rows if row.get("prev_close")}
-    for t in hc_gap_watch_list:
-        if t not in tags:
-            tags[t] = {"tag": "HC_GAP_WATCH", "features": {}}
+    # MBSS v2 (user request 2026-08-30): HC_GAP_WATCH union DIHAPUS -- lihat
+    # engine/nightly.py utk riwayat lengkap.
 
-    bsjp_watch_lookup = main_state.get("bsjp_watch_lookup")
-    if bsjp_watch_lookup is None:
-        bsjp_ara_rows = nightly_engine.load_bsjp_ara_candidates()
-        second_wave_rows = nightly_engine.load_second_wave_watch_for_today()
-        bsjp_watch_lookup = {}
-        for row in bsjp_ara_rows:
-            if row.get("ticker"):
-                bsjp_watch_lookup[row["ticker"]] = {"source": "bsjp_ara"}
-        for row in second_wave_rows:
-            if row.get("ticker") and row["ticker"] not in bsjp_watch_lookup:
-                bsjp_watch_lookup[row["ticker"]] = {"source": "second_wave"}
-    for t, w in bsjp_watch_lookup.items():
-        if t not in tags:
-            tags[t] = {"tag": "BSJP_ARA" if w.get("source") == "bsjp_ara" else "BSJP_SECOND_WAVE", "features": {}}
-
+    # MBSS v2 (user request 2026-08-29, REVISI): BSJP TIDAK LAGI bagian
+    # union watchlist Conviction Sweep -- BSJP sekarang sinyal 2-fase
+    # sendiri (run_bsjp_shortlist_scan/run_bsjp_recheck_once), shortlist +
+    # state terpisah, TIDAK dicampur ke scanalert_state.json/tags lane
+    # MACD lain.
     return tags
 
 
@@ -2064,13 +2206,10 @@ def _process_conviction_ticker(t_state: dict, current_price: float, ref_price: f
 
 # MBSS v2 (user request 2026-08-29 -- kategori DAY TRADE/SWING TRADE/BSJP di
 # baris pertama tiap pesan): conviction sweep SELALU pakai ceiling 5-hari
-# bursa (SWING horizon) utk lane MACD -- BSJP_ARA/BSJP_SECOND_WAVE dikategori
-# "BSJP" biar konsisten dgn _build_buy_power_surge_message meski ceiling-nya
-# di sini masih ceiling generik 5-hari, BUKAN framing "besok" spt alert BSJP
-# dedicated -- catatan konsistensi, bukan sinkron penuh (beda mekanisme).
+# bursa (SWING horizon) utk lane MACD -- BSJP_ARA/BSJP_SECOND_WAVE DIHAPUS
+# dari conviction sweep (MBSS v2, user request 2026-08-29, lihat run_bsjp_
+# recheck_once), jadi tag di sini tidak pernah lagi berupa BSJP apa pun.
 def _conviction_sweep_category(tag: str) -> str:
-    if tag in ("BSJP_ARA", "BSJP_SECOND_WAVE"):
-        return "BSJP"
     return "SWING TRADE"
 
 
@@ -2085,7 +2224,7 @@ def _build_conviction_sweep_message(ticker: str, tag: str, tier: int, current_pr
     warn_lines = "".join(f"\n{t}" for t in (extra_tags or []))
     return (
         f"{_conviction_sweep_category(tag)}\n"
-        f"📈 {ticker} MOMENTUM MEMBANGUN (tier {tier}) — {tag}\n"
+        f"📈 {ticker} 🔺 RISING (tier {tier}/{CONVICTION_SWEEP_MAX_TIERS}) — {tag}\n"
         f"Harga {current_price:,.0f} ({gain_from_ref:+.1f}% dari closing kemarin {ref_price:,.0f})\n"
         f"{tp_line}\n"
         f"Radar: 2x checkpoint 15-menit naik beruntun{warn_lines}"
@@ -2100,7 +2239,7 @@ def _build_conviction_pullback_exception_message(ticker: str, tag: str, current_
     warn_lines = "".join(f"\n{t}" for t in (extra_tags or []))
     return (
         f"{_conviction_sweep_category(tag)}\n"
-        f"🔁 {ticker} PULLBACK RE-ENTRY (sudah lewat estimasi ceiling {label}) — {tag}\n"
+        f"🔁 {ticker} 🔺 STILL RISING setelah pullback (sudah lewat estimasi ceiling {label}) — {tag}\n"
         f"Harga {current_price:,.0f} ({gain_from_ref:+.1f}% dari closing kemarin {ref_price:,.0f}), sempat pullback dari puncak hari ini lalu naik lagi{warn_lines}"
     )
 

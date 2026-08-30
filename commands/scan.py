@@ -52,6 +52,8 @@ import engine.scoring as scoring_engine
 import engine.market as market_engine
 import engine.backbone as backbone_engine
 import engine.lane_confidence as lane_confidence
+import engine.swing_horizon_confidence as swing_horizon_confidence
+import engine.daytrade_hc_confidence as daytrade_hc_confidence
 
 
 # MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker, boleh
@@ -305,6 +307,238 @@ async def all_setup_candidates_command(update, context):
     all_tickers = [r["ticker"] for cands in lanes.values() for r in cands]
     buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
+
+
+# MBSS v2 (Lane Lifecycle Redesign, user request 2026-08-29/30, riset
+# research/MBSS_Lane_Lifecycle_Redesign_Brief.md): dist_to_20d_high_pct
+# di cache PRODUKSI = (high_20d-price)/price*100 (POSITIF kalau di
+# bawah high) -- engine/swing_horizon_confidence.py dilatih pakai
+# (price/high_20d-1)*100 (NEGATIF kalau di bawah high, denominator beda
+# jg). Konversi presisi (BUKAN flip tanda naif -- denominator beda):
+# high_20d = price*(1+field/100), lalu recompute rumus training persis.
+# Ketahuan SEBELUM wiring produksi -- kalau salah, prediksi model
+# TERBALIK (jauh dari high dibaca seolah dekat).
+def _map_features_for_swing_horizon(r: dict) -> dict:
+    dist_prod = r.get("dist_to_20d_high_pct")
+    dist_converted = None
+    if dist_prod is not None:
+        dist_converted = -dist_prod / (1 + dist_prod / 100.0)
+    return {
+        "dist_to_20d_high": dist_converted,
+        "adx14": r.get("adx"),
+        "gain_since_cross": r.get("macd_gain_since_cross_pct"),
+        "days_ago": r.get("macd_cross_days_ago"),
+    }
+
+
+_DAYTRADE_WR_MIN_VALUE_TRADED = 500_000_000
+_DAYTRADE_WR_MIN_PRICE = 50
+
+
+def _daytrade_wr_tp1(r: dict) -> dict | None:
+    """
+    Floor likuiditas + daytrade_hc_confidence.compute_tp1() utk SATU ticker
+    -- HELPER TUNGGAL (MBSS v2, user request 2026-08-30: "drop saja hc yang
+    lama, toh WR nya juga tidak korelasi?") dipakai /go, /hc,
+    compute_consensus_candidates, _consensus_sdt_hc_selected -- GANTI TOTAL
+    is_high_conviction/compute_high_conviction_score (Minervini 5-6 kriteria)
+    di SEMUA consumer produksi. Alasan: audit Task #21 menemukan kriteria
+    breakout_close_confirmed dead code STRUKTURAL (resistance dihitung dari
+    window yang SAMA dengan hari observasi sendiri, jadi resistance >=
+    High(hari ini) >= price SELALU -- 0 True dari 32.719 observasi
+    tervalidasi), dan 5 kriteria sisanya saling BERLAWANAN arah
+    (consolidation_tight/near_high positif ke close-based return tapi
+    negatif ke touch-rate; relative_volume_ok kebalikannya; above_ma20_
+    and_ma50 murni noise corr~0.00) -- makanya aggregate criteria_met
+    near-zero (corr -0.018 same-day / 0.02 horizon asli HC 5-hari), BUKAN
+    sekadar 1 kriteria buggy. Model regresi logistik yang dikalibrasi
+    LANGSUNG ke satu target (top-decile WR 69.2%, AUC 0.611, lihat
+    engine/daytrade_hc_confidence.py) jauh lebih koheren daripada sum vote
+    kriteria yang arahnya campur aduk. compute_high_conviction_score TIDAK
+    dihapus dari scoring.py (masih dihitung tiap /eodscan, field legacy
+    tanpa consumer produksi lagi) -- keputusan hapus fungsinya sepenuhnya
+    ditunda sampai genuinely yakin tidak ada rencana pakai lagi.
+    Return tp1_info ({"level_pct","wr_pct","price"}) atau None kalau tidak
+    lolos floor likuiditas ATAU tidak lolos floor WR 60% model.
+    """
+    price = r.get("price")
+    value_traded = r.get("value_traded")
+    if not price or price <= _DAYTRADE_WR_MIN_PRICE or not value_traded or value_traded <= _DAYTRADE_WR_MIN_VALUE_TRADED:
+        return None
+    dt_features = {
+        "day_range_pct_10d": r.get("day_range_pct_10d"), "vol_ratio": r.get("vol_ratio"),
+        "value_traded": value_traded, "relative_strength_vs_ihsg": r.get("relative_strength_vs_ihsg"),
+    }
+    return daytrade_hc_confidence.compute_tp1(dt_features, price)
+
+
+def _compute_daytrade_wr_candidates(pool: list) -> list:
+    """[(r, tp1_info), ...] terurut WR menurun -- lihat _daytrade_wr_tp1 utk alasan/scoping."""
+    out = [(r, tp1) for r in pool for tp1 in [_daytrade_wr_tp1(r)] if tp1]
+    out.sort(key=lambda pair: pair[1]["wr_pct"], reverse=True)
+    return out
+
+
+async def go_command(update, context):
+    """
+    /go -- dashboard gabungan DAY TRADE + SWING TRADE (MBSS Lane
+    Lifecycle Redesign, user request 2026-08-29/30, research/MBSS_Lane_
+    Lifecycle_Redesign_Brief.md). BSJP SENGAJA tidak ikut -- intraday-
+    only (Fase 1 /bsjp akhir sesi 1 + Fase 2 recheck otomatis 14:00-15:50,
+    lihat engine/scanalert.py run_bsjp_shortlist_scan/run_bsjp_recheck_
+    once), tidak cocok utk command "tarik semua sekarang" yg jalan kapan
+    saja.
+
+    DAY TRADE = EOD High Conviction (kandidat HC malam ini, "beli open
+    besok, jual hari yang sama", TP1/SL dari targets yang SUDAH ada di
+    pipeline HC -- tidak ada model baru).
+
+    SWING TRADE = SATU timeline gabungan lifecycle post-cross (PRE-CROSS/
+    FCM/CONTINUATION/VALIDATION/MOMENTUM_EXTENDED disatukan, BUKAN
+    kotak2 section terpisah spt /allsetup) -- tiap ticker tampil dgn
+    STATE SEKARANG saja (riwayat transisi perlu episode-tracking yg
+    SENGAJA belum dibangun, lihat diskusi arsitektur sesi ini) + TP1/TP2/
+    SL dari engine/lane_confidence.py (model lane LAMA, sudah proven,
+    TETAP primary) + tabel "Ekspektasi cepat" horizon SHORT(1-2D)/
+    MEDIUM(1-3D)/SWING(1-10D) dari engine/swing_horizon_confidence.py
+    (model BARU, unified lintas seluruh lifecycle, PELENGKAP bukan
+    pengganti TP1/TP2 di atas -- lihat catatan arsitektur "old model utk
+    TP1/TP2 konkret, new model utk ekspektasi horizon").
+    """
+    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
+    if not scored:
+        await core.safe_reply(update.message, staleness_note or "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
+        return
+
+    backbone_result, _ = nightly_engine.load_backbone_daily_allow_stale()
+    all_values = list(scored.values())
+    gate_survivors = backbone_engine.filter_to_gate_survivors(all_values, backbone_result) if backbone_result else all_values
+
+    lines = ["🧭 /go — DAY TRADE & SWING TRADE"]
+    if staleness_note:
+        lines.insert(0, staleness_note)
+
+    # ---------- DAY TRADE (MBSS v2, user request 2026-08-30, REVISI --
+    # is_high_conviction gate DIBUANG: criteria_met terbukti TIDAK
+    # prediktif thd same-day (corr=-0.018) MAUPUN horizon asli HC 5-hari
+    # (corr=0.02), sementara full-universe + model baru (day_range_pct_
+    # 10d/vol_ratio/value_traded/relative_strength_vs_ihsg) tervalidasi
+    # 6.4x lebih banyak kandidat/hari (185.8 vs 28.9) di kualitas top-
+    # decile yg SAMA (67.6% vs 69.2%) & AUC malah lebih baik (0.684 vs
+    # 0.611) -- lihat riwayat chat 2026-08-30. Populasi sekarang: SELURUH
+    # universe scored, basic liquidity floor saja (bukan lagi kriteria
+    # Minervini) -- model sendiri yg jadi gate via floor WR>=60%
+    # (compute_tp1 return None kalau tak lolos, TIDAK ditampilkan).
+    # Backlog audit HC individual criteria (TaskList #21) SELESAI 2026-08-30
+    # -- is_high_conviction sekarang DIGANTI TOTAL (bukan cuma di /go) oleh
+    # _daytrade_wr_tp1/_compute_daytrade_wr_candidates, lihat docstring
+    # helper itu utk alasan lengkap. Populasi: SELURUH universe scored,
+    # basic liquidity floor saja -- model sendiri yg jadi gate via floor
+    # WR>=60% (None kalau tak lolos, TIDAK ditampilkan).
+    daytrade_candidates = _compute_daytrade_wr_candidates(all_values)
+
+    lines.append(f"\n\nDAY TRADE ({len(daytrade_candidates)})")
+    if daytrade_candidates:
+        lines.append(f"⚠️ {daytrade_hc_confidence.DAYTRADE_EXIT_WARNING}")
+    if not daytrade_candidates:
+        lines.append("  (kosong malam ini)")
+    else:
+        for r, tp1_info in daytrade_candidates:
+            t = r["ticker"]; price = r.get("price")
+            targets = r.get("targets") or {}
+            cut_loss = targets.get("cut_loss")
+            block = [
+                f"  • {t} — {price}",
+                f"     Setup: EOD High Conviction | Entry {price} (ref: open besok)",
+                f"     TP1 {tp1_info['price']:,.0f} (WR {tp1_info['wr_pct']:.0f}%)" + (f" | SL {cut_loss}" if cut_loss else ""),
+            ]
+            lines.append("\n".join(block))
+    hc_candidates = [r for r, _ in daytrade_candidates]  # dipakai buttons di akhir command
+
+    # ---------- SWING TRADE (unified lifecycle -- REUSE kriteria PERSIS
+    # /allsetup, cuma ditampilkan SATU section bukan 7 blok terpisah) ----------
+    _DIST_SMA20_MIN = 12.0
+    _FCM_MAX_DAYS_AGO = 2
+    _FCM_RET10_PRE_MIN = 15.0
+    _CONT_MAX_CROSS_DAYS = 5
+    _EXT_MIN_DAYS_AGO = 6
+    _EXT_MAX_DAYS_AGO = 40
+    _EXT_GAP_SLOPE_Q4 = 0.3106
+    _EXT_RET1D_MIN = 2.5
+
+    swing_candidates = []  # [(lane_name, r)]
+    for r in gate_survivors:
+        tier = r.get("macd_approach_tier")
+        if tier in ("FAST_RECOVERY", "EARLY_RECOVERY", "ABOVE_MOMENTUM"):
+            swing_candidates.append((tier, r))
+        if (
+            r.get("macd_cross_direction") == "bullish" and r.get("macd_cross_days_ago") is not None
+            and r["macd_cross_days_ago"] <= _FCM_MAX_DAYS_AGO
+            and r.get("macd_ret10_pre_cross_pct") is not None and r["macd_ret10_pre_cross_pct"] > _FCM_RET10_PRE_MIN
+        ):
+            swing_candidates.append(("FCM", r))
+    for r in all_values:
+        gain = r.get("macd_gain_since_cross_pct")
+        dist_sma20 = r.get("price_vs_sma20_pct")
+        if (
+            r.get("macd_cross_direction") == "bullish" and r.get("macd_cross_days_ago") is not None
+            and r["macd_cross_days_ago"] <= _CONT_MAX_CROSS_DAYS
+            and gain is not None and dist_sma20 is not None and dist_sma20 >= _DIST_SMA20_MIN
+        ):
+            if 6.0 <= gain < 10.0:
+                swing_candidates.append(("CONTINUATION", r))
+            elif 3.0 <= gain < 6.0:
+                swing_candidates.append(("VALIDATION", r))
+        if (
+            r.get("macd_regime") == "ABOVE_CENTERLINE" and r.get("macd_episode_had_volume_breakout") is True
+            and r.get("macd_cross_days_ago") is not None and _EXT_MIN_DAYS_AGO <= r["macd_cross_days_ago"] <= _EXT_MAX_DAYS_AGO
+            and r.get("macd_gap_slope_3d") is not None and r["macd_gap_slope_3d"] >= _EXT_GAP_SLOPE_Q4
+            and r.get("ret_1d_pct") is not None and r["ret_1d_pct"] > _EXT_RET1D_MIN
+        ):
+            swing_candidates.append(("MOMENTUM_EXTENDED", r))
+
+    lines.append(f"\n\nSWING TRADE ({len(swing_candidates)})")
+    if not swing_candidates:
+        lines.append("  (kosong malam ini)")
+    else:
+        for lane_name, r in swing_candidates:
+            t = r["ticker"]; price = r.get("price")
+            block = [f"  • {t} — {price}", f"     Setup: {lane_name}"]
+
+            targets = r.get("targets") or {}
+            cut_loss = targets.get("cut_loss")
+
+            if lane_name in lane_confidence.SUPPORTED_LANES:
+                if lane_name == "FCM":
+                    features = {"ret10_pre_cross_pct": r.get("macd_ret10_pre_cross_pct"), "pct_b": r.get("pct_b")}
+                elif lane_name == "MOMENTUM_EXTENDED":
+                    features = {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b"), "gap_slope_3d": r.get("macd_gap_slope_3d")}
+                else:
+                    features = {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}
+                if price and lane_confidence.should_suppress(lane_name, features, price):
+                    block.append("     [confidence individual <50%, HATI-HATI]")
+                else:
+                    tp = lane_confidence.compute_tp1_tp2(lane_name, features, price) if price else None
+                    if tp:
+                        block.append("     " + " / ".join(lane_confidence.format_tp_lines(tp)))
+            if cut_loss:
+                block.append(f"     SL {cut_loss}")
+
+            # Ekspektasi cepat (pelengkap, model BARU) -- semua lane termasuk
+            # FAST_RECOVERY/EARLY_RECOVERY yg tak didukung lane_confidence.
+            if price:
+                sh_features = _map_features_for_swing_horizon(r)
+                expectation = swing_horizon_confidence.compute_horizon_expectation(sh_features, price)
+                exp_lines = swing_horizon_confidence.format_expectation_lines(expectation)
+                if exp_lines:
+                    block.append("     Ekspektasi cepat (pelengkap, bukan pengganti TP di atas):")
+                    block.extend(f"       {ln}" for ln in exp_lines)
+
+            lines.append("\n".join(block))
+
+    all_tickers = [r["ticker"] for r in hc_candidates] + [r["ticker"] for _, r in swing_candidates]
+    buttons = core.build_check_buttons(sorted(set(all_tickers)))
+    await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
 
 async def screen_daytrade(update, context):
@@ -1429,24 +1663,26 @@ async def gptpick_callback(update, context):
 
 async def high_conviction_command(update, context):
     """
-    /hc — top 10 saham HIGH CONVICTION dari cache /eodscan malam terakhir,
-    diurutkan skor final tertinggi (MBSS v2, user request — kasus nyata
-    DMAS: skor 8.4, Nilai 9.2, ceiling asterisk dari broker screenshot).
+    /hc — top 10 saham DAY TRADE (EOD High Conviction) dari cache /eodscan
+    malam terakhir, diurutkan WR individual tertinggi (MBSS v2, user
+    request 2026-08-30: "drop saja hc yang lama, toh WR nya juga tidak
+    korelasi?" -- GANTI TOTAL dari Minervini 5-6 kriteria/is_high_conviction
+    ke daytrade_hc_confidence, model & populasi PERSIS sama dgn /go DAY
+    TRADE, lihat _daytrade_wr_tp1 utk alasan lengkap/riwayat audit Task
+    #21). TP1 & WR sekarang individual per ticker (bukan lagi cuma badge
+    boolean lolos-tidaknya kriteria).
 
     /hc rr — sama, tapi diurutkan risk_reward_at_max TERTINGGI (user
     request lanjutan) — ticker tanpa RR yang bisa dihitung otomatis
-    ditaruh paling belakang, TIDAK di-exclude (tetap HIGH CONVICTION,
-    cuma datanya belum lengkap untuk dibandingkan RR-nya).
+    ditaruh paling belakang, TIDAK di-exclude.
 
     /hc rank | /hc prob | /hc danger — urutkan berdasarkan angka backbone
     AB-RC1 (entry_rank/probability_score/predicted_danger, sama yang
     ditampilkan di tiap baris) — user request, buat cepat lihat mana yang
-    paling bagus/aman di antara kandidat HIGH CONVICTION yang cukup banyak.
+    paling bagus/aman di antara kandidat yang cukup banyak.
 
     Murni baca cache (nightly_engine.load_daily_scan_cache) — TIDAK fetch
-    apa pun, jadi instan. is_high_conviction sudah dihitung penuh saat
-    /eodscan (7-kriteria Minervini/IBD-style breakout check), tinggal
-    filter+urutkan di sini.
+    apa pun, jadi instan.
     """
     sort_mode = context.args[0].lower() if len(context.args) > 0 else None  # None (default), "rr", "rank", "prob", "danger"
 
@@ -1472,22 +1708,21 @@ async def high_conviction_command(update, context):
     pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
     scored = {r["ticker"]: r for r in pool}
 
-    # MBSS v2 (user request — "HC dan SDT justru butuh regime aware"):
-    # recheck regime-scaled (HC_MET_FRACTION_BY_REGIME, engine/scoring.py)
-    # di atas is_high_conviction mentah — regime lebih ketat dari R1 butuh
-    # criteria_met lebih tinggi dari fraction 0.70 lama.
-    hc_market_regime = (backbone_result or {}).get("market_regime")
-    candidates = [r for r in scored.values() if scoring_engine.is_high_conviction_regime_aware(r, hc_market_regime)]
+    # MBSS v2 (user request 2026-08-30): populasi + model WR individual --
+    # lihat _compute_daytrade_wr_candidates/_daytrade_wr_tp1 (PERSIS dipakai
+    # /go DAY TRADE juga, REUSE bukan formula paralel).
+    daytrade_wr_pairs = _compute_daytrade_wr_candidates(list(scored.values()))
+    candidates = [r for r, _ in daytrade_wr_pairs]
+    wr_info_by_ticker = {r["ticker"]: info for r, info in daytrade_wr_pairs}
 
     # MBSS v2 BUGFIX (user request 2026-08-27 — live case: candidates
-    # Minervini kosong malam itu, TAPI early-return di sini SEBELUM ini
-    # sekaligus membungkam accumulation_candidates/continuation_candidates/
+    # kosong malam itu, TAPI early-return di sini SEBELUM ini sekaligus
+    # membungkam accumulation_candidates/continuation_candidates/
     # validation_candidates di bawah -- tiga section itu computasinya
-    # SAMA SEKALI TIDAK bergantung pada Minervini punya kandidat atau tidak
-    # [independen sejak hc_tickers dihapus dari exclusion, lihat catatan di
-    # excluded_tickers]. "Tidak ada Minervini" TIDAK BOLEH berarti "tidak
-    # ada apa-apa di /hc" -- lanjut proses dgn candidates=[] (sort/top10
-    # aman kosong), jangan return dini.
+    # SAMA SEKALI TIDAK bergantung pada DAY TRADE punya kandidat atau tidak.
+    # "Tidak ada DAY TRADE" TIDAK BOLEH berarti "tidak ada apa-apa di /hc"
+    # -- lanjut proses dgn candidates=[] (sort/top10 aman kosong), jangan
+    # return dini.
     if sort_mode == "rr":
         # None-safe: ticker tanpa RR terhitung ditaruh PALING BELAKANG (bukan
         # dibuang) — pakai (punya_rr, nilai_rr) sebagai key gabungan supaya
@@ -1519,29 +1754,23 @@ async def high_conviction_command(update, context):
             candidates.sort(key=lambda r: (_bb(r).get("predicted_danger") is None, _bb(r).get("predicted_danger") or 0))
             sort_label = "danger backbone terendah (paling aman dulu)"
     else:
-        # MBSS v2 (user request — /hc positioning vs /screendaytrade): urutan
-        # DEFAULT diubah dari "Skor Final" (Value/Momentum/Sentimen 25/45/30%,
-        # formula UNIVERSAL yang juga dipakai /myportfolio buat posisi jangka
-        # menengah — TIDAK diubah bobotnya di situ) ke compute_daytrade_score
-        # — formula momentum-murni yang SUDAH ADA & SUDAH teruji (dipakai
-        # screendaytrade/gptpick, sudah dapat perbaikan arah-ADX). Dipilih
-        # REUSE daripada bikin formula momentum baru lagi (persis yang mau
-        # dihindari — jangan tambah formula paralel lagi). "Skor Final" tetap
-        # DITAMPILKAN di output (Nilai/Momentum/Sentimen breakdown) buat
-        # transparansi, cuma bukan lagi KUNCI urutnya.
-        for r in candidates:
-            r["_daytrade_score_hc"] = core.compute_daytrade_score(r)
-        candidates.sort(key=lambda r: r["_daytrade_score_hc"], reverse=True)
-        sort_label = "momentum (compute_daytrade_score, bukan Skor Final)"
+        # MBSS v2 (user request 2026-08-30): urutan DEFAULT = WR individual
+        # model daytrade_hc_confidence tertinggi -- `candidates` SUDAH terurut
+        # begitu (lihat _compute_daytrade_wr_candidates), tidak perlu dihitung
+        # ulang. compute_daytrade_score (momentum-murni, dipakai screendaytrade/
+        # gptpick) TIDAK lagi jadi kunci urut default /hc -- WR terkalibrasi
+        # langsung ke outcome lebih relevan utk positioning /hc sekarang.
+        sort_label = "WR individual tertinggi (daytrade_hc_confidence)"
     top10 = candidates[:10]
     broksum_data = nightly_engine.load_broksum_250()  # dimuat sekali di luar loop, murni baca cache (tidak fetch)
 
     # MBSS v2 (user request — ditemukan lewat penelusuran manual /winrate: /hc
     # TIDAK PERNAH terlacak sama sekali sebelumnya). Kunci lewat mekanisme
-    # yang SAMA dengan screendaytrade/gptpick/testbrief, source="hc" —
-    # dipakai untuk KEDUA mode urutan (final/rr), karena kriteria eligibility
-    # dasarnya (is_high_conviction) sama, cuma urutan tampilan yang beda.
-    # Gagal-lunak — kalau lock gagal, tetap tampilkan hasil seperti biasa.
+    # yang SAMA dengan screendaytrade/gptpick/testbrief, source="hc" --
+    # SAMA source dipertahankan meski model gantinya total (2026-08-30),
+    # supaya histori /winrate lane ini tetap satu timeline (bukan pecah jadi
+    # source baru tanpa alasan kuat). Gagal-lunak — kalau lock gagal, tetap
+    # tampilkan hasil seperti biasa.
     try:
         await asyncio.to_thread(core.lock_daily_daytrade_picks, top10, "hc", (backbone_result or {}).get("all_scored", {}))
     except Exception as e:
@@ -1555,35 +1784,35 @@ async def high_conviction_command(update, context):
     history_for_streak = core.load_daytrade_picks_history()
     pick_date_today = core.get_current_trading_day_close_marker()
 
-    # MBSS v2 (user request 2026-08-26 — riset backtest 2 tahun 576 ISSI:
-    # Minervini-8-kriteria hit6=33.0%, jauh di bawah FCM/PRE/CONTINUATION
-    # yang 50%+): breakdown per-ticker DI-HIDE dari sini (bukan dihapus —
-    # tetap di-lock ke daytrade_picks_history via lock_daily_daytrade_picks
-    # di bawah, jadi /winrate tetap bisa melacaknya), diganti catatan
-    # ringkas. Sinyal "sebenarnya" dipindah ke live: kalau ticker ini gap-up
-    # >=3% BESOK dari closing malam ini, scanalert.py mem-push alert
-    # terpisah (hit6=62.7%, n=51 — lihat engine/nightly.py's
-    # save_hc_gap_watch). Ini BUKAN exclude dari eligibility apa pun --
-    # kandidat tetap dipakai utk accumulation_candidates check, cuma
-    # listing verbose-nya yang disembunyikan. CATATAN (user request
-    # 2026-08-27, revisi dari versi awal): hc_tickers SUDAH TIDAK dipakai
-    # lagi utk exclude dari VALIDATION/CONTINUATION di bawah -- lihat
-    # catatan di excluded_tickers, exclusion lama itu jadi kontraproduktif
-    # begitu Minervini di-hide (ticker yg genuinely lolos kriteria
-    # tervalidasi malah ikut terkubur, bukan tampil di section yang tepat).
+    # MBSS v2 (user request 2026-08-30, GANTI TOTAL dari versi Minervini yg
+    # di-HIDE krn hit6~33%): model baru SUDAH tervalidasi (top-decile WR
+    # 69.2%, AUC 0.611, lihat daytrade_hc_confidence.py) -- breakdown
+    # per-ticker DITAMPILKAN LANGSUNG lagi, bukan disembunyikan.
     if candidates:
-        lines = [
-            f"🔥 HIGH CONVICTION (Minervini) — {len(top10)} kandidat di-HIDE dari daftar ({len(candidates)} total lolos kriteria)\n"
-            "Win rate historis lane ini rendah (hit6~33%, backtest 2 tahun) — TIDAK ditampilkan sebagai rekomendasi beli langsung.\n"
-            "Dipantau live: kalau gap-up ≥3% BESOK dari closing malam ini, akan di-push alert terpisah (historis hit6~63%, n=51).\n"
-        ]
+        lines = [f"🔥 DAY TRADE (EOD High Conviction) — {len(top10)} kandidat WR tertinggi dari {len(candidates)} lolos floor likuiditas\n"]
+        lines.append(f"⚠️ {daytrade_hc_confidence.DAYTRADE_EXIT_WARNING}\n")
+        for r in top10:
+            info = wr_info_by_ticker.get(r["ticker"])
+            if not info:
+                continue
+            t = r.get("targets", {})
+            cut_loss = t.get("cut_loss")
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            danger_note = ""
+            if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= 50:
+                danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
+            lines.append(
+                f"• {r['ticker']} — {r.get('price')}\n"
+                f"   TP1 {info['price']:,.0f} (WR {info['wr_pct']:.0f}%)" + (f" | SL {cut_loss}" if cut_loss else "")
+                + f"{danger_note}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
+            )
     else:
-        # MBSS v2 BUGFIX (user request 2026-08-27): 0 kandidat Minervini
+        # MBSS v2 BUGFIX (user request 2026-08-27): 0 kandidat DAY TRADE
         # TIDAK BOLEH berarti section CONTINUATION/VALIDATION/AKUMULASI di
         # bawah ikut disembunyikan (lihat catatan early-return yang dihapus
-        # di atas) -- pesan ini cuma bilang lane Minervini-nya kosong,
-        # bukan /hc keseluruhan kosong.
-        lines = ["🔥 HIGH CONVICTION (Minervini) — 0 kandidat lolos kriteria malam ini.\n"]
+        # di atas) -- pesan ini cuma bilang lane ini kosong, bukan /hc
+        # keseluruhan kosong.
+        lines = ["🔥 DAY TRADE (EOD High Conviction) — 0 kandidat lolos floor likuiditas/WR malam ini.\n"]
     if staleness_note:
         lines.insert(0, staleness_note)
 
@@ -1923,543 +2152,75 @@ async def high_conviction_command(update, context):
 
 
 # ==========================================
-# 🌆 BSJP SCREENING (MBSS v2, user request — REVISI diperketat berdasarkan
-# riset formula komunitas, termasuk yang tampak official dari Stockbit)
-# "Beli Sore Jual Pagi" — momentum/continuation variant (BEDA dari varian
-# reversal/rebound top-loser — riset dikonfirmasi ada 2 varian berbeda
-# dengan nama sama). Harus dijalankan MANUAL menjelang closing (15:50-16:00
-# WIB) — butuh data intraday live, TIDAK bisa dari cache /eodscan semalam.
-# Filosofi (dari riset): "Ikuti Uang Besar".
+# BSJP SCREENING (MBSS v2, user request 2026-08-29 -- REVISI TOTAL:
+# unified 4-kriteria, blend ARA/second-wave/6-kriteria-lama/pullback jadi
+# SATU sinyal "Beli Sore Jual Pagi". Full parameter sweep (162 kombinasi,
+# close-based/exit-efficiency validation, daily_2y_issi_raw.pkl) -- lihat
+# catatan lengkap di engine/scanalert.py run_bsjp_shortlist_scan/run_bsjp_
+# recheck_once. Command ini = FASE 1 (scan penuh universe akhir sesi 1,
+# simpan shortlist) -- FASE 2 (recheck live tiap 30 menit 14:00-15:50,
+# kirim alert final) jalan otomatis via JobQueue, lihat engine/legacy_
+# core.py run_bsjp_recheck_job.
 # ==========================================
-BSJP_MIN_GAIN_PCT = 5.0                # harga >= 1.05x previous close
-BSJP_VOL_VS_MA20_MULTIPLIER = 2.0      # volume hari ini >= 2x rata-rata 20 hari
-BSJP_VOL_VS_PREV_MULTIPLIER = 1.0      # volume hari ini >= 1x volume kemarin
-BSJP_RSI_MIN = 60                      # dipertahankan lebih ketat dari riset (RSI>=50)
-BSJP_RSI_MAX = 85
-BSJP_MIN_VALUE_TRADED_IDR = 5_000_000_000  # dinaikkan dari 1M, SEKARANG WAJIB (bukan peringatan)
-BSJP_ARA_DISTANCE_MIN_PCT = 0   # SEMENTARA permisif — user eksplisit minta lihat data real dulu
-BSJP_ARA_DISTANCE_MAX_PCT = 15  # sebelum kunci rentang final (ganti setelah lihat sebaran nyata)
-BSJP_PREFILTER_COUNT = 40  # berapa kandidat dari cache EOD yang di-live-check
-BSJP_DAILY_HISTORY_LOOKBACK = 25  # buat hitung SMA5 & volume MA20 (butuh >=20 bar + buffer)
-
-# MBSS v2 (user request, dari riset /finance — "buy the dip DALAM uptrend"
-# terbukti (literatur umum + IDX-specific findings.md) lebih baik dari
-# "bottom fishing oversold murni". Lane BARU, BERDAMPINGAN dengan 6
-# kriteria momentum di atas, arah BEDA: cari saham yang MASIH uptrend
-# jangka pendek TAPI baru selesai pullback sehat & reclaim EMA9 — bukan
-# cari yang lagi kencang naik. Ambang REUSE dari findings.md's
-# MOMENTUM_PULLBACK (IDX-validated, 63.0% win, n=671), BUKAN dikarang
-# baru): "above SMA50, 20d ROC>5%, dip lalu reclaim EMA9".
-BSJP_PULLBACK_MIN_ROC_20D = 5.0  # PERSIS threshold MOMENTUM_PULLBACK di findings.md
-BSJP_PULLBACK_DIP_LOOKBACK_DAYS = 3  # placeholder -- findings.md tidak spesifikkan window pastinya, perlu revalidasi forward
-
-# MBSS v2 (user request — BSJP-ARA "pola GIAA"):
-BSJP_ARA_MIN_MOMENTUM_PCT = 5.0   # harga hari ini vs open hari ini, minimal naik segini buat jadi kandidat
-BSJP_ARA_MIN_VOLQ = 3.0           # direvisi dari 5.0 (user request) — lebih banyak kandidat, referensi GIAA tetap 13x jauh di atas ini
-
-
-def compute_bsjp_obv(hist_daily) -> "pd.Series":
-    """OBV = kumulatif volume (searah pergerakan harga day-over-day)."""
-    close = hist_daily["Close"]
-    vol = hist_daily["Volume"]
-    direction = close.diff().apply(lambda d: 1 if d > 0 else (-1 if d < 0 else 0))
-    return (direction * vol).cumsum()
-
-
-async def compute_bsjp_structure_checklist(ticker: str, r: dict, hist_prior, current_price: float, volume_today_so_far: float) -> dict:
-    """
-    MBSS v2 (user request — diadopsi dari metodologi komunitas Threads: CMF>0,
-    OBV naik, MACD golden cross, hindari volume spike-lalu-turun, konfirmasi
-    multi-timeframe 15m/5m/1m searah). SENGAJA bukan kriteria wajib tambahan
-    (6 kriteria asli MASIH satu-satunya yang wajib) — kalau ke-11 kriteria
-    digabung jadi AND, hasil /bsjp nyaris pasti selalu kosong. Ini checklist
-    KONFIRMASI terpisah, ditampilkan sebagai skor X/5.
-    """
-    checklist = []
-
-    # 1. CMF > 0 (dari cache EOD kemarin — sudah dihitung compute_factor_scoring)
-    cmf = r.get("cmf")
-    checklist.append({"nama": "CMF > 0", "ok": cmf is not None and cmf > 0, "detail": f"{cmf:.2f}" if cmf is not None else "N/A"})
-
-    # 2. OBV naik (5 hari terakhir dari histori harian, TIDAK termasuk hari ini
-    # karena OBV butuh urutan closing yang stabil, bukan harga live yang masih bergerak)
-    try:
-        obv = compute_bsjp_obv(hist_prior.tail(10))
-        obv_rising = len(obv) >= 5 and obv.iloc[-1] > obv.iloc[-5]
-        checklist.append({"nama": "OBV naik (5hr)", "ok": obv_rising, "detail": f"{obv.iloc[-1]:,.0f} vs 5hr lalu {obv.iloc[-5]:,.0f}" if len(obv) >= 5 else "data kurang"})
-    except Exception:
-        checklist.append({"nama": "OBV naik (5hr)", "ok": False, "detail": "gagal dihitung"})
-
-    # 3. MACD bullish (dari cache EOD kemarin)
-    macd_state = r.get("macd_state")
-    checklist.append({"nama": "MACD bullish", "ok": macd_state == "bullish", "detail": macd_state or "N/A"})
-
-    # 4. HINDARI pola volume spike-lalu-turun: puncak volume 4 hari terakhir
-    # (termasuk hari ini) TIDAK boleh terjadi 2+ hari lalu dengan tren turun sejak itu
-    try:
-        recent_vols = list(hist_prior["Volume"].tail(3)) + [volume_today_so_far]  # 3 hari lalu + hari ini
-        peak_idx = recent_vols.index(max(recent_vols))
-        is_spike_then_drop = peak_idx <= 1 and recent_vols[-1] < recent_vols[peak_idx] * 0.7  # puncak 2+ hari lalu, sudah turun signifikan
-        checklist.append({"nama": "Bukan spike-lalu-turun", "ok": not is_spike_then_drop, "detail": f"vol 4hr: {[int(v) for v in recent_vols]}"})
-    except Exception:
-        checklist.append({"nama": "Bukan spike-lalu-turun", "ok": False, "detail": "gagal dihitung"})
-
-    # 5. Multi-timeframe searah (15m dan 1m JUGA candle positif, selaras 5m yang
-    # sudah dipakai di kriteria wajib) — INI YANG PALING MAHAL, 2 fetch tambahan per kandidat
-    mtf_aligned = True
-    mtf_detail = []
-    for interval in ("15m", "1m"):
-        try:
-            bars_tf = await asyncio.to_thread(core.get_intraday_session_bars, ticker, interval, "1d")
-            if bars_tf is None or bars_tf.empty:
-                mtf_aligned = False
-                mtf_detail.append(f"{interval}=N/A")
-                continue
-            tf_open = float(bars_tf["Open"].iloc[0])
-            tf_close = float(bars_tf["Close"].iloc[-1])
-            tf_positive = tf_close >= tf_open
-            mtf_aligned = mtf_aligned and tf_positive
-            mtf_detail.append(f"{interval}={'✅' if tf_positive else '❌'}")
-        except Exception:
-            mtf_aligned = False
-            mtf_detail.append(f"{interval}=error")
-    checklist.append({"nama": "Multi-timeframe searah (15m/5m/1m)", "ok": mtf_aligned, "detail": ", ".join(mtf_detail) + ", 5m=✅ (sudah dari kriteria wajib)"})
-
-    met = sum(1 for c in checklist if c["ok"])
-    return {"checklist": checklist, "met": met, "total": len(checklist)}
-
-
-async def _run_bsjp_6criteria(update):
-    """
-    Logika 6 kriteria wajib BSJP asli — diekstrak jadi fungsi TERPISAH dari
-    bsjp_screening_command() (MBSS v2, user request) supaya early-return di
-    sini (cache kosong, tidak ada kandidat lolos, dst) TIDAK ikut
-    menghentikan bagian BSJP-ARA yang jalan setelahnya di command utama.
-    """
-    scored = nightly_engine.load_daily_scan_cache()
-    if not scored:
-        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum ada/basi — jalankan /eodscan dulu (dari kemarin sore, bukan hari ini).")
-        return
-
-    await core.safe_reply(update.message, f"🌆 Screening BSJP (formula diperketat) dari {len(scored)} kandidat cache, mengecek data live untuk ~{BSJP_PREFILTER_COUNT} teratas...")
-
-    # Pra-filter murah: momentum positif dari cache kemarin (RS + di atas EMA9/SMA20)
-    pre_candidates = [
-        r for r in scored.values()
-        if (r.get("relative_strength_vs_ihsg") or -999) > 0
-        and r.get("high_conviction", {}).get("above_ma20_and_ma50")
-    ]
-    pre_candidates.sort(key=lambda r: r.get("relative_strength_vs_ihsg", 0), reverse=True)
-    pre_candidates = pre_candidates[:BSJP_PREFILTER_COUNT]
-
-    if not pre_candidates:
-        await core.safe_reply(update.message, "📋 Tidak ada kandidat momentum positif dari cache kemarin untuk dicek live.")
-        return
-
-    results = []
-    for r in pre_candidates:
-        ticker = r["ticker"]
-        prev_close = r.get("price")  # harga di cache KEMARIN = prev_close untuk hari ini
-
-        try:
-            bars = await asyncio.to_thread(core.get_intraday_session_bars, ticker, "5m", "1d")
-        except Exception as e:
-            print(f"⚠️ BSJP: gagal fetch intraday {ticker}: {e}")
-            continue
-        if bars is None or bars.empty:
-            continue
-
-        try:
-            hist_daily = await asyncio.to_thread(core.get_ohlcv_smart, ticker, BSJP_DAILY_HISTORY_LOOKBACK)
-        except Exception as e:
-            print(f"⚠️ BSJP: gagal fetch histori harian {ticker}: {e}")
-            continue
-        if hist_daily is None or hist_daily.empty or len(hist_daily) < 20:
-            continue  # butuh minimal 20 hari buat volume MA20 yang valid
-
-        current_price = float(bars["Close"].iloc[-1])
-        today_open = float(bars["Open"].iloc[0])
-        today_high = float(bars["High"].max())
-        today_low = float(bars["Low"].min())
-        volume_today_so_far = float(bars["Volume"].sum())
-
-        # Kriteria 1: harga naik >=5% dari kemarin
-        gain_pct = (current_price / prev_close - 1) * 100 if prev_close else None
-        c1_ok = gain_pct is not None and gain_pct >= BSJP_MIN_GAIN_PCT
-
-        # Kriteria 2: volume vs MA20 dan vs kemarin (dari histori harian, TIDAK termasuk hari ini)
-        hist_prior = hist_daily.iloc[:-1] if len(hist_daily) > 20 else hist_daily  # buang bar hari ini kalau kebetulan sudah ke-upsert
-        vol_ma20 = hist_prior["Volume"].tail(20).mean()
-        vol_yesterday = hist_prior["Volume"].iloc[-1]
-        c2_ok = (volume_today_so_far >= vol_ma20 * BSJP_VOL_VS_MA20_MULTIPLIER
-                 and volume_today_so_far >= vol_yesterday * BSJP_VOL_VS_PREV_MULTIPLIER)
-
-        # Kriteria 3: harga >= SMA5 (dari histori harian, TIDAK termasuk hari ini — SMA5 kemarin ke belakang)
-        sma5 = hist_prior["Close"].tail(5).mean()
-        c3_ok = current_price >= sma5
-
-        # Kriteria 4: candle hari ini positif
-        c4_ok = current_price >= today_open
-
-        # Kriteria 5: value traded (WAJIB sekarang)
-        value_traded_today = float((bars["Volume"] * bars["Close"]).sum())
-        c5_ok = value_traded_today >= BSJP_MIN_VALUE_TRADED_IDR
-
-        # Kriteria 6: RSI (dari cache kemarin — indikator harian, wajar tidak direcompute intraday)
-        rsi = r.get("rsi")
-        c6_ok = rsi is not None and BSJP_RSI_MIN <= rsi <= BSJP_RSI_MAX
-
-        wajib_lolos = c1_ok and c2_ok and c3_ok and c4_ok and c5_ok and c6_ok
-        if not wajib_lolos:
-            continue
-
-        ara_distance = core.compute_ara_distance_pct(current_price, prev_close)
-        close_pos = (current_price - today_low) / max(today_high - today_low, 1e-9)
-
-        # Bandarmology — INFORMASI saja, tidak menggugurkan (data cuma ada utk sebagian kecil saham)
-        akumulasi_note = ""
-        cached_bs = broker_engine.get_cached_brokersum(ticker)
-        if cached_bs:
-            try:
-                acc = broker_engine.assess_smart_accumulation(r, cached_bs)
-                if acc["checklist"]:
-                    akumulasi_note = f" | Akumulasi: {acc['criteria_met']}/{acc['criteria_checkable']}"
-            except Exception:
-                pass
-
-        # MBSS v2 (RapidAPI integration, "diskusi trader" session, user
-        # request): konfirmasi breakout dari nightly sweep — INFORMASI saja,
-        # tidak menggugurkan, sama seperti akumulasi_note di atas.
-        try:
-            alert = nightly_engine.get_breakout_alert_for_ticker(ticker)
-        except Exception:
-            alert = None
-        if alert and str(alert.get("severity", "")).upper() == "HIGH":
-            breakout_prob = (alert.get("indicators") or {}).get("breakout_probability", "-")
-            akumulasi_note += f" | Breakout {breakout_prob}%"
-
-        # Checklist konfirmasi struktur (TIDAK menggugurkan) — cuma dihitung
-        # untuk kandidat yang SUDAH lolos 6 kriteria wajib, supaya multi-timeframe
-        # fetch (paling mahal) tidak dilakukan untuk kandidat yang toh akan tersaring.
-        try:
-            structure = await compute_bsjp_structure_checklist(ticker, r, hist_prior, current_price, volume_today_so_far)
-        except Exception as e:
-            print(f"⚠️ BSJP: gagal hitung checklist struktur {ticker}: {e}")
-            structure = {"checklist": [], "met": 0, "total": 0}
-
-        results.append({
-            "ticker": ticker, "current_price": current_price, "gain_pct": gain_pct,
-            "vol_vs_ma20": round(volume_today_so_far / max(vol_ma20, 1e-9), 2),
-            "vol_vs_prev": round(volume_today_so_far / max(vol_yesterday, 1e-9), 2),
-            "sma5": round(sma5, 0), "value_traded_today": value_traded_today,
-            "rsi": rsi, "ara_distance": ara_distance, "close_pos": close_pos,
-            "akumulasi_note": akumulasi_note, "structure": structure,
-            "targets": r.get("targets", {}), "action_label_id": r.get("action_label_id"),
-            # MBSS v2 (user request — "review /bsjp apakah perlu optimasi
-            # dengan adanya data /fastscan"): cross-reference tag FAST EOD,
-            # murni informasional (BUKAN filter/threshold baru -- n=3 pick
-            # /bsjp masih terlalu kecil buat ubah formula apa pun).
-            "fast_tag_note": core.format_fast_candidate_tag(r),
-        })
-
-    if not results:
-        await core.safe_reply(
-            update.message,
-            "📋 Tidak ada kandidat yang lolos SEMUA 6 kriteria wajib saat ini "
-            "(formula diperketat — wajar kalau hasilnya sedikit/kosong, itu justru tujuannya)."
-        )
-        return
-
-    results.sort(key=lambda r: r["gain_pct"], reverse=True)
-
-    # MBSS v2 (RapidAPI integration): warm the intraday checkpoint ONCE
-    # here (background thread) before the loop below calls
-    # format_market_mover_tag per candidate — /bsjp runs near close
-    # (15:50-16:00 WIB), exactly the pre-close checkpoint window this
-    # mechanism was built for.
-    await asyncio.to_thread(broker_engine.get_or_refresh_intraday_market_snapshot)
-
-    lines = [f"🚀 BSJP MOMENTUM (diperketat) — {len(results)} kandidat lolos SEMUA 6 kriteria wajib\n"]
-    lines.append("⚠️ Ambang jarak ARA (0-15%) masih SEMENTARA/permisif — cuma informasi, belum jadi filter.")
-    lines.append("⚠️ Checklist struktur (CMF/OBV/MACD/volume-shape/multi-timeframe) KONFIRMASI saja, TIDAK menggugurkan — belum cukup data buat dikunci jadi wajib.\n")
-    for i, r in enumerate(results, 1):
-        struct_str = f" | Struktur {r['structure']['met']}/{r['structure']['total']}" if r["structure"]["total"] else ""
-        label = r.get("action_label_id")
-        wr = core.get_winrate_for_label(label) if label else ""
-        wr_note = f" | WR {wr}" if wr else ""
-        lines.append(
-            f"{i}. {r['ticker']} — {r['current_price']:.0f} ({r['gain_pct']:+.1f}%){struct_str}{wr_note}\n"
-            f"   Vol {r['vol_vs_ma20']}x MA20 | {r['vol_vs_prev']}x kemarin | SMA5 {r['sma5']:.0f}\n"
-            f"   Value {r['value_traded_today']/1e9:.1f}M | RSI {r['rsi']} | Jarak ARA {r['ara_distance']}% | "
-            f"Closing {r['close_pos']*100:.0f}% dari range{r['akumulasi_note']}{broker_engine.format_market_mover_tag(r['ticker'])}"
-            f"{r.get('fast_tag_note', '')}"
-        )
-        for c in r["structure"]["checklist"]:
-            icon = "✅" if c["ok"] else "➖"
-            lines.append(f"   {icon} {c['nama']}: {c['detail']}")
-
-    buttons = core.build_check_buttons([r["ticker"] for r in results])
-    await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
-    try:
-        await asyncio.to_thread(core.lock_daily_daytrade_picks, results, "bsjp")
-    except Exception as e:
-        print(f"⚠️ Gagal mengunci picks /bsjp untuk /winrate: {e}")
-
-
-async def _run_bsjp_pullback(update):
-    """
-    BSJP PULLBACK lane (MBSS v2, user request — "satu command, 2 tagging").
-    Arah BEDA dari _run_bsjp_6criteria (lane MOMENTUM, chase kekuatan hari
-    ini): lane ini cari saham yang MASIH uptrend jangka pendek TAPI baru
-    saja selesai pullback SEHAT dan reclaim EMA9 — bukan yang lagi kencang
-    naik. Dasar riset /finance: literatur umum (buy-the-dip DALAM uptrend
-    > bottom-fishing oversold murni, risiko "dead cat bounce" jauh lebih
-    rendah) + findings.md's MOMENTUM_PULLBACK (IDX-specific, independent
-    backtest, 63.0% win n=671) — kriteria REUSE definisi itu, bukan
-    dikarang baru.
-
-    BERDAMPINGAN dengan lane momentum & BSJP-ARA — TIDAK saling
-    menggantikan/menggagalkan, source /winrate terpisah ("bsjp_pullback").
-    """
-    scored = nightly_engine.load_daily_scan_cache()
-    if not scored:
-        return  # pesan error sudah ditampilkan _run_bsjp_6criteria, tidak perlu diulang
-
-    # Pra-filter murah: masih di atas SMA50 (uptrend jangka pendek). SENGAJA
-    # tidak filter EMA9 di sini -- justru butuh yang SEMPAT di bawah EMA9,
-    # itu dicek di loop live pakai histori harian.
-    pre_candidates = [r for r in scored.values() if r.get("is_below_sma50") is False]
-    pre_candidates.sort(key=lambda r: r.get("relative_strength_vs_ihsg", 0), reverse=True)
-    pre_candidates = pre_candidates[:BSJP_PREFILTER_COUNT]
-    if not pre_candidates:
-        return
-
-    results = []
-    for r in pre_candidates:
-        ticker = r["ticker"]
-        try:
-            hist_daily = await asyncio.to_thread(core.get_ohlcv_smart, ticker, BSJP_DAILY_HISTORY_LOOKBACK)
-        except Exception as e:
-            print(f"⚠️ BSJP Pullback: gagal fetch histori harian {ticker}: {e}")
-            continue
-        if hist_daily is None or hist_daily.empty or len(hist_daily) < 25:
-            continue
-
-        closes = hist_daily["Close"]
-        current_price = float(closes.iloc[-1])
-
-        # 20d ROC -- konfirmasi uptrend jangka pendek MASIH genuinely ada,
-        # bukan cuma kebetulan di atas SMA50 tapi sudah datar/melemah.
-        if len(closes) < 21:
-            continue
-        close_20d_ago = float(closes.iloc[-21])
-        roc_20d = (current_price - close_20d_ago) / close_20d_ago * 100 if close_20d_ago else None
-        if roc_20d is None or roc_20d < BSJP_PULLBACK_MIN_ROC_20D:
-            continue
-
-        # Dip-then-reclaim EMA9: HARI INI sudah di atas EMA9, tapi salah
-        # satu dari N hari terakhir SEMPAT di bawahnya (pullback genuine,
-        # bukan uptrend yang belum pernah mundur sama sekali).
-        ema9_series = closes.ewm(span=9, adjust=False).mean()
-        today_ema9 = float(ema9_series.iloc[-1])
-        today_above_ema9 = current_price > today_ema9
-        recent_dip = any(
-            float(closes.iloc[-1 - i]) < float(ema9_series.iloc[-1 - i])
-            for i in range(1, BSJP_PULLBACK_DIP_LOOKBACK_DAYS + 1)
-            if len(closes) > i
-        )
-        if not (today_above_ema9 and recent_dip):
-            continue
-
-        # Likuiditas -- floor SAMA dengan lane momentum, konsisten (bukan
-        # angka baru yang dikarang terpisah).
-        volume_today = float(hist_daily["Volume"].iloc[-1])
-        value_traded_today = current_price * volume_today
-        if value_traded_today < BSJP_MIN_VALUE_TRADED_IDR:
-            continue
-
-        results.append({
-            "ticker": ticker, "current_price": current_price, "roc_20d": round(roc_20d, 1),
-            "rsi": r.get("rsi"), "value_traded_today": value_traded_today,
-            "ema9": round(today_ema9, 0),
-            "action_label_id": r.get("action_label_id"),
-            "fast_tag_note": core.format_fast_candidate_tag(r),
-        })
-
-    if not results:
-        await core.safe_reply(
-            update.message,
-            "🔄 BSJP PULLBACK: tidak ada kandidat (uptrend jangka pendek + dip-reclaim EMA9) saat ini."
-        )
-        return
-
-    results.sort(key=lambda r: r["roc_20d"], reverse=True)
-
-    lines = [
-        f"🔄 BSJP PULLBACK — {len(results)} kandidat (uptrend jangka pendek + reclaim EMA9)\n",
-        "Arah BEDA dari BSJP MOMENTUM di atas: lane ini cari pullback SEHAT yang baru selesai "
-        "(riset: buy-the-dip DALAM uptrend > bottom-fishing oversold murni), BUKAN saham yang lagi kencang naik. "
-        "Kriteria REUSE dari findings.md's MOMENTUM_PULLBACK (IDX-validated, 63.0% win n=671).\n",
-    ]
-    for i, r in enumerate(results, 1):
-        label = r.get("action_label_id")
-        wr = core.get_winrate_for_label(label) if label else ""
-        wr_note = f" | WR {wr}" if wr else ""
-        lines.append(
-            f"{i}. {r['ticker']} — {r['current_price']:.0f} (ROC20d {r['roc_20d']:+.1f}%){wr_note}\n"
-            f"   RSI {r['rsi']} | EMA9 {r['ema9']} | Value {r['value_traded_today']/1e9:.1f}M"
-            f"{r.get('fast_tag_note', '')}"
-        )
-
-    buttons = core.build_check_buttons([r["ticker"] for r in results])
-    await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
-    try:
-        await asyncio.to_thread(core.lock_daily_daytrade_picks, results, "bsjp_pullback")
-    except Exception as e:
-        print(f"⚠️ Gagal mengunci picks /bsjp pullback untuk /winrate: {e}")
 
 
 async def bsjp_screening_command(update, context):
     """
-    /bsjp — screening BSJP (Beli Sore Jual Pagi), varian momentum/continuation.
-    WAJIB dijalankan menjelang closing (idealnya 15:50-16:00 WIB) — market
-    HARUS masih buka supaya bisa fetch data live (baik intraday bar maupun
-    histori harian terkini).
-
-    REVISI (diperketat, berdasarkan riset formula komunitas + Stockbit):
-    6 kriteria WAJIB semua lolos (AND, bukan mayoritas):
-      1. Harga >= 1.05x previous close (naik >=5% dari kemarin)
-      2. Volume hari ini >= 2x volume MA20 DAN >= 1x volume kemarin
-      3. Harga >= SMA5
-      4. Candle hari ini positif (harga >= open hari ini)
-      5. Value traded >= Rp5 miliar (SEKARANG WAJIB, bukan peringatan lagi)
-      6. RSI 60-85 (dipertahankan lebih ketat dari riset RSI>=50)
-    Plus di atas EMA9/SMA20 dari pra-filter cache (dipertahankan dari desain awal).
-    Jarak ke ARA & checklist akumulasi bandarmology (kalau ada cache broker)
-    ditampilkan sebagai INFORMASI, tidak menggugurkan.
+    /bsjp -- FASE 1 unified BSJP: scan SELURUH universe ISSI thd 4 kriteria
+    wajib (AND, lihat engine/scanalert.py utk detail & sumber angka):
+      1. ret_1d > 18%
+      2. Volume hari ini > 1.5x volume kemarin
+      3. High hari ini < 1.01x harga sekarang ("clean close")
+      4. Volume hari ini > 1.0x rata-rata volume 200 hari
+    Simpan yg lolos sbg shortlist (dipakai FASE 2 -- recheck live otomatis
+    tiap 30 menit 14:00-15:50 WIB, lihat run_bsjp_recheck_job). WAJIB
+    dijalankan saat market masih buka (butuh data live).
     """
+    import engine.scanalert as scanalert_engine  # import lokal -- hindari circular import di level modul
+
     session = core.get_current_idx_session()
     if session is None:
         await core.safe_reply(
             update.message,
-            "⚠️ /bsjp cuma berguna saat jam bursa (idealnya menjelang closing, 15:50-16:00 WIB, atau pra-penutupan) — "
-            "di luar itu tidak ada data live untuk dicek."
+            "⚠️ /bsjp cuma berguna saat jam bursa (butuh data live) -- di luar itu tidak ada yang bisa dicek."
         )
         return
 
-    # MBSS v2 (user request — 2 pesan terpisah, independen): logika 6 kriteria
-    # asli diekstrak ke fungsi TERPISAH supaya early-return di dalamnya (mis.
-    # cache eodscan kosong, tidak ada kandidat lolos) TIDAK ikut menghentikan
-    # bagian BSJP-ARA di bawahnya — dua metode harus tetap berjalan
-    # independen, sesuai kesepakatan "berdampingan, bukan saling gantung".
-    await _run_bsjp_6criteria(update)
+    scored = nightly_engine.load_daily_scan_cache()
+    if not scored:
+        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum ada/basi -- jalankan /eodscan dulu (dari kemarin sore, bukan hari ini).")
+        return
+    universe = sorted(scored.keys())
 
-    # MBSS v2 (user request — "satu command tapi 2 tagging"): lane KEDUA,
-    # arah beda (pullback-dalam-uptrend, bukan chase momentum) — sama
-    # prinsip independen dengan BSJP-ARA di bawah, satu lane gagal/kosong
-    # tidak menghentikan yang lain.
+    await core.safe_reply(update.message, f"🌆 Scan BSJP (4 kriteria unified) dari {len(universe)} ticker universe, mengecek data live...")
+
     try:
-        await _run_bsjp_pullback(update)
+        passed = await scanalert_engine.run_bsjp_shortlist_scan(universe)
     except Exception as e:
-        print(f"⚠️ BSJP Pullback lane gagal: {e}")
+        await core.safe_reply(update.message, f"⚠️ Scan BSJP gagal: {e}")
+        return
 
-    # ==========================================
-    # 🌆 PESAN KE-2: BSJP-ARA — "pola GIAA" (MBSS v2, user request)
-    # Baca cache yang SUDAH di-pre-filter + fetch berita semalam (bagian
-    # /eodscan) — di sini TINGGAL cek live yang murah: momentum sejak open
-    # hari ini, dan VolQ (harus SANGAT meledak, >5x, referensi GIAA 13x).
-    # BERDAMPINGAN dengan 6 kriteria di atas, TIDAK saling menggantikan —
-    # source terpisah di /winrate ("bsjp_ara") supaya bisa dibandingkan
-    # akurasinya dari data nyata, bukan ditebak sekarang.
-    # ==========================================
-    ara_candidates = nightly_engine.load_bsjp_ara_candidates()
-    if not ara_candidates:
+    if not passed:
         await core.safe_reply(
             update.message,
-            "🌆 BSJP-ARA: tidak ada kandidat dari pre-filter semalam (harga<500, gerak kemarin datar, "
-            "volume kemarin rendah) — atau /eodscan belum jalan dengan versi terbaru."
+            "📋 Tidak ada kandidat yang lolos SEMUA 4 kriteria BSJP saat ini (formula ketat -- wajar kalau kosong, itu justru tujuannya). "
+            "Kalau ada shortlist tersimpan dari /bsjp sebelumnya hari ini, itu TETAP dipantau (tidak dihapus)."
         )
         return
 
-    ara_results = []
-    scored_cache = nightly_engine.load_daily_scan_cache()  # dipakai buat reuse targets, di luar loop biar tidak reload tiap iterasi
-    for c in ara_candidates:
-        ticker = c["ticker"]
-        try:
-            bars = await asyncio.to_thread(core.get_intraday_session_bars, ticker, "5m", "1d")
-        except Exception as e:
-            print(f"⚠️ BSJP-ARA: gagal fetch live {ticker}: {e}")
-            continue
-        if bars is None or bars.empty:
-            continue
-
-        today_open = float(bars["Open"].iloc[0])
-        current_price = float(bars["Close"].iloc[-1])
-        momentum_pct = (current_price / today_open - 1) * 100 if today_open else 0
-
-        if momentum_pct < BSJP_ARA_MIN_MOMENTUM_PCT:
-            continue  # belum "naik kuat" sejak open, sesuai spesifikasi user — cek murah dulu sebelum fetch histori
-
-        # VolQ: volume hari ini (live, sejauh sesi berjalan) vs rata-rata 20
-        # hari — user minta ambang >5x (referensi GIAA 13x). Butuh histori
-        # harian pendek buat vol_ma20 genuine (bukan sekadar re-use vol_ratio
-        # KEMARIN yang skalanya beda) — fetch cuma untuk kandidat yang SUDAH
-        # lolos momentum>=5% di atas, supaya biayanya terbatas.
-        try:
-            hist_short = await asyncio.to_thread(core.get_ohlcv_smart, ticker, 25)
-        except Exception as e:
-            print(f"⚠️ BSJP-ARA: gagal fetch histori volume {ticker}: {e}")
-            continue
-        if hist_short is None or hist_short.empty or len(hist_short) < 20:
-            continue
-        vol_ma20 = hist_short["Volume"].tail(20).mean()
-        volume_today_so_far = float(bars["Volume"].sum())
-        volq_ratio = volume_today_so_far / max(vol_ma20, 1e-9)
-        if volq_ratio < BSJP_ARA_MIN_VOLQ:
-            continue
-
-        ara_distance = core.compute_ara_distance_pct(current_price, c.get("prev_close"))
-        news_titles = [n["title"] for n in (c.get("news") or [])[:2]]
-
-        eod_r = scored_cache.get(ticker, {})
-        ara_results.append({
-            "ticker": ticker, "current_price": current_price, "momentum_pct": momentum_pct,
-            "today_open": today_open, "ara_distance": ara_distance, "volq_ratio": round(volq_ratio, 1),
-            "sector": c.get("sector"), "news_titles": news_titles,
-            "catalyst_category": c.get("catalyst_category"), "catalyst_score": c.get("catalyst_score"),
-            "catalyst_reasoning": c.get("catalyst_reasoning"),
-            "targets": eod_r.get("targets", {}), "action_label_id": eod_r.get("action_label_id"),
-        })
-
-    if not ara_results:
-        await core.safe_reply(
-            update.message,
-            f"🌆 BSJP-ARA: {len(ara_candidates)} kandidat dari pre-filter semalam (sudah lolos filter katalis positif), "
-            f"tapi belum ada yang naik ≥{BSJP_ARA_MIN_MOMENTUM_PCT:.0f}% sejak open DAN volume ≥{BSJP_ARA_MIN_VOLQ:.0f}x normal. Coba cek lagi nanti."
+    passed.sort(key=lambda r: r["ret_1d_pct"], reverse=True)
+    lines = [f"🌆 BSJP SHORTLIST — {len(passed)} kandidat lolos SEMUA 4 kriteria (akan di-recheck live tiap 30 menit 14:00-15:50)\n"]
+    for i, r in enumerate(passed, 1):
+        vol_vs_prev = r["volume_so_far"] / max(r["prev_volume"], 1.0)
+        vol_vs_ma200 = r["volume_so_far"] / max(r["vol_ma200"], 1.0)
+        lines.append(
+            f"{i}. {r['ticker']} — {r['current_price']:,.0f} ({r['ret_1d_pct']:+.1f}%)\n"
+            f"   Vol {vol_vs_prev:.1f}x kemarin | {vol_vs_ma200:.1f}x MA200"
         )
-        return
+    lines.append("\n⚠️ Ini shortlist FASE 1, BUKAN alert entry -- alert final (dgn TP1) dikirim otomatis kalau kandidat MASIH lolos semua kriteria saat recheck 14:00-15:50 WIB.")
 
-    CATALYST_LABEL = {"strong_bullish": "🔥 Strong Bullish", "bullish": "🟢 Bullish"}
-    ara_results.sort(key=lambda r: (r.get("catalyst_score") or 0, r["momentum_pct"]), reverse=True)
-    ara_lines = [f"🌆 BSJP-ARA — {len(ara_results)} kandidat (katalis positif + naik ≥{BSJP_ARA_MIN_MOMENTUM_PCT:.0f}% sejak open + volume ≥{BSJP_ARA_MIN_VOLQ:.0f}x normal)\n"]
-    ara_lines.append("⚠️ Metode TERPISAH dari 6 kriteria di atas — pola \"diam kemarin, meledak hari ini\" (referensi GIAA). Belum ada rekam jejak, pantau /winrate source=bsjp_ara.\n")
-    for i, r in enumerate(ara_results, 1):
-        news_str = f"\n   📰 {r['news_titles'][0]}" if r["news_titles"] else ""
-        sector_str = market_engine.format_sector_tag(r.get("sector"))
-        cat_label = CATALYST_LABEL.get(r.get("catalyst_category"), r.get("catalyst_category") or "-")
-        catalyst_str = f"\n   {cat_label} ({r.get('catalyst_score', 0)}/100): {r.get('catalyst_reasoning', '-')}"
-        ara_lines.append(
-            f"{i}. {r['ticker']} — {r['current_price']:.0f} (open {r['today_open']:.0f}, {r['momentum_pct']:+.1f}% sejak open)\n"
-            f"   VolQ {r['volq_ratio']}x | Jarak ARA {r['ara_distance']}%{catalyst_str}{news_str}{sector_str}"
-        )
-
-    buttons = core.build_check_buttons([r["ticker"] for r in ara_results])
-    await core.safe_reply(update.message, "\n\n".join(ara_lines), reply_markup=buttons)
-    try:
-        await asyncio.to_thread(core.lock_daily_daytrade_picks, ara_results, "bsjp_ara")
-    except Exception as e:
-        print(f"⚠️ Gagal mengunci picks /bsjp_ara untuk /winrate: {e}")
-
+    buttons = core.build_check_buttons([r["ticker"] for r in passed])
+    await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
 async def strong_buy_command(update, context):
     """
@@ -2557,7 +2318,10 @@ def compute_consensus_candidates(scored: dict, broksum_data: dict, market_regime
     for r in scored.values():
         tools = []
 
-        if scoring_engine.is_high_conviction_regime_aware(r, market_regime):
+        # MBSS v2 (user request 2026-08-30): is_high_conviction GANTI TOTAL ke
+        # _daytrade_wr_tp1 (lihat docstring helper itu) -- tag "HIGH CONVICTION"
+        # di sini sekarang = lolos floor likuiditas + floor WR 60% model.
+        if _daytrade_wr_tp1(r) is not None:
             tools.append("HIGH CONVICTION")
 
         if r.get("action_id") == "STRONG_BUY":
@@ -2662,7 +2426,10 @@ def _consensus_sdt_hc_selected(pool: list, market_regime: str | None = None) -> 
                 sdt_selected.add(r["ticker"])
         except Exception:
             pass
-        if scoring_engine.is_high_conviction_regime_aware(r, market_regime):
+        # MBSS v2 (user request 2026-08-30): is_high_conviction GANTI TOTAL ke
+        # _daytrade_wr_tp1 -- Consensus Prime's HC leg sekarang = lolos floor
+        # likuiditas + floor WR 60% model (bukan lagi Minervini 5-6 kriteria).
+        if _daytrade_wr_tp1(r) is not None:
             hc_selected.add(r["ticker"])
     return sdt_selected, hc_selected
 
@@ -2990,7 +2757,11 @@ def _load_fastscan_candidacy_union(max_hc_names: int = 5) -> tuple[list, dict, d
         if not rejected and score >= min_score:
             _add(r["ticker"], r, "Explosive")
 
-    hc_candidates = [r for r in pool if scoring_engine.is_high_conviction_regime_aware(r, market_regime)]
+    # MBSS v2 (user request 2026-08-30): is_high_conviction GANTI TOTAL ke
+    # _daytrade_wr_tp1 -- lihat docstring helper itu. Sort tetap by final
+    # score (bukan WR) supaya union ini konsisten dgn "top HC by final
+    # score" yg dijelaskan di docstring fungsi ini.
+    hc_candidates = [r for r in pool if _daytrade_wr_tp1(r) is not None]
     hc_candidates.sort(key=lambda r: r.get("scores", {}).get("final", 0), reverse=True)
     for r in hc_candidates[:max_hc_names]:
         _add(r["ticker"], r, "HC")

@@ -203,62 +203,22 @@ def save_backbone_daily(backbone_result: dict):
         print("⚠️ Gagal menyimpan backbone daily cache.")
 
 
-def save_hc_gap_watch(results: list):
-    """
-    MBSS v2 (user request 2026-08-26 — HC Minervini-8-kriteria win rate
-    jauh di bawah FCM/PRE/CONTINUATION, riset backtest 2 tahun 576 ISSI:
-    hit6=33.0% vs 50%+ di lane MACD-cycle lain): Minervini-HC di-HIDE dari
-    tampilan `/hc` langsung (lihat commands/scan.py), dan sebagai gantinya
-    di-watch live esok harinya — kalau gap-up >=3% dari closing malam ini
-    (HC_GAP_WATCH_MIN_GAP_PCT, engine/scanalert.py), historisnya hit6=62.7%
-    (n=51, jauh di atas 33% baseline) -- gap besar justru filter kuat utk
-    subset Minervini-HC yg genuinely breakout, bukan false-positive teknikal.
-    Definisi SENGAJA tidak mensyaratkan ticker tetap HC di hari+2 -- dites,
-    subset itu (n=14) malah TIDAK lebih baik (hit6=50%) drpd yg gap>=3% saja
-    (n=51, hit6=62.7%), jadi syarat "muncul lagi" DIBUANG, bukan lupa.
-
-    Overwrite tiap malam (BUKAN akumulasi banyak hari) -- persis konvensi
-    daily_ref-nya scanalert (state 1-hari), karena signal-nya sendiri cuma
-    tervalidasi utk jendela H+1, bukan H+2 dst (lihat HC_GAP_WATCH docstring
-    di scanalert.py).
-    """
-    watch_list = [
-        {"ticker": r["ticker"], "prev_close": r.get("price")}
-        for r in results
-        if r.get("high_conviction", {}).get("is_high_conviction") and r.get("price")
-    ]
-    meta = {"trading_day_marker": core.get_current_trading_day_close_marker()}
-    ok = cache_manager.set("hc_gap_watch", {"watch_list": watch_list}, meta=meta)
-    if ok:
-        print(f"💾 HC gap-watch tersimpan: {len(watch_list)} ticker Minervini-HC malam ini (di-hide dari /hc, dipantau gap>=3% besok).")
-    else:
-        print("⚠️ Gagal menyimpan HC gap-watch cache.")
-
-
-def load_hc_gap_watch_for_today() -> list:
-    """
-    Dipanggil scanalert.py (bukan /hc) — return watch_list HANYA kalau
-    trading_day_marker-nya PERSIS "hari bursa yang datanya seharusnya sudah
-    tersedia sekarang" (core.get_current_trading_day_close_marker() -- SAMA
-    persis convention staleness check load_backbone_daily_allow_stale dkk).
-    Dipanggil scanalert SELAMA jam bursa (sebelum market_closed_today di
-    marker function itu jadi True), jadi marker-nya otomatis merujuk hari
-    bursa KEMARIN MALAM (saat save_hc_gap_watch terakhir jalan) -- TIDAK
-    perlu dimundurkan manual lagi via get_previous_trading_day_marker (itu
-    akan dobel-mundur, bug). Beda dari load_backbone_daily_allow_stale (yang
-    sengaja menampilkan data basi dengan catatan): sinyal gap ini SPESIFIK
-    tervalidasi utk window H+1 SAJA (lihat save_hc_gap_watch docstring) --
-    data yg lebih tua BUKAN "basi tapi masih berguna", tapi genuinely di
-    luar populasi yang divalidasi, jadi sengaja dibuang total (return
-    kosong), bukan ditampilkan dengan catatan.
-    """
-    meta = cache_manager.get_meta("hc_gap_watch")
-    if not meta:
-        return []
-    if meta.get("trading_day_marker") != core.get_current_trading_day_close_marker():
-        return []
-    payload = cache_manager.get("hc_gap_watch", default={})
-    return payload.get("watch_list", []) if isinstance(payload, dict) else []
+# MBSS v2 (user request 2026-08-30): save_hc_gap_watch/load_hc_gap_watch_
+# for_today DIHAPUS -- dulu populasi "HC malam ini + gap-up >=3% esok pagi"
+# (hit6=62.7%, n=51) memakai gate Minervini LAMA (is_high_conviction).
+# Setelah is_high_conviction diganti total ke daytrade_hc_confidence (WR
+# model, lihat commands/scan.py _daytrade_wr_tp1), backtest ulang struktur
+# compound YANG SAMA dgn populasi BARU membuktikan sinyal ini TIDAK
+# bertahan: gate WR>=60% cuma nambah +5pp di atas "gap>=3% polos, tanpa gate
+# apa pun" (57.6% vs 52.9% hit6, n=340 vs n=1629 -- gate lama nambah +30pp,
+# gate baru cuma +5pp, mayoritas signal cuma dari gap-nya sendiri), DAN
+# close-based give-back SANGAT buruk di semua varian (median 5D -5% s/d -7%,
+# cuma ~30% hari positif) -- lebih buruk dari baseline WR model tanpa gap
+# filter sama sekali. Diputuskan retire total (bukan patch populasi) drpd
+# jalankan alert live yang justru noise/menyesatkan -- lihat riwayat chat
+# sesi ini. HC_GAP_WATCH_MIN_GAP_PCT/_detect_hc_gap_watch/_build_hc_gap_
+# watch_message/hc_gap_watch_list state di engine/scanalert.py & call site
+# di run_nightly_full_scan dihapus bersamaan.
 
 
 def load_backbone_daily_allow_stale() -> tuple[dict | None, str | None]:
@@ -467,27 +427,12 @@ async def run_nightly_full_scan(context):
         core.update_scan_metadata(len(results), len(skip_reasons), latest_marker, universe_name=universe_label)
         print(f"🌙 Nightly full scan selesai: {len(results)} berhasil, {len(skip_reasons)} gagal/dikecualikan.")
 
-        # MBSS v2 (user request — BSJP-ARA "pola GIAA"): pre-filter + fetch
-        # berita SEKALI di sini (murah relatif ke seluruh eodscan, dan
-        # /bsjp siang/sore jadi tinggal baca cache tanpa fetch berita live).
-        try:
-            bsjp_ara_candidates = await asyncio.to_thread(build_bsjp_ara_candidates, results)
-            save_bsjp_ara_candidates(bsjp_ara_candidates)
-        except Exception as e:
-            print(f"⚠️ Gagal membangun BSJP-ARA candidates: {e}")
-
-        # MBSS v2 (user request 2026-08-27 -- riset BSJP "gelombang kedua",
-        # live case EKAD 24 Agustus): watchlist terpisah dari bsjp_ara di
-        # atas (yang khusus sleeper-belum-pernah-bergerak+katalis) -- ini
-        # utk saham yang PERNAH ARA 10 hari terakhir lalu dingin lagi,
-        # dipantau live besok utk reaktivasi volume (lihat engine/
-        # scanalert.py BUY_POWER_STRONG_VOL_RATIO). Zero cost tambahan
-        # (max_ret_1d_pct_10d sudah dihitung di compute_factor_scoring).
-        try:
-            second_wave_watch = build_second_wave_watch(results)
-            save_second_wave_watch(second_wave_watch)
-        except Exception as e:
-            print(f"⚠️ Gagal membangun BSJP second-wave watch: {e}")
+        # MBSS v2 (user request 2026-08-29, REVISI): BSJP-ARA/second-wave
+        # nightly pre-build DIHAPUS -- diganti unified live 2-fase (Phase1
+        # /bsjp scan penuh universe akhir sesi 1, Phase2 recheck live tiap
+        # 30 menit 14:00-15:50, lihat engine/scanalert.py run_bsjp_
+        # shortlist_scan/run_bsjp_recheck_once) -- tidak perlu apa pun
+        # dibangun di eodscan lagi utk BSJP.
 
         # MBSS v2 (user request — /broksum): fetch broker-summary batch buat
         # 250 ticker berskor tertinggi SEKALI di sini, pakai HABIS kuota
@@ -676,11 +621,6 @@ async def run_nightly_full_scan(context):
         except Exception as e:
             print(f"⚠️ Gagal menghitung AB-RC1 backbone: {e}")
 
-        try:
-            save_hc_gap_watch(results)
-        except Exception as e:
-            print(f"⚠️ Gagal menyimpan HC gap-watch: {e}")
-
         # BUGFIX (ditemukan lewat pengamatan user — SOHO "Top" berturut-turut
         # dengan skor cuma 4.0, tidak istimewa): results TIDAK PERNAH di-sort
         # sebelum ini, jadi "Top" sebelumnya cuma ticker PERTAMA yang diproses
@@ -763,178 +703,6 @@ async def run_nightly_full_scan(context):
         print("⏱️ Nightly full scan melebihi batas waktu 50 menit — cache TIDAK diperbarui malam ini.")
     except Exception as e:
         print(f"❌ Nightly full scan gagal: {e}")
-
-
-# ==========================================
-# 🌆 BSJP-ARA — pre-filter "pola GIAA" (MBSS v2, user request)
-# Saham yang KEMARIN diam total, berpotensi meledak HARI INI. Sengaja
-# TERPISAH dari 6 kriteria /bsjp lama (source berbeda di /winrate: "bsjp"
-# vs "bsjp_ara") — dua metode dijalankan BERDAMPINGAN, biar data yang
-# putuskan mana lebih akurat, bukan ditebak sekarang.
-#
-# Pre-filter (murah, dari cache) + fetch berita (RSS, gratis) dikerjakan
-# SEKALI di sini (bagian /eodscan malam) — supaya /bsjp siang/sore TINGGAL
-# baca cache ini + cek live yang murah (harga sekarang vs open), TANPA
-# fetch berita sama sekali saat live (alasan: takut lambat kalau fetch
-# berita real-time — sudah didiskusikan & disepakati).
-# ==========================================
-BSJP_ARA_MAX_PRICE = 1000  # direvisi dari 500 (user request) — lebih banyak kandidat
-BSJP_ARA_MAX_DAY_CHANGE_PCT = 5.0  # |day_change_pct| kemarin harus di bawah ini ("datar")
-BSJP_ARA_MAX_VOL_RATIO = 1.5       # vol_ratio kemarin harus di bawah ini (belum ramai)
-BSJP_ARA_NEWS_MAX_CANDIDATES = 30  # batas jumlah fetch berita per malam (RSS gratis tapi tetap network call)
-
-
-def build_bsjp_ara_candidates(results: list) -> list:
-    """
-    Jalankan pre-filter 3-tahap (harga, day_change_pct, vol_ratio) murni dari
-    cache — TANPA fetch apa pun — lalu fetch berita RSS HANYA untuk yang
-    lolos (dibatasi BSJP_ARA_NEWS_MAX_CANDIDATES, prioritas yang paling
-    "datar" duluan, supaya kalau kepotong limit, yang paling representatif
-    pola "sleeper" yang dapat prioritas).
-    """
-    prefiltered = []
-    for r in results:
-        if not r:
-            continue
-        price = r.get("price")
-        day_change = r.get("day_change_pct")
-        # BUGFIX (kasus nyata EKAD — lihat komentar day_change_pct/
-        # vol_ratio_prior_day di compute_factor_scoring): pakai
-        # vol_ratio_prior_day (genuinely "kemarin"), BUKAN vol_ratio (field
-        # lama, sengaja "paling baru" termasuk hari ini kalau sudah masuk —
-        # cocok buat skor momentum inti, TAPI salah buat pre-filter ini yang
-        # butuh tahu apakah KEMARIN masih diam).
-        vol_ratio_prior = r.get("vol_ratio_prior_day")
-        if price is None or day_change is None or vol_ratio_prior is None:
-            continue
-        if price >= BSJP_ARA_MAX_PRICE:
-            continue
-        if abs(day_change) >= BSJP_ARA_MAX_DAY_CHANGE_PCT:
-            continue
-        if vol_ratio_prior >= BSJP_ARA_MAX_VOL_RATIO:
-            continue
-        prefiltered.append(r)
-
-    print(f"🌆 BSJP-ARA pre-filter: {len(prefiltered)} kandidat lolos harga/day_change/volume (dari {len(results)})")
-
-    # Prioritaskan yang PALING datar (day_change_pct paling dekat 0) untuk
-    # fetch berita duluan, kalau ternyata lebih banyak dari batas limit.
-    prefiltered.sort(key=lambda r: abs(r.get("day_change_pct", 0)))
-    to_check_news = prefiltered[:BSJP_ARA_NEWS_MAX_CANDIDATES]
-
-    candidates = []
-    for r in to_check_news:
-        ticker = r["ticker"]
-        company_name = r.get("company_name") or ticker
-        try:
-            news = core.fetch_company_news(ticker, company_name, max_items=3)
-        except Exception as e:
-            print(f"⚠️ BSJP-ARA: gagal fetch berita {ticker}: {e}")
-            news = []
-        candidates.append({
-            "ticker": ticker,
-            "company_name": company_name,
-            "prev_close": r.get("price"),
-            "day_change_pct": r.get("day_change_pct"),
-            "vol_ratio": r.get("vol_ratio_prior_day"),
-            "sector": r.get("sector"),
-            "news": news,
-        })
-        core.time.sleep(0.3)  # jaga-jaga rate limit Google News RSS, murah tapi tetap sopan
-
-    print(f"🌆 BSJP-ARA: {len(candidates)} kandidat dengan berita terkumpul (dari {len(prefiltered)} lolos pre-filter harga/volume)")
-
-    # MBSS v2 (user request — Catalyst Score, bukan sekadar "ada berita"):
-    # klasifikasi 1x batch untuk semua kandidat, lalu HANYA saham dengan
-    # katalis strong_bullish/bullish yang diteruskan — neutral/bearish/tanpa
-    # berita sama sekali DIBUANG. Ini sesuai instruksi eksplisit: "News
-    # catalist harus ambil positif saja".
-    catalyst_map = core.classify_news_catalysts(candidates)
-    if not catalyst_map:
-        print("⚠️ BSJP-ARA: klasifikasi katalis gagal total — TIDAK ADA kandidat diloloskan (gagal-lunak, bukan meloloskan semua tanpa verifikasi).")
-        return []
-
-    final_candidates = []
-    for c in candidates:
-        cat = catalyst_map.get(c["ticker"])
-        if not cat or cat.get("catalyst_category") not in ("strong_bullish", "bullish"):
-            continue
-        c["catalyst_category"] = cat.get("catalyst_category")
-        c["catalyst_score"] = cat.get("catalyst_score")
-        c["catalyst_reasoning"] = cat.get("reasoning")
-        final_candidates.append(c)
-
-    print(f"🌆 BSJP-ARA FINAL: {len(final_candidates)} kandidat dengan katalis positif (strong_bullish/bullish) dari {len(candidates)} yang dicek")
-    return final_candidates
-
-
-def save_bsjp_ara_candidates(candidates: list):
-    meta = {"trading_day_marker": core.get_current_calendar_date_marker()}
-    ok = cache_manager.set("bsjp_ara", {"candidates": candidates}, meta=meta)
-    if ok:
-        print(f"💾 BSJP-ARA candidates tersimpan (cache/bsjp_ara.pkl): {len(candidates)} kandidat")
-    else:
-        print("⚠️ Gagal menyimpan BSJP-ARA candidates cache.")
-
-
-def load_bsjp_ara_candidates() -> list:
-    meta = cache_manager.get_meta("bsjp_ara")
-    if not meta:
-        return []
-    current_marker = core.get_current_calendar_date_marker()
-    if meta.get("trading_day_marker") != current_marker:
-        return []
-    payload = cache_manager.get("bsjp_ara", default={})
-    return payload.get("candidates", []) if isinstance(payload, dict) else []
-
-
-# MBSS v2 (user request 2026-08-27 -- riset backtest 2 tahun 576 ISSI, 2027
-# episode ret>=20%): "gelombang kedua" -- ticker yang PERNAH ARA-like
-# (return>=20%) dlm 10 hari terakhir lalu dingin lagi, dipantau utk
-# reaktivasi. BEDA dari bsjp_ara di atas (sleeper MURNI belum pernah
-# bergerak + katalis berita) -- dites TERPISAH thd populasi sama: "sudah
-# aktif" (avg |ret| 5hr sebelum ARA >=7%, mirip profil gelombang-kedua)
-# gap-positif besok cuma 57.9%/median high +4.1% vs sleeper murni 69.5%/
-# +4.9% -- genuinely lebih lemah, BUKAN dianggap setara sleeper. Threshold
-# dipilih SAMA dgn definisi ARA-day di riset (ret>=20%) supaya konsisten
-# dgn angka yang sudah divalidasi, bukan angka baru dikarang.
-BSJP_SECOND_WAVE_MIN_RET_10D = 20.0
-BSJP_SECOND_WAVE_MAX_TODAY_RET = 15.0  # exclude yg HARI INI sendiri lagi meledak -- itu domain NO_ROOM_GAIN_PCT scanalert, bukan "sudah dingin lalu reaktivasi"
-
-
-def build_second_wave_watch(results: list) -> list:
-    watch_list = []
-    for r in results:
-        if not r or not r.get("ticker") or not r.get("price"):
-            continue
-        max_ret_10d = r.get("max_ret_1d_pct_10d")
-        if max_ret_10d is None or max_ret_10d < BSJP_SECOND_WAVE_MIN_RET_10D:
-            continue
-        today_ret = r.get("ret_1d_pct")
-        if today_ret is not None and today_ret >= BSJP_SECOND_WAVE_MAX_TODAY_RET:
-            continue
-        watch_list.append({"ticker": r["ticker"], "prev_close": r["price"], "max_ret_1d_pct_10d": max_ret_10d})
-    return watch_list
-
-
-def save_second_wave_watch(watch_list: list):
-    meta = {"trading_day_marker": core.get_current_trading_day_close_marker()}
-    ok = cache_manager.set("second_wave_watch", {"watch_list": watch_list}, meta=meta)
-    if ok:
-        print(f"💾 BSJP second-wave watch tersimpan: {len(watch_list)} ticker (pernah ARA-like 10hr terakhir, sudah dingin).")
-    else:
-        print("⚠️ Gagal menyimpan BSJP second-wave watch cache.")
-
-
-def load_second_wave_watch_for_today() -> list:
-    """Sama pola dgn load_hc_gap_watch_for_today -- HANYA valid kalau dari malam kemarin (bukan basi lebih tua)."""
-    meta = cache_manager.get_meta("second_wave_watch")
-    if not meta:
-        return []
-    if meta.get("trading_day_marker") != core.get_current_trading_day_close_marker():
-        return []
-    payload = cache_manager.get("second_wave_watch", default={})
-    return payload.get("watch_list", []) if isinstance(payload, dict) else []
 
 
 # ==========================================

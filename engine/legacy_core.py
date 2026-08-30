@@ -6120,8 +6120,13 @@ def filter_and_rank_daytrade_candidates(results, count=DAYTRADE_FINAL_PICKS_COUN
         rr = r.get("targets", {}).get("risk_reward_at_max")
         return rr is not None and rr >= DAYTRADE_MIN_RR_FOR_PRIORITY
 
+    # MBSS v2 (user request 2026-08-30): is_high_conviction GANTI TOTAL ke
+    # commands_scan._daytrade_wr_tp1 (module sudah di-import di atas, sama
+    # pola dgn helper lain di file ini) -- lihat docstring helper itu utk
+    # alasan/riwayat audit Task #21 (Minervini 5-6 kriteria near-zero corr
+    # thd outcome manapun).
     def is_high_conviction(r):
-        return r.get("high_conviction", {}).get("is_high_conviction", False)
+        return commands_scan._daytrade_wr_tp1(r) is not None
 
     tier1a = [r for r in results if r.get("action_id") in BUY_ACTIONS and has_rr(r) and is_high_conviction(r)]
     if len(tier1a) >= count:
@@ -7508,15 +7513,36 @@ async def run_conviction_sweep_job(context: ContextTypes.DEFAULT_TYPE):
     """
     JobQueue callback TERPISAH (MBSS v2, user request 2026-08-27 --
     "conviction sweep": pantau union watchlist harian [FCM/PRE-CROSS/
-    CONTINUATION/VALIDATION/HC gap-watch/BSJP-watch] tiap 15 menit mulai
-    10:00, engine/scanalert.py run_conviction_sweep_once). State file
-    terpisah (conviction_sweep_state.json) -- no-op murah di luar jendela
-    10:00-15:55 WIB, aman didaftarkan interval rapat.
+    CONTINUATION/VALIDATION/HC gap-watch] tiap 15 menit mulai 10:00,
+    engine/scanalert.py run_conviction_sweep_once). State file terpisah
+    (conviction_sweep_state.json) -- no-op murah di luar jendela
+    10:00-15:55 WIB, aman didaftarkan interval rapat. BSJP DIKELUARKAN
+    dari watchlist ini (MBSS v2, user request 2026-08-29) -- lihat
+    run_bsjp_recheck_job di bawah utk mekanisme BSJP yang baru.
     """
     try:
         await scanalert_engine.run_conviction_sweep_once()
     except Exception as e:
         print(f"⚠️ Conviction-sweep job gagal: {e}")
+
+
+async def run_bsjp_recheck_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH (MBSS v2, user request 2026-08-29 --
+    unified BSJP "Beli Sore Jual Pagi", 2-fase): Fase 2 -- re-cek live
+    shortlist yang disimpan /bsjp (Fase 1, akhir sesi 1) tiap
+    BSJP_RECHECK_INTERVAL_SEC (30 menit), kirim alert final ke ticker yg
+    MASIH lolos semua 4 kriteria saat itu (engine/scanalert.py
+    run_bsjp_recheck_once). State file terpisah (bsjp_shortlist_state.json)
+    -- no-op murah di luar jendela BSJP_RECHECK_WINDOW_START-END
+    (14:00-15:50 WIB) ATAU kalau belum ada shortlist hari ini (/bsjp belum
+    dijalankan), aman didaftarkan interval rapat sama seperti conviction
+    sweep di atas.
+    """
+    try:
+        await scanalert_engine.run_bsjp_recheck_once()
+    except Exception as e:
+        print(f"⚠️ BSJP recheck job gagal: {e}")
 
 
 async def send_startup_notice(app: Application):
@@ -7577,6 +7603,10 @@ def build_app():
     app.add_handler(CommandHandler("gptpick", commands_scan.gptpick_command))
     app.add_handler(CommandHandler(["hc", "highconviction"], commands_scan.high_conviction_command))
     app.add_handler(CommandHandler(["allsetup", "allsetups"], commands_scan.all_setup_candidates_command))
+    # MBSS v2 (Lane Lifecycle Redesign, user request 2026-08-29/30): /go --
+    # dashboard gabungan DAY TRADE + SWING TRADE, lihat docstring commands/
+    # scan.py go_command utk detail lengkap.
+    app.add_handler(CommandHandler(["go"], commands_scan.go_command))
     app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.strong_buy_command))
     app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
     app.add_handler(CommandHandler("fast", commands_scan.fast_candidates_command))
@@ -7644,6 +7674,13 @@ def build_app():
         # sesuai speks) -- job ini sendiri no-op murah di luar jendela
         # 10:00-15:55 WIB, aman didaftarkan 24/7 spt job lain di atas.
         app.job_queue.run_repeating(run_conviction_sweep_job, interval=900, first=10)
+        # MBSS v2 (user request 2026-08-29 -- unified BSJP "Beli Sore Jual
+        # Pagi" Fase 2, engine/scanalert.py run_bsjp_recheck_once):
+        # interval=BSJP_RECHECK_INTERVAL_SEC (1800s/30 menit, sesuai speks)
+        # -- job ini sendiri no-op murah di luar jendela BSJP_RECHECK_
+        # WINDOW_START-END (14:00-15:50 WIB) atau kalau belum ada shortlist
+        # /bsjp hari ini, aman didaftarkan 24/7 spt job lain di atas.
+        app.job_queue.run_repeating(run_bsjp_recheck_job, interval=scanalert_engine.BSJP_RECHECK_INTERVAL_SEC, first=10)
     else:
         print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
               "scan-alert intraday TIDAK akan jalan otomatis. Install dgn: "
