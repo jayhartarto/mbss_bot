@@ -108,6 +108,44 @@ PRICE_CEILING = 600
 NO_ROOM_GAIN_PCT = 15.0
 RET_3D_WARN_THRESHOLD = 10.0
 
+# MBSS v2 (bugfix 2026-08-31, incident live: run_scanalert_job macet >5 menit
+# TANPA exception sama sekali -- job_queue (max_instances=1) skip terus tiap
+# siklus 3 menit berikutnya, operator terpaksa Ctrl+Z bot.py berulang kali
+# krn kelihatan "hang", numpuk proses zombie (Ctrl+Z = SIGTSTP, BUKAN kill --
+# proses lama TETAP hidup di background) sampai 4x ~16% RAM tiap proses,
+# genuinely inilah akar slowdown/SSH-hang sebelumnya, bukan cuma network
+# blip sesaat). yf.download versi terpasang (1.6.0) SUDAH py default
+# timeout=10 per-request, TAPI kombinasi threads=True + batch besar (200+
+# ticker) terbukti bisa tetap macet total jauh lebih lama tanpa exception
+# (kemungkinan deadlock/starvation thread-pool internal yfinance sendiri,
+# di LUAR jangkauan timeout per-HTTP-request-nya) -- safety net di LEVEL
+# JOB ini independen dari timeout internal yfinance: kalau fetch universe
+# besar tidak selesai dalam JOB_FETCH_TIMEOUT_SEC, batalkan tunggu (job
+# tetap SELESAI dgn hasil kosong/None utk siklus ini, TIDAK memblokir siklus
+# berikutnya) drpd menggantung tanpa batas. CATATAN: asyncio.wait_for HANYA
+# membatalkan MENUNGGUnya di sisi event loop -- thread background yg sudah
+# terlanjur jalan (asyncio.to_thread) tidak bisa dipaksa berhenti (keterbatasan
+# Python thread, bukan bug di sini), tapi itu cukup utk mencegah job_queue
+# macet berantai spt insiden ini.
+JOB_FETCH_TIMEOUT_SEC = 90
+
+# Sentinel dipakai di caller yg cache hasil SEKALI/HARI (fresh_cross_momentum_
+# watchlist, pre_continuation_watchlist, daily_ref, dll) -- HARUS bisa bedakan
+# "timeout, coba lagi siklus berikutnya" dari "genuinely dihitung & hasilnya
+# kosong" ({} kosong itu SAH, mis. 0 kandidat FCM hari itu) -- kalau caller
+# pakai default={} biasa, timeout jg ke-cache PERMANEN sbg "0 kandidat"
+# sepanjang hari (bug yg sama persis dgn conviction-sweep sebelum diperbaiki).
+_FETCH_TIMED_OUT = object()
+
+
+async def _fetch_with_timeout(fn, *args, timeout: float = JOB_FETCH_TIMEOUT_SEC, default=None):
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout=timeout)
+    except asyncio.TimeoutError:
+        arg_hint = f"{len(args[0])} item" if args and hasattr(args[0], "__len__") else ""
+        print(f"⚠️ Timeout {timeout:.0f}s: {fn.__name__}({arg_hint}) -- skip siklus ini, coba lagi siklus berikutnya.")
+        return default
+
 # MBSS v2 (user request 2026-08-27 -- audit backtest 1m riil 27 hari bursa):
 # Alert A (rolling 3-bar spike) & Alert B (pullback-rebound) TERBUKTI edge-nya
 # nyaris 0 sbg sinyal actionable -- confirm-then-notify di berbagai delay/
@@ -495,7 +533,7 @@ async def run_gap_rebound_scan_once() -> dict:
         return summary
 
     if state.get("daily_ref") is None:
-        daily_ref = await asyncio.to_thread(_fetch_daily_ref, universe)
+        daily_ref = await _fetch_with_timeout(_fetch_daily_ref, universe, default={})
         state["daily_ref"] = daily_ref
     else:
         daily_ref = state["daily_ref"]
@@ -511,7 +549,7 @@ async def run_gap_rebound_scan_once() -> dict:
     danger_lookup = state["danger_lookup"]
 
     ticker_list = list(daily_ref.keys())
-    data = await asyncio.to_thread(_fetch_today_1m, ticker_list)
+    data = await _fetch_with_timeout(_fetch_today_1m, ticker_list, default=pd.DataFrame())
 
     tickers_state = state.setdefault("tickers", {})
     bot = None
@@ -912,7 +950,7 @@ async def run_bsjp_shortlist_scan(tickers: list[str]) -> list[dict]:
     JobQueue tiap 15 menit 09:00-15:50) -- lihat catatan BSJP_SHORTLIST_
     SCAN_INTERVAL_SEC di atas utk alasan kenapa manual-only tidak cukup.
     """
-    snapshot = await asyncio.to_thread(_fetch_bsjp_universe_snapshot, tickers)
+    snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, tickers, timeout=150, default={})
     passed = [
         {"ticker": t, **snap} for t, snap in snapshot.items()
         if _check_bsjp_criteria(snap, tolerance=BSJP_SHORTLIST_TOLERANCE_PCT)
@@ -1024,7 +1062,7 @@ async def run_bsjp_recheck_once() -> dict:
     if not shortlist:
         return {"checked": 0, "alerted": 0}
 
-    snapshot = await asyncio.to_thread(_fetch_bsjp_universe_snapshot, shortlist)
+    snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, shortlist, default={})
     bot = None
     if core.TELEGRAM_BOT_TOKEN:
         import telegram
@@ -2031,9 +2069,15 @@ async def run_scan_alert_once() -> dict:
 
     if state.get("daily_ref") is None:
         print(f"📡 Scan-alert: fetch daily reference (prev_close + ret_3d) utk {len(universe)} ticker whitelist...")
-        daily_ref = _fetch_daily_ref(universe)
-        state["daily_ref"] = daily_ref
-        print(f"✅ Universe 60-600 hari ini: {len(daily_ref)} ticker (dari {len(universe)} whitelist)")
+        # BUGFIX (2026-08-31): SEBELUMNYA panggilan sinkron langsung (bukan
+        # asyncio.to_thread) -- yf.download di dalamnya BLOCKING seluruh event
+        # loop (bukan cuma job scan-alert ini) selama fetch berjalan.
+        daily_ref = await _fetch_with_timeout(_fetch_daily_ref, universe, default=_FETCH_TIMED_OUT)
+        if daily_ref is _FETCH_TIMED_OUT:
+            daily_ref = {}  # JANGAN cache -- state["daily_ref"] tetap None, retry siklus berikutnya
+        else:
+            state["daily_ref"] = daily_ref
+            print(f"✅ Universe 60-600 hari ini: {len(daily_ref)} ticker (dari {len(universe)} whitelist)")
     else:
         daily_ref = state["daily_ref"]
 
@@ -2041,21 +2085,43 @@ async def run_scan_alert_once() -> dict:
     # dari `universe` (_get_alert_universe(), whitelist bulanan Alert A/B/
     # gap) -- lihat docstring _get_swing_lane_universe() utk alasan (harus
     # SAMA populasi dgn /allsetup, bukan whitelist scalping terpisah).
-    if state.get("fresh_cross_momentum_watchlist") is None or state.get("pre_continuation_watchlist") is None:
-        swing_lane_universe = await asyncio.to_thread(_get_swing_lane_universe)
-    if state.get("fresh_cross_momentum_watchlist") is None:
-        print(f"📡 Scan-alert: hitung watchlist FRESH CROSS MOMENTUM (cross<=2hr, ret10_pre>15%) utk {len(swing_lane_universe)} ticker...")
-        fcm_watchlist = await asyncio.to_thread(_get_fresh_cross_momentum_watchlist, swing_lane_universe)
-        state["fresh_cross_momentum_watchlist"] = fcm_watchlist
-        print(f"✅ FRESH CROSS MOMENTUM watchlist hari ini: {len(fcm_watchlist)} ticker.")
+    # BUGFIX (2026-08-31): pakai sentinel _FETCH_TIMED_OUT, BUKAN default={}/
+    # [] biasa -- kalau timeout ke-cache sbg "0 kandidat" PERMANEN sepanjang
+    # hari, persis bug conviction-sweep yg baru diperbaiki (lihat catatan
+    # run_conviction_sweep_once).
+    need_fcm = state.get("fresh_cross_momentum_watchlist") is None
+    need_pre_cont = state.get("pre_continuation_watchlist") is None
+    swing_lane_universe = None
+    if need_fcm or need_pre_cont:
+        swing_lane_universe = await _fetch_with_timeout(_get_swing_lane_universe, timeout=180, default=_FETCH_TIMED_OUT)
+        if swing_lane_universe is _FETCH_TIMED_OUT:
+            swing_lane_universe = []
+
+    if need_fcm:
+        if not swing_lane_universe:
+            fcm_watchlist = {}
+        else:
+            print(f"📡 Scan-alert: hitung watchlist FRESH CROSS MOMENTUM (cross<=2hr, ret10_pre>15%) utk {len(swing_lane_universe)} ticker...")
+            fcm_watchlist = await _fetch_with_timeout(_get_fresh_cross_momentum_watchlist, swing_lane_universe, timeout=180, default=_FETCH_TIMED_OUT)
+            if fcm_watchlist is _FETCH_TIMED_OUT:
+                fcm_watchlist = {}
+            else:
+                state["fresh_cross_momentum_watchlist"] = fcm_watchlist
+                print(f"✅ FRESH CROSS MOMENTUM watchlist hari ini: {len(fcm_watchlist)} ticker.")
     else:
         fcm_watchlist = state["fresh_cross_momentum_watchlist"]
 
-    if state.get("pre_continuation_watchlist") is None:
-        print(f"📡 Scan-alert: hitung watchlist PRE-CROSS/CONTINUATION utk {len(swing_lane_universe)} ticker...")
-        pre_continuation_watchlist = await asyncio.to_thread(_get_pre_continuation_watchlist, swing_lane_universe)
-        state["pre_continuation_watchlist"] = pre_continuation_watchlist
-        print(f"✅ PRE-CROSS/CONTINUATION watchlist hari ini: {len(pre_continuation_watchlist)} ticker.")
+    if need_pre_cont:
+        if not swing_lane_universe:
+            pre_continuation_watchlist = {}
+        else:
+            print(f"📡 Scan-alert: hitung watchlist PRE-CROSS/CONTINUATION utk {len(swing_lane_universe)} ticker...")
+            pre_continuation_watchlist = await _fetch_with_timeout(_get_pre_continuation_watchlist, swing_lane_universe, timeout=180, default=_FETCH_TIMED_OUT)
+            if pre_continuation_watchlist is _FETCH_TIMED_OUT:
+                pre_continuation_watchlist = {}
+            else:
+                state["pre_continuation_watchlist"] = pre_continuation_watchlist
+                print(f"✅ PRE-CROSS/CONTINUATION watchlist hari ini: {len(pre_continuation_watchlist)} ticker.")
     else:
         pre_continuation_watchlist = state["pre_continuation_watchlist"]
 
@@ -2071,7 +2137,7 @@ async def run_scan_alert_once() -> dict:
         lane_tickers_needing_ref = [
             t for t in (set(fcm_watchlist) | set(pre_continuation_watchlist)) if t not in daily_ref
         ]
-        extra_ref = await asyncio.to_thread(_fetch_conviction_ref, lane_tickers_needing_ref) if lane_tickers_needing_ref else {}
+        extra_ref = await _fetch_with_timeout(_fetch_conviction_ref, lane_tickers_needing_ref, default={}) if lane_tickers_needing_ref else {}
 
         def _lane_ref_price(t):
             if t in daily_ref:
@@ -2146,7 +2212,7 @@ async def run_scan_alert_once() -> dict:
         f"🔍 Scan-alert: {len(full_ticker_set)} ticker ({len(alert_universe)} alert + {len(fcm_watchlist)} FCM + "
         f"{len(pre_continuation_watchlist)} PRE/CONTINUATION), fetch bar 1m..."
     )
-    data = await asyncio.to_thread(_fetch_today_1m, full_ticker_set)
+    data = await _fetch_with_timeout(_fetch_today_1m, full_ticker_set, default=pd.DataFrame())
 
     tickers_state = state.setdefault("tickers", {})
     bot = None
@@ -2541,11 +2607,11 @@ async def run_conviction_sweep_once() -> dict:
         # siklus 15 menit berikutnya (murah, aman -- window conviction sweep
         # tetap terbatas jam bursa).
         main_state = _load_state()
-        universe_tags = await asyncio.to_thread(_build_conviction_universe_tags, main_state)
+        universe_tags = await _fetch_with_timeout(_build_conviction_universe_tags, main_state, timeout=180, default={})
         universe = {}
         n_suppressed = 0
         if universe_tags:
-            ref_prices = await asyncio.to_thread(_fetch_conviction_ref, list(universe_tags.keys()))
+            ref_prices = await _fetch_with_timeout(_fetch_conviction_ref, list(universe_tags.keys()), default={})
             for t, info in universe_tags.items():
                 ref_price = ref_prices.get(t)
                 if not ref_price:
@@ -2574,7 +2640,7 @@ async def run_conviction_sweep_once() -> dict:
         _save_conviction_state(state)
         return summary
 
-    data = await asyncio.to_thread(_fetch_today_1m, list(universe.keys()))
+    data = await _fetch_with_timeout(_fetch_today_1m, list(universe.keys()), default=pd.DataFrame())
     tickers_state = state.setdefault("tickers", {})
     bot = None
     if core.TELEGRAM_BOT_TOKEN:
