@@ -688,6 +688,18 @@ BSJP_RET1D_MIN_PCT = 15.0
 BSJP_VOL_VS_PREV_DAY_MULT = 1.5
 BSJP_CLEAN_CLOSE_MULT = 1.01
 BSJP_VOL_VS_MA200_MULT = 1.0
+# MBSS v2 (user request 2026-08-31): thresholds di atas dikalibrasi thd data
+# EOD (ret_1d/prev_volume/vol_ma200 semua FULL hari), sedangkan FASE 1
+# shortlist scan jalan INTRADAY (sejak 09:00, tiap 15 menit) -- volume_so_far
+# di jam pagi otomatis jauh di bawah ambang full-day meski stok itu genuinely
+# ON PACE utk hari besar (bukan sinyal lemah, cuma belum genap waktunya).
+# User: tak perlu model proyeksi waktu-of-day yg rigid/rentan tak berkorelasi
+# -- cukup TOLERANSI: kalau sudah >=75% menuju tiap ambang MINIMUM, masuk
+# shortlist FASE 1 (jaring kandidat awal SAJA). FASE 2 recheck (14:00-15:50,
+# _check_bsjp_criteria tolerance=1.0 default) TETAP validasi PENUH/strict
+# sebelum alert final dgn TP1 dikirim -- toleransi ini TIDAK melemahkan alert
+# akhir, cuma memperlebar jaring awal yg toh divalidasi ulang ketat nanti.
+BSJP_SHORTLIST_TOLERANCE_PCT = 0.75
 BSJP_TP1_MEDIAN_GAP_PCT = 3.1
 BSJP_RECHECK_WINDOW_START = datetime.time(14, 0)
 BSJP_RECHECK_WINDOW_END = datetime.time(15, 50)
@@ -848,8 +860,17 @@ def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
     return snap
 
 
-def _check_bsjp_criteria(snap: dict) -> bool:
-    """SEMUA 4 kriteria wajib (AND) -- lihat catatan BSJP_RET1D_MIN_PCT di atas."""
+def _check_bsjp_criteria(snap: dict, tolerance: float = 1.0) -> bool:
+    """
+    SEMUA 4 kriteria wajib (AND) -- lihat catatan BSJP_RET1D_MIN_PCT di atas.
+    tolerance<1.0 (mis. BSJP_SHORTLIST_TOLERANCE_PCT): longgarkan 3 kriteria
+    MINIMUM (ret_1d, vol_vs_prev, vol_vs_ma200) proporsional -- dipakai FASE 1
+    shortlist SAJA (lihat run_bsjp_shortlist_scan). Clean-close (kriteria ke-4,
+    sebuah CEILING bukan minimum) SENGAJA tidak ikut ditoleransi -- tidak pas
+    dgn framing "menuju target", dan sudah longgar dgn sendirinya di jam pagi
+    (belum sempat pullback). FASE 2 recheck pakai default tolerance=1.0
+    (strict penuh) sebelum alert final.
+    """
     ret_1d = snap.get("ret_1d_pct")
     prev_volume = snap.get("prev_volume")
     vol_ma200 = snap.get("vol_ma200")
@@ -858,11 +879,11 @@ def _check_bsjp_criteria(snap: dict) -> bool:
     high_so_far = snap.get("high_so_far")
     if None in (ret_1d, prev_volume, vol_ma200, volume_so_far, current_price, high_so_far):
         return False
-    if ret_1d <= BSJP_RET1D_MIN_PCT:
+    if ret_1d <= BSJP_RET1D_MIN_PCT * tolerance:
         return False
-    if not prev_volume or volume_so_far <= BSJP_VOL_VS_PREV_DAY_MULT * prev_volume:
+    if not prev_volume or volume_so_far <= BSJP_VOL_VS_PREV_DAY_MULT * tolerance * prev_volume:
         return False
-    if not vol_ma200 or volume_so_far <= BSJP_VOL_VS_MA200_MULT * vol_ma200:
+    if not vol_ma200 or volume_so_far <= BSJP_VOL_VS_MA200_MULT * tolerance * vol_ma200:
         return False
     if not current_price or high_so_far >= BSJP_CLEAN_CLOSE_MULT * current_price:
         return False
@@ -892,7 +913,10 @@ async def run_bsjp_shortlist_scan(tickers: list[str]) -> list[dict]:
     SCAN_INTERVAL_SEC di atas utk alasan kenapa manual-only tidak cukup.
     """
     snapshot = await asyncio.to_thread(_fetch_bsjp_universe_snapshot, tickers)
-    passed = [{"ticker": t, **snap} for t, snap in snapshot.items() if _check_bsjp_criteria(snap)]
+    passed = [
+        {"ticker": t, **snap} for t, snap in snapshot.items()
+        if _check_bsjp_criteria(snap, tolerance=BSJP_SHORTLIST_TOLERANCE_PCT)
+    ]
 
     state = _load_bsjp_state()
     today = _today_str()
@@ -2502,31 +2526,44 @@ async def run_conviction_sweep_once() -> dict:
 
     state = _ensure_conviction_daily_reset(_load_conviction_state())
 
-    if state.get("universe") is None:
+    if not state.get("universe"):
+        # MBSS v2 (bugfix 2026-08-31, user report "conviction sweep masih 0
+        # ticker" setelah fix universe FCM/PRE-CONTINUATION di run_scan_alert_
+        # once): SEBELUMNYA `state["universe"] = {}` langsung DIKUNCI di sini
+        # begitu build pertama hari itu kosong (race umum: conviction-sweep &
+        # scan-alert utama SAMA-SAMA first=10 di build_app(), jadi build
+        # pertama bisa kepentok sebelum scan-alert utama sempat isi fresh_
+        # cross_momentum_watchlist/pre_continuation_watchlist di scanalert_
+        # state.json, ATAU fetch ref_price yg flaky) -- akibatnya "0 ticker
+        # dicek" macet SEPANJANG HARI walau scan-alert utama belakangan punya
+        # kandidat asli. Sekarang: HANYA commit ke state["universe"] kalau
+        # BENAR-BENAR terisi; kalau kosong, JANGAN dikunci -- coba build ulang
+        # siklus 15 menit berikutnya (murah, aman -- window conviction sweep
+        # tetap terbatas jam bursa).
         main_state = _load_state()
         universe_tags = await asyncio.to_thread(_build_conviction_universe_tags, main_state)
-        if not universe_tags:
-            state["universe"] = {}
+        universe = {}
+        n_suppressed = 0
+        if universe_tags:
+            ref_prices = await asyncio.to_thread(_fetch_conviction_ref, list(universe_tags.keys()))
+            for t, info in universe_tags.items():
+                ref_price = ref_prices.get(t)
+                if not ref_price:
+                    continue
+                tag = info["tag"]
+                tp_info = None
+                # BUGFIX (user report 2026-08-27, live case VERN): should_suppress,
+                # BUKAN `compute_tp1_tp2(...) is None` -- lihat catatan lane_confidence.py
+                if lane_confidence.should_suppress(tag, info["features"], ref_price):
+                    n_suppressed += 1
+                    continue  # confidence individual <50% di level terdekat -- tidak diproduksi jadi sinyal
+                if tag in lane_confidence.SUPPORTED_LANES:
+                    tp_info = lane_confidence.compute_tp1_tp2(tag, info["features"], ref_price)
+                universe[t] = {"tag": tag, "ref_price": ref_price, "tp_info": tp_info}
+        if not universe:
             _save_conviction_state(state)
             summary["skipped_reason"] = "no_universe"
             return summary
-        ref_prices = await asyncio.to_thread(_fetch_conviction_ref, list(universe_tags.keys()))
-        universe = {}
-        n_suppressed = 0
-        for t, info in universe_tags.items():
-            ref_price = ref_prices.get(t)
-            if not ref_price:
-                continue
-            tag = info["tag"]
-            tp_info = None
-            # BUGFIX (user report 2026-08-27, live case VERN): should_suppress,
-            # BUKAN `compute_tp1_tp2(...) is None` -- lihat catatan lane_confidence.py
-            if lane_confidence.should_suppress(tag, info["features"], ref_price):
-                n_suppressed += 1
-                continue  # confidence individual <50% di level terdekat -- tidak diproduksi jadi sinyal
-            if tag in lane_confidence.SUPPORTED_LANES:
-                tp_info = lane_confidence.compute_tp1_tp2(tag, info["features"], ref_price)
-            universe[t] = {"tag": tag, "ref_price": ref_price, "tp_info": tp_info}
         state["universe"] = universe
         print(f"✅ Conviction-sweep universe hari ini: {len(universe)} ticker ({n_suppressed} di-suppress, WR<50%).")
     else:
