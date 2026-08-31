@@ -1457,7 +1457,7 @@ def _conviction_tag(ticker: str, fcm_watchlist: dict, pre_continuation_watchlist
         w = pre_continuation_watchlist[ticker]
         lane_label = {
             "PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)",
-            "MOMENTUM_EXTENDED": "MOMENTUM EXTENDED (Swing)", "EARLY_VALIDATION": "EARLY VALIDATION (pra-VALIDATION)",
+            "MOMENTUM_EXTENDED": "MOMENTUM EXTENDED (Swing)", "EARLY_VALIDATION": "EARLY VALIDATION (pra-VALIDATION)", "LATE_VALIDATION": "LATE VALIDATION (pasca-window)",
         }.get(w["lane"], w["lane"])
         return f"✅ ADA SETUP: {lane_label}, {w['detail']}"
     return "⚠️ NO SETUP — spike teknikal murni, tidak ada dukungan sinyal sistem (FCM/PRE/CONTINUATION/HC)"
@@ -1604,7 +1604,17 @@ PULLBACK_ENTRY_MIN_PCT = -2.0            # minimal pullback berarti dari open (b
 PULLBACK_ENTRY_HEALTHY_MAX_PCT = -9.0    # dlm p25 -- masih sangat umum utk trade yg eventually menang
 PULLBACK_ENTRY_CAUTION_MAX_PCT = -14.0   # dlm p10 -- lebih dalam, tapi masih dlm rentang tervalidasi
 MACD_FRESH_CROSS_MOMENTUM_MAX_DAYS_AGO = 2   # PERSIS commands/scan.py -- jangan drift dari definisi SDT
-MACD_FRESH_CROSS_MOMENTUM_RET10_PRE_MIN = 15.0
+# MBSS v2 (user request 2026-08-31): 15% -> 5% -- sweep granular (cross_
+# days_ago<=2, chronological 70/30 validasi) nunjuk 5% titik terbaik DALAM
+# rentang 5-10% yg diminta user (fwd_ret_d3 mean +0.21%/pos 41.0%, terbaik
+# di rentang itu -- 7-8% justru DIP ke negatif sebelum pulih lagi di 9-12%,
+# BUKAN monoton bersih). touch3%(3 hari)=59.6% di 5% vs 67.5% di 15% lama
+# (trade-off nyata, bukan longgar tanpa biaya), tapi ~4x kandidat (1402 vs
+# 354) & masih jauh di atas baseline pasar (49.5%). Model lane_confidence
+# FCM DIRETRAIN thd populasi >5% baru (lihat lane_confidence_constants.json,
+# AUC 0.568-0.605, Brier konsisten lebih baik dari baseline) -- model lama
+# dilatih khusus populasi >15%, ekstrapolasi ke 5-15% kurang presisi.
+MACD_FRESH_CROSS_MOMENTUM_RET10_PRE_MIN = 5.0
 
 # MBSS v2 (user request 2026-08-26 — riset entry-timing FCM/PRE/CONTINUATION/
 # HC, backtest 2 tahun 576 ISSI raw OHLC, lihat chat sesi ini): FCM ternyata
@@ -1666,6 +1676,26 @@ MACD_CONTINUATION_MAX_CROSS_DAYS_AGO = 5    # PERSIS commands/scan.py high_convi
 # RECOVERY/EARLY_RECOVERY.
 MACD_EARLY_VALIDATION_GAIN_MIN_PCT = 2.0
 MACD_EARLY_VALIDATION_GAIN_MAX_PCT = 3.0
+
+# MBSS v2 (user request 2026-08-31 -- lanjutan riset dead zone "since cross
+# 3-6d, kondisi tertentu, target d1/d2/d3 minimal 3%"): dead-zone map penuh
+# (cross_days_ago 1-6, SEMUA populasi yg belum tercover lane manapun)
+# nunjuk gain_since_cross>=10% di hari 3-6 GENUINELY tak tercover lane apa
+# pun (CONTINUATION mentok <10%, MOMENTUM_EXTENDED baru mulai hari 6+
+# dgn syarat lain) -- touch>=3% dlm d3 = 68.1% (n=943), TERBAIK dari
+# seluruh studi sesi ini, bahkan lebih tinggi dari FCM sendiri. Gain 3-6%
+# (fails gate dist_to_sma20>=12%) JUGA py edge (touch d3=55.7%, mean fwd
+# +0.54%). User usul gabung jadi SATU rule sederhana >=3% (open-ended,
+# skip pita 6-10% yg sedikit lebih lemah tapi masih di atas baseline) --
+# gain>=3% MERGED: touch d3=61.3% (n=2346) vs baseline 49.5%, tetap solid
+# meski pita 6-10% mengencerkan sedikit. TANPA gate dist_to_sma20 (SAMA
+# filosofi EARLY_VALIDATION). Model lane_confidence DILATIH (BEDA dari
+# EARLY_VALIDATION) -- gain_since_cross py varians besar di pita open-
+# ended ini, jadi fitur eksplisit, AUC 0.558-0.572 & Brier konsisten lebih
+# baik dari baseline (lihat lane_confidence_constants.json "LATE_VALIDATION").
+MACD_LATE_VALIDATION_GAIN_MIN_PCT = 3.0
+MACD_LATE_VALIDATION_MIN_CROSS_DAYS_AGO = 3
+MACD_LATE_VALIDATION_MAX_CROSS_DAYS_AGO = 6
 
 # MBSS v2 (user request 2026-08-30 -- "sinyal intraday lainnya sudah selaras
 # dengan swingtrade, masukkan MOMENTUM_EXTENDED juga"): lane ke-6 /go SWING
@@ -1889,25 +1919,41 @@ def _get_pre_continuation_watchlist(universe: list[str]) -> dict:
             }
             continue
         sma_dist = r.get("price_vs_sma20_pct")
-        if sma_dist is None or sma_dist < MACD_LANE_DIST_SMA20_MIN_PCT:
-            continue
         gain = r.get("macd_gain_since_cross_pct")
+        cross_days_ago = r.get("macd_cross_days_ago")
+        is_bullish = r.get("macd_cross_direction") == "bullish"
+
         if (
-            r.get("macd_cross_direction") != "bullish"
-            or r.get("macd_cross_days_ago") is None
-            or r["macd_cross_days_ago"] > MACD_CONTINUATION_MAX_CROSS_DAYS_AGO
-            or gain is None
+            is_bullish and cross_days_ago is not None and cross_days_ago <= MACD_CONTINUATION_MAX_CROSS_DAYS_AGO
+            and gain is not None and sma_dist is not None and sma_dist >= MACD_LANE_DIST_SMA20_MIN_PCT
         ):
-            continue
-        if 6.0 <= gain < 10.0:
+            if 6.0 <= gain < 10.0:
+                watchlist[t] = {
+                    "lane": "CONTINUATION", "detail": f"+{gain:.1f}% sejak cross",
+                    "dist_to_sma20": sma_dist, "pct_b": r.get("pct_b"),
+                }
+                continue
+            elif 3.0 <= gain < 6.0:
+                watchlist[t] = {
+                    "lane": "VALIDATION", "detail": f"+{gain:.1f}% sejak cross",
+                    "dist_to_sma20": sma_dist, "pct_b": r.get("pct_b"),
+                }
+                continue
+
+        # LATE_VALIDATION (lane ke-9, 2026-08-31): TANPA gate dist_to_sma20,
+        # hari 3-6 (BEDA dari EARLY_VALIDATION 1-5, & dari CONTINUATION/
+        # VALIDATION yg cuma s.d. hari 5) -- dicek SETELAH CONTINUATION/
+        # VALIDATION supaya keduanya (kalau genuinely match, dist>=12%)
+        # tetap prioritas -- lihat catatan MACD_LATE_VALIDATION_GAIN_MIN_PCT
+        # di atas.
+        if (
+            is_bullish and cross_days_ago is not None
+            and MACD_LATE_VALIDATION_MIN_CROSS_DAYS_AGO <= cross_days_ago <= MACD_LATE_VALIDATION_MAX_CROSS_DAYS_AGO
+            and gain is not None and gain >= MACD_LATE_VALIDATION_GAIN_MIN_PCT
+        ):
             watchlist[t] = {
-                "lane": "CONTINUATION", "detail": f"+{gain:.1f}% sejak cross",
-                "dist_to_sma20": sma_dist, "pct_b": r.get("pct_b"),
-            }
-        elif 3.0 <= gain < 6.0:
-            watchlist[t] = {
-                "lane": "VALIDATION", "detail": f"+{gain:.1f}% sejak cross",
-                "dist_to_sma20": sma_dist, "pct_b": r.get("pct_b"),
+                "lane": "LATE_VALIDATION", "detail": f"+{gain:.1f}% sejak cross",
+                "dist_to_sma20": sma_dist, "pct_b": r.get("pct_b"), "gain_since_cross": gain,
             }
     return watchlist
 
@@ -1952,7 +1998,7 @@ def _build_h1_strong_body_message(ticker: str, detection: dict, watchlist_entry:
     lane, detail = watchlist_entry["lane"], watchlist_entry["detail"]
     lane_label = {
         "PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)",
-        "MOMENTUM_EXTENDED": "MOMENTUM EXTENDED (Swing)", "EARLY_VALIDATION": "EARLY VALIDATION (pra-VALIDATION)",
+        "MOMENTUM_EXTENDED": "MOMENTUM EXTENDED (Swing)", "EARLY_VALIDATION": "EARLY VALIDATION (pra-VALIDATION)", "LATE_VALIDATION": "LATE VALIDATION (pasca-window)",
     }.get(lane, lane)
     tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
     if tp_suffix:
@@ -1966,6 +2012,10 @@ def _build_h1_strong_body_message(ticker: str, detection: dict, watchlist_entry:
             # cross>=4% (zona VALIDATION) dlm 1-2 hari bursa, lihat catatan
             # MACD_EARLY_VALIDATION_GAIN_MIN_PCT.
             "EARLY_VALIDATION": "~33% lanjut ke VALIDATION dlm 1-2h",
+            # MBSS v2 2026-08-31: fallback statis kalau fitur gain_since_cross/
+            # dist_to_sma20/pct_b tak lengkap (model py, tapi None -> tp_suffix
+            # kosong) -- lihat MACD_LATE_VALIDATION_GAIN_MIN_PCT.
+            "LATE_VALIDATION": "touch>=3%(d3)~61.3%",
         }.get(lane, "-")
         hist_line = f"Historis: {hist_label}"
     return (
@@ -2218,7 +2268,10 @@ async def run_scan_alert_once() -> dict:
             if lane_tag not in lane_confidence.SUPPORTED_LANES:
                 continue  # FAST_RECOVERY/EARLY_RECOVERY -- tetap tanpa tp_info, fallback statis
             ref_price = _lane_ref_price(t)
-            features = {"dist_to_sma20": entry.get("dist_to_sma20"), "pct_b": entry.get("pct_b")}
+            features = {
+                "dist_to_sma20": entry.get("dist_to_sma20"), "pct_b": entry.get("pct_b"),
+                "gain_since_cross": entry.get("gain_since_cross"),  # LATE_VALIDATION saja butuh ini, lane lain abaikan
+            }
             if lane_confidence.should_suppress(lane_tag, features, ref_price):
                 del pre_continuation_watchlist[t]
                 n_suppressed += 1
@@ -2514,7 +2567,13 @@ def _build_conviction_universe_tags(main_state: dict) -> dict:
         if t in tags:
             continue
         lane_tag = w["detail"] if w["lane"] == "PRE" else w["lane"]  # PRE -> FAST_RECOVERY/EARLY_RECOVERY/ABOVE_MOMENTUM
-        tags[t] = {"tag": lane_tag, "features": {"dist_to_sma20": w.get("dist_to_sma20"), "pct_b": w.get("pct_b")}}
+        tags[t] = {
+            "tag": lane_tag,
+            "features": {
+                "dist_to_sma20": w.get("dist_to_sma20"), "pct_b": w.get("pct_b"),
+                "gain_since_cross": w.get("gain_since_cross"),  # LATE_VALIDATION saja butuh ini
+            },
+        }
 
     # MBSS v2 (user request 2026-08-30): HC_GAP_WATCH union DIHAPUS -- lihat
     # engine/nightly.py utk riwayat lengkap.

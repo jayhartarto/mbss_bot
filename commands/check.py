@@ -359,8 +359,10 @@ async def check_stock(update, context):
     _macd_cross_days_ago = result.get("macd_cross_days_ago")
     _macd_dist_sma20 = result.get("price_vs_sma20_pct")
     if (
+        # MBSS v2 (user request 2026-08-31): 15%->5%, lihat catatan lengkap
+        # MACD_FRESH_CROSS_MOMENTUM_RET10_PRE_MIN di engine/scanalert.py.
         result.get("macd_cross_direction") == "bullish" and _macd_cross_days_ago is not None
-        and _macd_cross_days_ago <= 2 and _macd_ret10_pre is not None and _macd_ret10_pre > 15.0
+        and _macd_cross_days_ago <= 2 and _macd_ret10_pre is not None and _macd_ret10_pre > 5.0
     ):
         bb_line += "\n" + _lane_tp_text(
             "FCM", {"ret10_pre_cross_pct": _macd_ret10_pre, "pct_b": result.get("pct_b")},
@@ -409,6 +411,23 @@ async def check_stock(update, context):
         bb_line += (
             f"\n🌱 EARLY VALIDATION (BACKTEST): cross {_macd_cross_days_ago} hari lalu, +{_macd_gain_since_cross:.1f}% sejak cross — "
             f"~33% lanjut ke zona VALIDATION dlm 1-2 hari bursa (vs baseline pasar 13.4%, n=661)"
+        )
+    # MBSS v2 (user request 2026-08-31 -- dead zone "since cross 3-6d"):
+    # LATE_VALIDATION -- lane ke-9, gain_since_cross>=3% open-ended, hari
+    # 3-6, TANPA gate dist_sma20. BEDA dari EARLY_VALIDATION -- DIDUKUNG
+    # lane_confidence (model DILATIH, gain_since_cross jadi fitur eksplisit,
+    # AUC 0.558-0.572, Brier konsisten lebih baik dari baseline). CONTINUATION/
+    # VALIDATION (elif di atas) tetap prioritas kalau genuinely match
+    # (dist_sma20>=12%).
+    elif (
+        result.get("macd_cross_direction") == "bullish" and _macd_cross_days_ago is not None
+        and 3 <= _macd_cross_days_ago <= 6
+        and _macd_gain_since_cross is not None and _macd_gain_since_cross >= 3.0
+    ):
+        bb_line += "\n" + _lane_tp_text(
+            "LATE_VALIDATION",
+            {"gain_since_cross": _macd_gain_since_cross, "dist_to_sma20": _macd_dist_sma20, "pct_b": result.get("pct_b")},
+            f"🍂 LATE VALIDATION (BACKTEST): cross {_macd_cross_days_ago} hari lalu, +{_macd_gain_since_cross:.1f}% sejak cross",
         )
 
     # MBSS v2 (user request — HC-appropriate, BEDA dari macd_approach_tier di

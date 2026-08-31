@@ -21,6 +21,17 @@ model individual di atas fondasi yang sendiri belum jelas -- caller WAJIB
 fallback ke angka statis untuk dua tier ini (cek `lane in SUPPORTED_LANES`
 sebelum memanggil compute_tp1_tp2).
 
+EARLY_VALIDATION (gain_since_cross 2-3%, lane baru 2026-08-31) SAMA JUGA
+sengaja tidak dilatih -- dicoba (fitur dist_to_sma20+pct_b, SAMA pola
+VALIDATION/CONTINUATION), tapi AUC 0.46-0.53 (beberapa level DI BAWAH 0.50)
+dan Brier score LEBIH BURUK dari baseline (prediksi base_rate polos) di
+SEMUA level -- model genuinely tidak nambah apa pun di pita gain sempit
+ini, malah lebih jelek dari tebak rata-rata grup. Fallback ke WR statis,
+sama alasan dgn FAST_RECOVERY/EARLY_RECOVERY di atas. LATE_VALIDATION
+(gain_since_cross>=3% open-ended, days 3-6) BEDA -- gain_since_cross
+py varians besar & jadi fitur eksplisit, AUC 0.558-0.572 & Brier konsisten
+lebih baik dari baseline, jadi DIDUKUNG (lihat _MODELS).
+
 Model di-refit pakai data PENUH (discovery+validation digabung) SESUDAH
 metodologi split di atas membuktikan pendekatannya valid di data yang
 model belum pernah lihat -- praktik standar: validasi di held-out split,
