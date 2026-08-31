@@ -7545,6 +7545,25 @@ async def run_bsjp_recheck_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ BSJP recheck job gagal: {e}")
 
 
+async def run_bsjp_shortlist_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH (MBSS v2, user request 2026-08-31, live case
+    BALI/KICI lolos shortlist tapi sudah +25%/+24.4% -- practically ARA,
+    sudah tidak bisa dibeli): Fase 1 OTOMATIS -- SEBELUMNYA Fase 1 CUMA
+    manual-trigger (/bsjp), jadi kandidat yg nembus threshold pagi2 bisa
+    sudah lanjut lari ke ARA sebelum sempat ketahuan kalau user baru cek
+    siang/sore. Scan tiap BSJP_SHORTLIST_SCAN_INTERVAL_SEC (15 menit),
+    no-op murah di luar jendela 09:00-15:50 WIB (engine/scanalert.py
+    run_bsjp_shortlist_scan_auto) -- aman didaftarkan interval rapat sama
+    spt job lain di atas. /bsjp manual TETAP ada, dua cara ini saling
+    melengkapi (union shortlist yg sama, bukan duplikat state terpisah).
+    """
+    try:
+        await scanalert_engine.run_bsjp_shortlist_scan_auto()
+    except Exception as e:
+        print(f"⚠️ BSJP shortlist scan (auto) job gagal: {e}")
+
+
 async def send_startup_notice(app: Application):
     """Sent once automatically when the bot process starts — the person's cue that
     it's alive, and the one place the disclaimer appears instead of every message."""
@@ -7681,6 +7700,17 @@ def build_app():
         # WINDOW_START-END (14:00-15:50 WIB) atau kalau belum ada shortlist
         # /bsjp hari ini, aman didaftarkan 24/7 spt job lain di atas.
         app.job_queue.run_repeating(run_bsjp_recheck_job, interval=scanalert_engine.BSJP_RECHECK_INTERVAL_SEC, first=10)
+        # MBSS v2 (user request 2026-08-31 -- BSJP Fase 1 OTOMATIS, engine/
+        # scanalert.py run_bsjp_shortlist_scan_auto/run_bsjp_shortlist_scan_
+        # job DI ATAS): implementasi SUDAH ADA & siap pakai, TAPI SENGAJA
+        # BELUM didaftarkan di sini -- user request eksplisit "jangan bikin
+        # otomatis /bsjp dulu, manual saja dulu saya akan run beberapa
+        # kali" (setelah insiden VM lambat/SSH macet krn fetch lama tanpa
+        # cache -- lihat _fetch_bsjp_universe_snapshot). Aktifkan dgn:
+        # app.job_queue.run_repeating(run_bsjp_shortlist_scan_job,
+        # interval=scanalert_engine.BSJP_SHORTLIST_SCAN_INTERVAL_SEC,
+        # first=10) -- SETELAH user validasi manual /bsjp (skema cache
+        # baru) beberapa kali dulu, jangan aktifkan sepihak.
     else:
         print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
               "scan-alert intraday TIDAK akan jalan otomatis. Install dgn: "

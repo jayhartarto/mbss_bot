@@ -636,24 +636,25 @@ def _fetch_daily_ref(tickers: list[str]) -> dict:
 # touch-rate, daily_2y_issi_raw.pkl chronological discovery/validation
 # split) menemukan gap-reaction TERBAIK justru saat SEMUA 4 kriteria
 # berikut terpenuhi bersamaan:
-#   1. ret_1d > 18% (bukan 20% ala ARA lama -- granular sweep 15-20%
-#      nunjukkan 18-19% n/hari lebih banyak, kualitas identik ke 20%)
+#   1. ret_1d > 15% (lihat revisi 2026-08-31 di bawah)
 #   2. Volume > 1.5x volume kemarin
 #   3. High < 1.01x harga sekarang ("clean close" -- proksi close_pos_
 #      today, korelasi TERKUAT ke gap besok yg ditemukan sesi ini, 0.327
 #      Spearman, jauh di atas fitur lain yg diuji)
 #   4. Volume > 1.0x rata-rata volume 200 hari
 # Median gap reaction (Open besok vs harga saat SEMUA 4 lolos) = 3.1%,
-# n=196-208 validation, out-of-sample. TIDAK ada individual WR yg
-# justified (semua korelasi fitur lanjutan <0.25 setelah gate ini) --
-# TP1 pakai angka grup, bukan model per-ticker.
+# n=196-208 validation, out-of-sample (angka ASLI di threshold 18%, lihat
+# revisi di bawah utk angka di 15%). TIDAK ada individual WR yg justified
+# (semua korelasi fitur lanjutan <0.25 setelah gate ini) -- TP1 pakai
+# angka grup, bukan model per-ticker.
 #
 # ARSITEKTUR 2-FASE (user request, "kalau EOD-only, belum tentu open besok
 # up dari close, jadi ketinggalan kereta"): entry sebenarnya SORE INI
 # (SEBELUM gap terjadi), BUKAN besok pagi (setelah gap, sudah kemahalan) --
 # deteksi HARUS live intraday:
-#   Fase 1 (/bsjp, user-trigger akhir sesi 1): scan SELURUH universe,
-#     simpan yg lolos 4 kriteria sbg shortlist.
+#   Fase 1 (/bsjp manual, ATAU run_bsjp_shortlist_scan_auto JobQueue tiap
+#     15 menit 09:00-15:50 -- lihat revisi di bawah): scan SELURUH
+#     universe, simpan yg lolos 4 kriteria sbg shortlist.
 #   Fase 2 (run_bsjp_recheck_once, JobQueue tiap 30 menit 14:00-15:50):
 #     re-cek HANYA shortlist (murah), kirim alert final ke ticker yg MASIH
 #     lolos SEMUA 4 kriteria (proyeksi makin akurat makin sore) & belum
@@ -664,7 +665,26 @@ def _fetch_daily_ref(tickers: list[str]) -> dict:
 # masuk/averaging up; sudah dekat/lewat TP1 -> jangan kejar). JANGAN tahan
 # ke closing besok -- gap fade cepat (D1 CLOSE median -5.93% pd threshold
 # ini, jauh lebih dalam dari gap reaction-nya sendiri).
-BSJP_RET1D_MIN_PCT = 18.0
+#
+# MBSS v2 (user request 2026-08-31, live case BALI/KICI lolos shortlist tapi
+# sudah +25%/+24.4% -- practically sudah ARA, tidak bisa dibeli lagi): DUA
+# perbaikan sekaligus, saling melengkapi (backtest ulang 64 hari bursa
+# validasi, 3 kriteria lain TETAP produksi):
+#   1. BSJP_RET1D_MIN_PCT diturunkan 18%->15% -- avg jarak ke ARA saat
+#      kandidat tertangkap naik dari 0.82% ke 1.12% (proksi ARA band kasar
+#      35/25/20% by price tier), harga kualitas gap_med turun 3.06%->2.70%
+#      (~12% relatif) & touch-rate 64.5%->62.3% (~2pp) -- tradeoff nyata
+#      tapi moderat, n/hari nyaris sama (2.86 vs 2.98). 12% dites jg tapi
+#      dibuang (avg_dist 1.79% lumayan lebih besar, TAPI gap_med anjlok ke
+#      2.29%, ~25% relatif -- terlalu agresif).
+#   2. run_bsjp_shortlist_scan_auto (JobQueue baru, 09:00-15:50 WIB tiap 15
+#      menit) -- SEBELUMNYA Fase 1 CUMA manual-trigger (/bsjp), jadi kalau
+#      user baru cek siang/sore, kandidat yg nembus threshold pagi2 sudah
+#      lanjut lari ke ARA sebelum sempat ketahuan. Backtest EOD di atas
+#      TIDAK bisa mengukur efek checking lebih SERING (cuma 1x/hari by
+#      construction) -- perbaikan #2 ini independen dari #1, keduanya
+#      saling menambah room, bukan salah satu saja.
+BSJP_RET1D_MIN_PCT = 15.0
 BSJP_VOL_VS_PREV_DAY_MULT = 1.5
 BSJP_CLEAN_CLOSE_MULT = 1.01
 BSJP_VOL_VS_MA200_MULT = 1.0
@@ -672,6 +692,8 @@ BSJP_TP1_MEDIAN_GAP_PCT = 3.1
 BSJP_RECHECK_WINDOW_START = datetime.time(14, 0)
 BSJP_RECHECK_WINDOW_END = datetime.time(15, 50)
 BSJP_RECHECK_INTERVAL_SEC = 1800  # 30 menit
+BSJP_SHORTLIST_SCAN_WINDOW_START = datetime.time(9, 0)  # Fase 1 otomatis -- mulai buka, BUKAN nunggu akhir sesi 1
+BSJP_SHORTLIST_SCAN_INTERVAL_SEC = 900  # 15 menit
 BSJP_MIN_HISTORY_DAYS = 260  # >200 hari (MA200) + buffer hari libur/data hilang
 
 STATE_FILE_BSJP = os.path.join(core.PROJECT_ROOT, "bsjp_shortlist_state.json")
@@ -692,39 +714,136 @@ def _save_bsjp_state(state: dict):
         json.dump(state, f, indent=2)
 
 
+STATE_FILE_BSJP_BASE = os.path.join(core.PROJECT_ROOT, "bsjp_historical_base.json")
+_BSJP_FETCH_BATCH = 100  # chunk bulk yf.download -- hindari 1 request raksasa utk seluruh universe sekaligus
+
+
+def _load_bsjp_base_cache() -> dict:
+    if not os.path.exists(STATE_FILE_BSJP_BASE):
+        return {}
+    try:
+        with open(STATE_FILE_BSJP_BASE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_bsjp_base_cache(cache: dict):
+    with open(STATE_FILE_BSJP_BASE, "w") as f:
+        json.dump(cache, f)
+
+
+def _fetch_bsjp_historical_base(tickers: list[str]) -> dict:
+    """
+    Bagian STATIS (prev_close/prev_volume/vol_ma200 -- SEMUA dari data
+    SEBELUM hari ini, tidak pernah berubah sepanjang hari bursa berjalan)
+    -- 260 hari, MAHAL, tapi dipanggil CUMA 1x/hari (di-cache, lihat
+    _fetch_bsjp_universe_snapshot). Filter tanggal EKSPLISIT (bukan
+    position-based iloc[:-1]) -- benar apapun waktu fetch ini terjadi
+    (bisa saja base pertama kali dibangun SAAT market sudah buka, jadi
+    baris terakhir yg di-download BISA jadi hari ini sendiri, bukan
+    kemarin -- kalau pakai iloc[:-1] robotic itu keliru diasumsikan
+    "prior" padahal itu hari ini).
+    """
+    today_date = datetime.datetime.now(core.WIB).date()
+    base = {}
+    for i in range(0, len(tickers), _BSJP_FETCH_BATCH):
+        batch = tickers[i:i + _BSJP_FETCH_BATCH]
+        symbols = [t + ".JK" for t in batch]
+        data = yf.download(symbols, period=f"{BSJP_MIN_HISTORY_DAYS}d", interval="1d", group_by="ticker", threads=True, progress=False)
+        for t in batch:
+            sym = t + ".JK"
+            try:
+                d = data[sym].dropna(how="all")
+            except Exception:
+                continue
+            prior = d[d.index.date < today_date]
+            if len(prior) < 200:
+                continue
+            prev_close = float(prior["Close"].iloc[-1])
+            prev_volume = float(prior["Volume"].iloc[-1])
+            vol_ma200 = float(prior["Volume"].tail(200).mean())
+            if prev_close <= 0:
+                continue
+            base[t] = {"prev_close": prev_close, "prev_volume": prev_volume, "vol_ma200": vol_ma200}
+        if i + _BSJP_FETCH_BATCH < len(tickers):
+            time.sleep(0.5)
+    return base
+
+
+def _fetch_bsjp_live_bar(tickers: list[str]) -> dict:
+    """
+    Bagian LIVE (HARI INI saja) -- period KECIL (5 hari, bukan 260),
+    dipanggil TIAP kali _fetch_bsjp_universe_snapshot jalan (beda dari
+    historical base yg di-cache 1x/hari). Inilah fetch yg genuinely perlu
+    fresh tiap 15 menit -- payload-nya jauh lebih kecil drpd base.
+    """
+    today_date = datetime.datetime.now(core.WIB).date()
+    live = {}
+    for i in range(0, len(tickers), _BSJP_FETCH_BATCH):
+        batch = tickers[i:i + _BSJP_FETCH_BATCH]
+        symbols = [t + ".JK" for t in batch]
+        data = yf.download(symbols, period="5d", interval="1d", group_by="ticker", threads=True, progress=False)
+        for t in batch:
+            sym = t + ".JK"
+            try:
+                d = data[sym].dropna(how="all")
+            except Exception:
+                continue
+            today_rows = d[d.index.date == today_date]
+            if today_rows.empty:
+                continue
+            today = today_rows.iloc[-1]
+            live[t] = {
+                "current_price": float(today["Close"]),
+                "high_so_far": float(today["High"]),
+                "volume_so_far": float(today["Volume"]) if not pd.isna(today["Volume"]) else 0.0,
+            }
+        if i + _BSJP_FETCH_BATCH < len(tickers):
+            time.sleep(0.5)
+    return live
+
+
 def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
     """
-    SATU bulk fetch daily (period cukup utk MA200 + hari ini) -- yfinance
-    selama jam bursa berjalan mengembalikan bar HARI INI sbg baris TERAKHIR
-    yg live-updating (Open=open hari ini, High/Low=sejauh ini, Close=harga
-    terakhir, Volume=volume sejauh ini) -- SATU fetch ini cukup utk semua
-    4 kriteria, tidak perlu fetch intraday terpisah.
+    MBSS v2 (user request 2026-08-31, live case: panggilan KEDUA /bsjp di
+    hari yg sama masih sangat lambat, SSH ikut lag): root cause -- SEBELUM
+    ini, tiap panggilan re-fetch 260 hari PENUH utk SELURUH universe,
+    padahal 259 dari 260 hari itu STATIS (tidak berubah selama hari bursa
+    berjalan). Sekarang dipecah dua: bagian statis (_fetch_bsjp_historical_
+    base) di-cache 1x/hari (bsjp_historical_base.json), bagian live
+    (_fetch_bsjp_live_bar, period=5 hari SAJA) fetch fresh tiap panggilan.
+    Panggilan PERTAMA hari itu masih mahal (base belum ada), tapi panggilan
+    KEDUA dst (termasuk auto-scan tiap 15 menit) jauh lebih murah -- cuma
+    fetch bagian live yg kecil, base-nya reuse dari cache.
     """
-    symbols = [t + ".JK" for t in tickers]
-    data = yf.download(symbols, period=f"{BSJP_MIN_HISTORY_DAYS}d", interval="1d", group_by="ticker", threads=True, progress=False)
+    today = _today_str()
+    base_cache = _load_bsjp_base_cache()
+    if base_cache.get("trading_day_marker") != today or not base_cache.get("base"):
+        base = _fetch_bsjp_historical_base(tickers)
+        base_cache = {"trading_day_marker": today, "base": base}
+        _save_bsjp_base_cache(base_cache)
+    else:
+        base = base_cache["base"]
+        missing = [t for t in tickers if t not in base]
+        if missing:
+            extra_base = _fetch_bsjp_historical_base(missing)
+            base.update(extra_base)
+            base_cache["base"] = base
+            _save_bsjp_base_cache(base_cache)
+
+    live = _fetch_bsjp_live_bar(tickers)
+
     snap = {}
     for t in tickers:
-        sym = t + ".JK"
-        try:
-            d = data[sym].dropna(how="all")
-        except Exception:
-            continue
-        if len(d) < 201:  # butuh >=200 hari SEBELUM hari ini + hari ini sendiri
-            continue
-        today = d.iloc[-1]
-        prior = d.iloc[:-1]
-        current_price = float(today["Close"])
-        high_so_far = float(today["High"])
-        volume_so_far = float(today["Volume"]) if not pd.isna(today["Volume"]) else 0.0
-        prev_close = float(prior["Close"].iloc[-1])
-        prev_volume = float(prior["Volume"].iloc[-1])
-        vol_ma200 = float(prior["Volume"].tail(200).mean())
-        if prev_close <= 0:
+        b = base.get(t)
+        l = live.get(t)
+        if not b or not l:
             continue
         snap[t] = {
-            "current_price": current_price, "high_so_far": high_so_far, "volume_so_far": volume_so_far,
-            "prev_close": prev_close, "prev_volume": prev_volume, "vol_ma200": vol_ma200,
-            "ret_1d_pct": (current_price / prev_close - 1) * 100,
+            "current_price": l["current_price"], "high_so_far": l["high_so_far"], "volume_so_far": l["volume_so_far"],
+            "prev_close": b["prev_close"], "prev_volume": b["prev_volume"], "vol_ma200": b["vol_ma200"],
+            "ret_1d_pct": (l["current_price"] / b["prev_close"] - 1) * 100,
         }
     return snap
 
@@ -765,10 +884,12 @@ def _build_bsjp_message(ticker: str, snap: dict) -> str:
 
 async def run_bsjp_shortlist_scan(tickers: list[str]) -> list[dict]:
     """
-    FASE 1 (/bsjp, user-trigger akhir sesi 1): scan SELURUH universe thd 4
-    kriteria, simpan yg lolos sbg shortlist utk di-recheck Fase 2. Return
-    list kandidat (dict lengkap termasuk snapshot) utk ditampilkan
-    langsung di reply command.
+    FASE 1 -- scan SELURUH universe thd 4 kriteria, simpan yg lolos sbg
+    shortlist utk di-recheck Fase 2. Return list kandidat (dict lengkap
+    termasuk snapshot). Dipanggil DUA cara (MBSS v2, user request
+    2026-08-31): manual (/bsjp) DAN otomatis (run_bsjp_shortlist_scan_auto,
+    JobQueue tiap 15 menit 09:00-15:50) -- lihat catatan BSJP_SHORTLIST_
+    SCAN_INTERVAL_SEC di atas utk alasan kenapa manual-only tidak cukup.
     """
     snapshot = await asyncio.to_thread(_fetch_bsjp_universe_snapshot, tickers)
     passed = [{"ticker": t, **snap} for t, snap in snapshot.items() if _check_bsjp_criteria(snap)]
@@ -781,6 +902,81 @@ async def run_bsjp_shortlist_scan(tickers: list[str]) -> list[dict]:
     state.setdefault("alerted", [])
     _save_bsjp_state(state)
     return passed
+
+
+def _build_bsjp_shortlist_new_message(ticker: str, snap: dict) -> str:
+    vol_vs_prev = snap["volume_so_far"] / max(snap["prev_volume"], 1.0)
+    vol_vs_ma200 = snap["volume_so_far"] / max(snap["vol_ma200"], 1.0)
+    return (
+        f"BSJP SHORTLIST (Fase 1 otomatis)\n"
+        f"🌆 {ticker} baru masuk shortlist — {snap['current_price']:,.0f} ({snap['ret_1d_pct']:+.1f}%)\n"
+        f"Vol {vol_vs_prev:.1f}x kemarin | {vol_vs_ma200:.1f}x MA200\n"
+        f"⚠️ BUKAN alert entry -- akan di-recheck live 14:00-15:50 WIB, alert final (dgn TP1) baru dikirim kalau MASIH lolos semua kriteria."
+    )
+
+
+async def run_bsjp_shortlist_scan_auto() -> dict:
+    """
+    MBSS v2 (user request 2026-08-31, live case BALI/KICI lolos shortlist
+    tapi sudah +25%/+24.4% -- practically ARA, tidak bisa dibeli lagi):
+    Fase 1 OTOMATIS, JobQueue tiap BSJP_SHORTLIST_SCAN_INTERVAL_SEC
+    (no-op murah di luar jendela 09:00-15:50 WIB). SEBELUMNYA Fase 1 CUMA
+    manual-trigger (/bsjp) -- kalau user baru cek siang/sore, kandidat yg
+    nembus threshold pagi2 sudah lanjut lari ke ARA sebelum sempat
+    ketahuan (lihat riset room-to-ARA di atas). Checking lebih SERING &
+    lebih PAGI menambah room riil, INDEPENDEN dari BSJP_RET1D_MIN_PCT
+    itu sendiri -- dua perbaikan ini saling melengkapi, bukan alternatif.
+
+    Kirim notifikasi HANYA utk ticker BARU masuk shortlist (dedup thd
+    shortlist SEBELUM scan ini dimulai) -- bukan re-broadcast seluruh
+    shortlist tiap 15 menit (spam).
+    """
+    summary = {"skipped_reason": None, "scanned": 0, "new_shortlist": 0}
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (BSJP_SHORTLIST_SCAN_WINDOW_START <= now_wib.time() <= BSJP_RECHECK_WINDOW_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+    if await asyncio.to_thread(core.is_idx_market_holiday_today):
+        summary["skipped_reason"] = "holiday"
+        return summary
+    if not is_scan_alert_enabled():
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+
+    import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
+    scored = nightly_engine.load_daily_scan_cache()
+    if not scored:
+        summary["skipped_reason"] = "no_cache"
+        return summary
+    universe = sorted(scored.keys())
+
+    state_before = _load_bsjp_state()
+    today = _today_str()
+    shortlist_before = set(state_before.get("shortlist", [])) if state_before.get("trading_day_marker") == today else set()
+
+    passed = await run_bsjp_shortlist_scan(universe)
+    summary["scanned"] = len(universe)
+
+    new_tickers = sorted({c["ticker"] for c in passed} - shortlist_before)
+    if new_tickers:
+        bot = None
+        if core.TELEGRAM_BOT_TOKEN:
+            import telegram
+            bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
+        passed_by_ticker = {c["ticker"]: c for c in passed}
+        for t in new_tickers:
+            msg = _build_bsjp_shortlist_new_message(t, passed_by_ticker[t])
+            if bot is not None:
+                await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+            else:
+                print(f"[NO TELEGRAM TOKEN] {msg}")
+            summary["new_shortlist"] += 1
+
+    print(f"✅ BSJP shortlist scan (auto): {summary['scanned']} ticker discan, {summary['new_shortlist']} baru masuk shortlist.")
+    return summary
 
 
 async def run_bsjp_recheck_once() -> dict:
