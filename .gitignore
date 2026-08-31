@@ -3,6 +3,7 @@
 *.db
 cache/
 daytrade_picks_history.json
+news_catalyst_log.json
 brokersum_cache.json
 brokersum_history.json
 failed_fetch_tracking.json

@@ -41,6 +41,7 @@ engine.legacy_core as core` here), never `from module import name`.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import copy
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -2173,16 +2174,30 @@ async def bsjp_screening_command(update, context):
       3. High hari ini < 1.01x harga sekarang ("clean close")
       4. Volume hari ini > 1.0x rata-rata volume 200 hari
     Simpan yg lolos sbg shortlist (dipakai FASE 2 -- recheck live otomatis
-    tiap 30 menit 14:00-15:50 WIB, lihat run_bsjp_recheck_job). WAJIB
-    dijalankan saat market masih buka (butuh data live).
+    tiap 30 menit 14:00-15:50 WIB, lihat run_bsjp_recheck_job).
+
+    MBSS v2 (user request 2026-08-31 -- "harusnya tetap bisa di running
+    ketika istirahat, kan hanya untuk jaring kandidat awal?"): jendela
+    DIPERLEBAR dari get_current_idx_session() (yg return None saat istirahat
+    siang 12:00-13:30/11:30-14:00 Jumat) ke SELURUH hari bursa 09:00-16:00 --
+    BEDA dgn command lain yg genuinely butuh sesi AKTIF (harga bergerak
+    detik-ini). BSJP Fase 1 cuma butuh data HARI INI SEJAUH INI (ret_1d,
+    volume-so-far, high-so-far via yf.download partial-day bar) -- data itu
+    SUDAH final/beku begitu sesi 1 tutup, TIDAK berubah lagi selama istirahat
+    (baru update lagi begitu sesi 2 buka), jadi genuinely valid dicek kapan
+    pun 09:00-16:00, termasuk pas istirahat. Sebelum 09:00 TETAP ditolak
+    (belum ada data hari ini SAMA SEKALI, bukan cuma beku).
     """
     import engine.scanalert as scanalert_engine  # import lokal -- hindari circular import di level modul
 
-    session = core.get_current_idx_session()
-    if session is None:
+    now_wib = datetime.datetime.now(core.WIB)
+    bsjp_window_start = datetime.time(9, 0)
+    bsjp_window_end = datetime.time(16, 0)  # akhir pra-penutupan, sama batas atas semua sesi IDX
+    is_holiday = await asyncio.to_thread(core.is_idx_market_holiday_today)
+    if now_wib.weekday() >= 5 or is_holiday or not (bsjp_window_start <= now_wib.time() < bsjp_window_end):
         await core.safe_reply(
             update.message,
-            "⚠️ /bsjp cuma berguna saat jam bursa (butuh data live) -- di luar itu tidak ada yang bisa dicek."
+            "⚠️ /bsjp cuma berguna selama hari bursa berjalan (09:00-16:00 WIB) -- di luar itu belum/tidak ada data hari ini utk dicek."
         )
         return
 

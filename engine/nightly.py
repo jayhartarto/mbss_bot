@@ -59,6 +59,7 @@ import engine.market as market_engine
 import engine.scoring as scoring_engine
 import engine.broker as broker_engine
 import engine.backbone as backbone_engine
+import engine.news_catalyst as news_catalyst_engine
 
 
 # ---------------------------------------------------------------------
@@ -620,6 +621,20 @@ async def run_nightly_full_scan(context):
             )
         except Exception as e:
             print(f"⚠️ Gagal menghitung AB-RC1 backbone: {e}")
+
+        # MBSS v2 (user request 2026-08-31, "explore ke news... apakah ada
+        # pengaruh?"): tagging LOG-ONLY berita akuisisi/M&A (engine/news_
+        # catalyst.py) -- pilot backtest 2 pass independen nunjukkan edge
+        # kuat (D+3 median +4-9%, 58-75% positif, vs baseline +0-0.4%/31-
+        # 37%), TAPI Google News RSS tidak punya arsip historis (retensi
+        # ~30 hari, search-driven bukan date-indexed) jadi tidak bisa
+        # divalidasi proper spt fitur lain. Modul ini CUMA nge-log kejadian
+        # baru tiap malam, histori genuine baru terbentuk seiring waktu --
+        # BELUM dipakai sbg sinyal /go/command manapun.
+        try:
+            n_new = await asyncio.to_thread(news_catalyst_engine.scan_news_catalysts, results)
+        except Exception as e:
+            print(f"⚠️ Gagal scan news catalyst: {e}")
 
         # BUGFIX (ditemukan lewat pengamatan user — SOHO "Top" berturut-turut
         # dengan skor cuma 4.0, tidak istimewa): results TIDAK PERNAH di-sort
