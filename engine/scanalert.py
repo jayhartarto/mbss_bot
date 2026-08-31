@@ -1741,16 +1741,28 @@ def _get_swing_lane_universe() -> list[str]:
     dkk) TIDAK PERNAH bisa muncul di FCM/PRE-CONTINUATION/Conviction Sweep
     sama sekali, walau /allsetup menampilkannya dgn normal.
 
-    Sekarang: universe /eodscan penuh (SAMA populasi dgn /allsetup), TAPI
-    exclusion chronically-wide-range TETAP dipertahankan (proteksi ASLI,
-    sudah divalidasi via live case YPAS/DOSS/DAYA/ARII -- bukan dibuang,
-    cuma diterapkan ke sumber universe yg BARU).
+    UPDATE (user request 2026-08-31, live case KOTA/IATA/JGLE/YELO/ASLI/
+    KICI ke-exclude total, user curiga median wide-range genuinely bias
+    POSITIF bukan noise -- backtest sblm ubah): exclusion chronically-wide-
+    range DIHAPUS dari swing-lane (TETAP dipertahankan di _get_alert_
+    universe() utk gap-rebound/gap-hold/Alert A/B, lihat line ~375 -- itu
+    proteksi ASLI yg divalidasi utk scalping horizon, TIDAK disentuh).
+    Backtest same-day-exit (60hr, 15m bars, validation split n=1467):
+    chronic-wide-range (median_range_60d>=5.5%) justru py UPSIDE same-day
+    lebih besar stlh momentum trigger (ret_to_best_after median +2.25% vs
+    +1.18% normal, hit-rate 83.4% vs 72.3%, corr +0.256) -- hold-to-close
+    naif tetap buruk utk KEDUA grup (~27% hit-rate), TAPI FCM/PRE-
+    CONTINUATION/Conviction Sweep tidak pernah hold-to-close naif (selalu
+    py TP1/TP2 exit), jadi upside intraday itu genuinely bisa ditangkap.
+    Swing-horizon backtest (d1/d3/d5 close-to-close) TETAP nunjuk sedikit
+    bias negatif utk grup ekstrem (median_range>=10%, n kecil) -- kalau ke
+    depan mau proteksi lagi, arahnya threshold TINGGI (~10%) bukan 5.5%.
     """
     import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
     scored = nightly_engine.load_daily_scan_cache()
     if not scored:
         return []
-    return _exclude_erratic_volatility_profile(sorted(scored.keys()))
+    return sorted(scored.keys())
 
 
 def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
