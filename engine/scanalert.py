@@ -1661,6 +1661,36 @@ FAIL_SIGNAL_EXTENDED_LANES = ("MOMENTUM_EXTENDED",)
 SCANALERT_LIQUIDITY_WARN_FLOOR_IDR = 500_000_000
 
 
+def _get_swing_lane_universe() -> list[str]:
+    """
+    MBSS v2 (user request 2026-08-31 -- "conviction sweep bukannya
+    harusnya cek all tickers di allsetup?"): universe KHUSUS FCM/
+    PRE-CONTINUATION/Conviction Sweep -- BEDA dari _get_alert_universe()
+    (ticker_whitelist.json, whitelist bulanan TERPISAH, dipakai Alert A/B/
+    gap-rebound/gap-hold yg genuinely butuh populasi scalping-friendly
+    tervalidasi sendiri, TIDAK disentuh oleh perubahan ini).
+
+    SEBELUMNYA lane SWING TRADE (FCM/CONTINUATION/VALIDATION/MOMENTUM_
+    EXTENDED/PRE tier) live-tracking ikut pakai _get_alert_universe(),
+    padahal /allsetup & /go (versi EOD, SUMBER KEBENARAN definisi lane2
+    ini) pakai universe /eodscan PENUH -- gap nyata, confirmed dari log
+    produksi 2026-08-31: 146 ticker ke-exclude "chronically wide-range"
+    (proteksi KHUSUS scalping Alert A/B, lihat FROZEN_MEDIAN_RANGE_MAX_PCT
+    dkk) TIDAK PERNAH bisa muncul di FCM/PRE-CONTINUATION/Conviction Sweep
+    sama sekali, walau /allsetup menampilkannya dgn normal.
+
+    Sekarang: universe /eodscan penuh (SAMA populasi dgn /allsetup), TAPI
+    exclusion chronically-wide-range TETAP dipertahankan (proteksi ASLI,
+    sudah divalidasi via live case YPAS/DOSS/DAYA/ARII -- bukan dibuang,
+    cuma diterapkan ke sumber universe yg BARU).
+    """
+    import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
+    scored = nightly_engine.load_daily_scan_cache()
+    if not scored:
+        return []
+    return _exclude_erratic_volatility_profile(sorted(scored.keys()))
+
+
 def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
     """
     Reuse PERSIS kriteria FRESH CROSS MOMENTUM (commands/scan.py, jangan
@@ -1983,17 +2013,23 @@ async def run_scan_alert_once() -> dict:
     else:
         daily_ref = state["daily_ref"]
 
+    # MBSS v2 (user request 2026-08-31): universe FCM/PRE-CONTINUATION BEDA
+    # dari `universe` (_get_alert_universe(), whitelist bulanan Alert A/B/
+    # gap) -- lihat docstring _get_swing_lane_universe() utk alasan (harus
+    # SAMA populasi dgn /allsetup, bukan whitelist scalping terpisah).
+    if state.get("fresh_cross_momentum_watchlist") is None or state.get("pre_continuation_watchlist") is None:
+        swing_lane_universe = await asyncio.to_thread(_get_swing_lane_universe)
     if state.get("fresh_cross_momentum_watchlist") is None:
-        print(f"📡 Scan-alert: hitung watchlist FRESH CROSS MOMENTUM (cross<=2hr, ret10_pre>15%) utk {len(universe)} ticker...")
-        fcm_watchlist = await asyncio.to_thread(_get_fresh_cross_momentum_watchlist, universe)
+        print(f"📡 Scan-alert: hitung watchlist FRESH CROSS MOMENTUM (cross<=2hr, ret10_pre>15%) utk {len(swing_lane_universe)} ticker...")
+        fcm_watchlist = await asyncio.to_thread(_get_fresh_cross_momentum_watchlist, swing_lane_universe)
         state["fresh_cross_momentum_watchlist"] = fcm_watchlist
         print(f"✅ FRESH CROSS MOMENTUM watchlist hari ini: {len(fcm_watchlist)} ticker.")
     else:
         fcm_watchlist = state["fresh_cross_momentum_watchlist"]
 
     if state.get("pre_continuation_watchlist") is None:
-        print(f"📡 Scan-alert: hitung watchlist PRE-CROSS/CONTINUATION utk {len(universe)} ticker...")
-        pre_continuation_watchlist = await asyncio.to_thread(_get_pre_continuation_watchlist, universe)
+        print(f"📡 Scan-alert: hitung watchlist PRE-CROSS/CONTINUATION utk {len(swing_lane_universe)} ticker...")
+        pre_continuation_watchlist = await asyncio.to_thread(_get_pre_continuation_watchlist, swing_lane_universe)
         state["pre_continuation_watchlist"] = pre_continuation_watchlist
         print(f"✅ PRE-CROSS/CONTINUATION watchlist hari ini: {len(pre_continuation_watchlist)} ticker.")
     else:
@@ -2320,11 +2356,13 @@ def _build_conviction_universe_tags(main_state: dict) -> dict:
     fcm = main_state.get("fresh_cross_momentum_watchlist")
     pre_cont = main_state.get("pre_continuation_watchlist")
     if fcm is None or pre_cont is None:
-        alert_universe = _get_alert_universe()
+        # MBSS v2 (user request 2026-08-31): SAMA alasan dgn run_scan_alert_
+        # once -- lihat docstring _get_swing_lane_universe().
+        swing_lane_universe = _get_swing_lane_universe()
         if fcm is None:
-            fcm = _get_fresh_cross_momentum_watchlist(alert_universe)
+            fcm = _get_fresh_cross_momentum_watchlist(swing_lane_universe)
         if pre_cont is None:
-            pre_cont = _get_pre_continuation_watchlist(alert_universe)
+            pre_cont = _get_pre_continuation_watchlist(swing_lane_universe)
 
     for t, w in (fcm or {}).items():
         tags[t] = {"tag": "FCM", "features": {"ret10_pre_cross_pct": w.get("ret10_pre_cross_pct"), "pct_b": w.get("pct_b")}}
