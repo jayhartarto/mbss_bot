@@ -395,6 +395,21 @@ async def check_stock(update, context):
             {"dist_to_sma20": _macd_dist_sma20, "pct_b": result.get("pct_b"), "gap_slope_3d": result.get("macd_gap_slope_3d")},
             f"🚀 MOMENTUM EXTENDED (BACKTEST): episode {_macd_cross_days_ago} hari, MACD akselerasi + harga konfirmasi hari ini (+{result['ret_1d_pct']:.1f}%)",
         )
+    # MBSS v2 (user request 2026-08-31, live case SPTO/WIFI/MEDC/HRUM/BANK):
+    # EARLY_VALIDATION -- lane ke-8, TANPA gate dist_sma20 (SENGAJA, lihat
+    # catatan MACD_EARLY_VALIDATION_GAIN_MIN_PCT di engine/scanalert.py).
+    # Static text (BUKAN _lane_tp_text) -- lane tak didukung lane_confidence
+    # by design, sama pola dgn FAST_RECOVERY/EARLY_RECOVERY di atas (hindari
+    # pesan "data tak lengkap" yg menyesatkan utk lane yg genuinely belum
+    # py model, bukan data kurang).
+    elif (
+        result.get("macd_cross_direction") == "bullish" and _macd_cross_days_ago is not None and _macd_cross_days_ago <= 5
+        and _macd_gain_since_cross is not None and 2.0 <= _macd_gain_since_cross < 3.0
+    ):
+        bb_line += (
+            f"\n🌱 EARLY VALIDATION (BACKTEST): cross {_macd_cross_days_ago} hari lalu, +{_macd_gain_since_cross:.1f}% sejak cross — "
+            f"~33% lanjut ke zona VALIDATION dlm 1-2 hari bursa (vs baseline pasar 13.4%, n=661)"
+        )
 
     # MBSS v2 (user request — HC-appropriate, BEDA dari macd_approach_tier di
     # atas yang untuk SDT pre-breakout): konfirmasi centerline cross yang

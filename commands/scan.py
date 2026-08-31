@@ -187,8 +187,8 @@ def rank_by_live_activity(candidates: list, count: int = 12) -> list:
 # stale), TIDAK fetch apa pun -- instan, sama seperti /hc.
 async def all_setup_candidates_command(update, context):
     """
-    /allsetup — pandangan gabungan semua 7 lane MACD (PRE tiers, FCM,
-    CONTINUATION, VALIDATION, MOMENTUM_EXTENDED) dalam satu command, untuk
+    /allsetup — pandangan gabungan semua 8 lane MACD (PRE tiers, FCM,
+    EARLY_VALIDATION, CONTINUATION, VALIDATION, MOMENTUM_EXTENDED) dalam satu command, untuk
     audit cepat "kandidat mana yg genuinely ada malam ini di semua setup
     sekaligus" tanpa perlu jalankan /screendaytrade + /hc lalu bandingkan
     manual. Lihat catatan panjang di atas untuk detail kenapa & bedanya
@@ -213,9 +213,12 @@ async def all_setup_candidates_command(update, context):
     _EXT_MAX_DAYS_AGO = 40
     _EXT_GAP_SLOPE_Q4 = 0.3106
     _EXT_RET1D_MIN = 2.5
+    _EARLY_VAL_GAIN_MIN = 2.0
+    _EARLY_VAL_GAIN_MAX = 3.0
 
     lanes = {name: [] for name in
-             ["FAST_RECOVERY", "EARLY_RECOVERY", "ABOVE_MOMENTUM", "FCM", "CONTINUATION", "VALIDATION", "MOMENTUM_EXTENDED"]}
+             ["FAST_RECOVERY", "EARLY_RECOVERY", "ABOVE_MOMENTUM", "FCM", "EARLY_VALIDATION",
+              "CONTINUATION", "VALIDATION", "MOMENTUM_EXTENDED"]}
 
     for r in gate_survivors:
         tier = r.get("macd_approach_tier")
@@ -231,6 +234,15 @@ async def all_setup_candidates_command(update, context):
     for r in all_values:
         gain = r.get("macd_gain_since_cross_pct")
         dist_sma20 = r.get("price_vs_sma20_pct")
+        # EARLY_VALIDATION (lane ke-8, 2026-08-31): TANPA gate dist_sma20,
+        # SENGAJA -- lihat catatan MACD_EARLY_VALIDATION_GAIN_MIN_PCT di
+        # engine/scanalert.py utk alasan & backtest.
+        if (
+            r.get("macd_cross_direction") == "bullish" and r.get("macd_cross_days_ago") is not None
+            and r["macd_cross_days_ago"] <= _CONT_MAX_CROSS_DAYS
+            and gain is not None and _EARLY_VAL_GAIN_MIN <= gain < _EARLY_VAL_GAIN_MAX
+        ):
+            lanes["EARLY_VALIDATION"].append(r)
         if (
             r.get("macd_cross_direction") == "bullish" and r.get("macd_cross_days_ago") is not None
             and r["macd_cross_days_ago"] <= _CONT_MAX_CROSS_DAYS
@@ -253,18 +265,21 @@ async def all_setup_candidates_command(update, context):
     if staleness_note:
         lines.insert(0, staleness_note)
     lines.append(
-        "Gabungan 7 lane (SDT pra-breakout + HC continuation/validation/extended), PERSIS kriteria "
+        "Gabungan 8 lane (SDT pra-breakout + HC continuation/validation/extended), PERSIS kriteria "
         "/screendaytrade & /hc. Beda dari 2 command itu: candidate confidence individual <50% TETAP "
         "muncul di sini, ditandai [suppressed] -- bukan disembunyikan.\n"
     )
 
     LANE_EMOJI = {
         "FAST_RECOVERY": "⚡", "EARLY_RECOVERY": "🔄", "ABOVE_MOMENTUM": "📐", "FCM": "🔥",
-        "CONTINUATION": "📈", "VALIDATION": "📊", "MOMENTUM_EXTENDED": "🚀",
+        "EARLY_VALIDATION": "🌱", "CONTINUATION": "📈", "VALIDATION": "📊", "MOMENTUM_EXTENDED": "🚀",
     }
     STATIC_WR = {
         "FAST_RECOVERY": "hit6~62.4%/hit10~38.8% (n=85)",
         "EARLY_RECOVERY": "hit6~59.2%/hit10~43.1% (derivasi, n≈262)",
+        # MBSS v2 2026-08-31: bukan hit6 (belum ada model lane_confidence) --
+        # peluang lanjut ke gain_since_cross>=4% (zona VALIDATION) dlm 1-2h.
+        "EARLY_VALIDATION": "~33% lanjut ke VALIDATION dlm 1-2h (n=661, vs baseline pasar 13.4%)",
     }
 
     for lane_name, candidates in lanes.items():
@@ -287,6 +302,9 @@ async def all_setup_candidates_command(update, context):
             elif lane_name == "ABOVE_MOMENTUM":
                 features = {"dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b")}
                 detail = "pre-cross, momentum menguat"
+            elif lane_name == "EARLY_VALIDATION":  # tak didukung lane_confidence, spt FAST_RECOVERY/EARLY_RECOVERY
+                features = None
+                detail = f"cross {r.get('macd_cross_days_ago', '-')}h lalu, +{(r.get('macd_gain_since_cross_pct') or 0):.1f}% sejak cross"
             else:  # FAST_RECOVERY/EARLY_RECOVERY -- tak didukung lane_confidence
                 features = None
                 detail = "pre-cross, BELOW centerline"
@@ -466,6 +484,8 @@ async def go_command(update, context):
     _EXT_MAX_DAYS_AGO = 40
     _EXT_GAP_SLOPE_Q4 = 0.3106
     _EXT_RET1D_MIN = 2.5
+    _EARLY_VAL_GAIN_MIN = 2.0
+    _EARLY_VAL_GAIN_MAX = 3.0
 
     swing_candidates = []  # [(lane_name, r)]
     for r in gate_survivors:
@@ -481,6 +501,15 @@ async def go_command(update, context):
     for r in all_values:
         gain = r.get("macd_gain_since_cross_pct")
         dist_sma20 = r.get("price_vs_sma20_pct")
+        # EARLY_VALIDATION (lane ke-8, 2026-08-31): TANPA gate dist_sma20,
+        # SENGAJA -- lihat catatan MACD_EARLY_VALIDATION_GAIN_MIN_PCT di
+        # engine/scanalert.py.
+        if (
+            r.get("macd_cross_direction") == "bullish" and r.get("macd_cross_days_ago") is not None
+            and r["macd_cross_days_ago"] <= _CONT_MAX_CROSS_DAYS
+            and gain is not None and _EARLY_VAL_GAIN_MIN <= gain < _EARLY_VAL_GAIN_MAX
+        ):
+            swing_candidates.append(("EARLY_VALIDATION", r))
         if (
             r.get("macd_cross_direction") == "bullish" and r.get("macd_cross_days_ago") is not None
             and r["macd_cross_days_ago"] <= _CONT_MAX_CROSS_DAYS
@@ -2009,6 +2038,60 @@ async def high_conviction_command(update, context):
             )
         except Exception as e:
             print(f"⚠️ Gagal mengunci picks /hc validation untuk /winrate: {e}")
+
+    # MBSS v2 (user request 2026-08-31, live case SPTO/WIFI/MEDC/HRUM/BANK --
+    # fresh cross genuine, gain_since_cross 2-3%, TAPI tidak masuk lane
+    # manapun -- persis pola NRCA di atas, cuma di gain band lebih rendah).
+    # Backtest 2thn/576 ISSI (chronological 70/30, validasi): populasi ini
+    # py peluang TRANSISI ke gain_since_cross>=4% (zona VALIDATION) dlm 1-2
+    # hari bursa = 33.4% (n=661), vs baseline pasar acak 13.4% (>2x lipat).
+    # Pita 0-2% DITOLAK (10.7-18.8%, tak terselamatkan filter vol_ratio/RSI)
+    # -- HANYA 2-3% yg lolos. TANPA gate dist_to_sma20 (SENGAJA, beda dari
+    # CONTINUATION/VALIDATION -- backtest TIDAK mengkondisikan dist_to_sma20
+    # sama sekali). TIDAK didukung lane_confidence (belum ada model utk lane
+    # baru) -- _lane_tp_suffix return "" otomatis, tampil dgn WR statis spt
+    # FAST_RECOVERY/EARLY_RECOVERY. Filosofi user: "kita punya mekanisme
+    # sweep candidate all setup, maka lebih banyak kandidat sebenarnya lebih
+    # baik" -- lane INI perannya jaring kandidat AWAL, Conviction Sweep yg
+    # konfirmasi belakangan.
+    early_validation_candidates = [
+        r for r in scored.values()
+        if r.get("ticker") not in excluded_tickers
+        and r["ticker"] not in {c["ticker"] for c in continuation_candidates}
+        and r["ticker"] not in {c["ticker"] for c in validation_candidates}
+        and r.get("macd_cross_direction") == "bullish"
+        and r.get("macd_cross_days_ago") is not None
+        and r["macd_cross_days_ago"] <= MACD_CONTINUATION_MAX_CROSS_DAYS
+        and r.get("macd_gain_since_cross_pct") is not None
+        and 2.0 <= r["macd_gain_since_cross_pct"] < 3.0
+    ]
+    early_validation_candidates.sort(key=lambda r: r["macd_gain_since_cross_pct"], reverse=True)
+    early_validation_candidates = early_validation_candidates[:8]
+
+    if early_validation_candidates:
+        lines.append(
+            f"\n🌱 EARLY VALIDATION — {len(early_validation_candidates)} kandidat (sudah cross bullish, +2-3% sejak cross)\n"
+            f"~33% lanjut ke zona VALIDATION dlm 1-2 hari bursa (vs baseline pasar 13.4%) -- jaring kandidat awal:\n"
+        )
+        for r in early_validation_candidates:
+            t = r.get("targets", {})
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(r["ticker"]) if backbone_result else None
+            danger_note = ""
+            if bb_info and bb_info.get("predicted_danger") is not None and bb_info["predicted_danger"] >= 50:
+                danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
+            lines.append(
+                f"• {r['ticker']} — cross {r.get('macd_cross_days_ago', '-')} hari lalu, "
+                f"+{r['macd_gain_since_cross_pct']:.1f}% sejak cross\n"
+                f"   Harga {r.get('price')} | SL {t.get('cut_loss')}{danger_note}"
+                f"{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
+            )
+        try:
+            await asyncio.to_thread(
+                core.lock_daily_daytrade_picks, early_validation_candidates, "hc_early_validation",
+                (backbone_result or {}).get("all_scored", {})
+            )
+        except Exception as e:
+            print(f"⚠️ Gagal mengunci picks /hc early_validation untuk /winrate: {e}")
 
     # MBSS v2 (user request 2026-08-24 — riset "episode extended": bukan
     # fresh breakout (itu domain CONTINUATION/VALIDATION di atas, cross<=5

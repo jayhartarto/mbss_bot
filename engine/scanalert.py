@@ -1457,7 +1457,7 @@ def _conviction_tag(ticker: str, fcm_watchlist: dict, pre_continuation_watchlist
         w = pre_continuation_watchlist[ticker]
         lane_label = {
             "PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)",
-            "MOMENTUM_EXTENDED": "MOMENTUM EXTENDED (Swing)",
+            "MOMENTUM_EXTENDED": "MOMENTUM EXTENDED (Swing)", "EARLY_VALIDATION": "EARLY VALIDATION (pra-VALIDATION)",
         }.get(w["lane"], w["lane"])
         return f"✅ ADA SETUP: {lane_label}, {w['detail']}"
     return "⚠️ NO SETUP — spike teknikal murni, tidak ada dukungan sinyal sistem (FCM/PRE/CONTINUATION/HC)"
@@ -1646,6 +1646,26 @@ FCM_OPEN_BUY_WINDOW_END = datetime.time(9, 15)  # jendela "beli di open" -- di l
 PRE_CONTINUATION_BODY_MIN_PCT = 1.0
 PRE_CONTINUATION_SCAN_START = datetime.time(14, 0)
 MACD_CONTINUATION_MAX_CROSS_DAYS_AGO = 5    # PERSIS commands/scan.py high_conviction_command -- jangan drift
+
+# MBSS v2 (user request 2026-08-31, live case SPTO/WIFI/MEDC/HRUM/BANK --
+# fresh cross genuine tapi tak masuk lane manapun): backtest 2thn/576 ISSI
+# (chronological 70/30, validasi) nunjuk populasi gain_since_cross 2-3%
+# (cross_days_ago 1-5, TANPA gate dist_to_sma20 -- beda dari CONTINUATION/
+# VALIDATION) py peluang TRANSISI ke zona gain_since_cross>=4% (zona
+# tervalidasi py edge) dlm 1-2 hari bursa berikutnya = 33.2-33.4%, vs
+# baseline pasar acak cuma 13.4% (>2x lipat). Pita 0-2% DITOLAK (10.7%/
+# 18.8%, TIDAK terselamatkan filter sekunder vol_ratio maupun RSI -- sudah
+# dites, tetap lemah) -- HANYA 2-3% yg lolos. Filosofi user: "kita punya
+# mekanisme sweep candidate all setup, maka lebih banyak kandidat
+# sebenarnya lebih baik" -- lane ini SENGAJA definisi longgar (TANPA gate
+# dist_to_sma20, beda dari CONTINUATION/VALIDATION) krn perannya "jaring
+# kandidat AWAL", Conviction Sweep-lah yg konfirmasi belakangan seiring
+# harga (mungkin) lanjut naik ke zona VALIDATION. TIDAK didukung engine/
+# lane_confidence.py (belum ada model terlatih utk lane baru ini) --
+# caller fallback ke CONVICTION_TP_CEILING_PCT statis, SAMA spt FAST_
+# RECOVERY/EARLY_RECOVERY.
+MACD_EARLY_VALIDATION_GAIN_MIN_PCT = 2.0
+MACD_EARLY_VALIDATION_GAIN_MAX_PCT = 3.0
 
 # MBSS v2 (user request 2026-08-30 -- "sinyal intraday lainnya sudah selaras
 # dengan swingtrade, masukkan MOMENTUM_EXTENDED juga"): lane ke-6 /go SWING
@@ -1851,6 +1871,23 @@ def _get_pre_continuation_watchlist(universe: list[str]) -> dict:
                 "gap_slope_3d": r.get("macd_gap_slope_3d"),
             }
             continue
+        # EARLY_VALIDATION (lane ke-8, ditambah 2026-08-31): TANPA gate
+        # dist_to_sma20 (SENGAJA, lihat catatan MACD_EARLY_VALIDATION_GAIN_
+        # MIN_PCT di atas) -- dicek SEBELUM gate sma_dist di bawah supaya
+        # tidak ikut ke-block olehnya.
+        early_gain = r.get("macd_gain_since_cross_pct")
+        if (
+            r.get("macd_cross_direction") == "bullish"
+            and r.get("macd_cross_days_ago") is not None
+            and r["macd_cross_days_ago"] <= MACD_CONTINUATION_MAX_CROSS_DAYS_AGO
+            and early_gain is not None
+            and MACD_EARLY_VALIDATION_GAIN_MIN_PCT <= early_gain < MACD_EARLY_VALIDATION_GAIN_MAX_PCT
+        ):
+            watchlist[t] = {
+                "lane": "EARLY_VALIDATION", "detail": f"+{early_gain:.1f}% sejak cross",
+                "dist_to_sma20": r.get("price_vs_sma20_pct"), "pct_b": r.get("pct_b"),
+            }
+            continue
         sma_dist = r.get("price_vs_sma20_pct")
         if sma_dist is None or sma_dist < MACD_LANE_DIST_SMA20_MIN_PCT:
             continue
@@ -1915,7 +1952,7 @@ def _build_h1_strong_body_message(ticker: str, detection: dict, watchlist_entry:
     lane, detail = watchlist_entry["lane"], watchlist_entry["detail"]
     lane_label = {
         "PRE": "PRE-CROSS (SDT)", "CONTINUATION": "CONTINUATION (HC)", "VALIDATION": "VALIDATION (HC)",
-        "MOMENTUM_EXTENDED": "MOMENTUM EXTENDED (Swing)",
+        "MOMENTUM_EXTENDED": "MOMENTUM EXTENDED (Swing)", "EARLY_VALIDATION": "EARLY VALIDATION (pra-VALIDATION)",
     }.get(lane, lane)
     tp_suffix = _tp_lines_suffix(watchlist_entry, detection["current_price"])
     if tp_suffix:
@@ -1924,6 +1961,11 @@ def _build_h1_strong_body_message(ticker: str, detection: dict, watchlist_entry:
         hist_label = {
             "PRE": "hit6~50-56%", "CONTINUATION": "hit6~60.2%", "VALIDATION": "hit6~57.6%",
             "MOMENTUM_EXTENDED": "hit6~69.4-70.2%",
+            # MBSS v2 2026-08-31: bukan hit6 (belum ada model lane_confidence
+            # utk lane ini) -- metrik beda: peluang lanjut ke gain_since_
+            # cross>=4% (zona VALIDATION) dlm 1-2 hari bursa, lihat catatan
+            # MACD_EARLY_VALIDATION_GAIN_MIN_PCT.
+            "EARLY_VALIDATION": "~33% lanjut ke VALIDATION dlm 1-2h",
         }.get(lane, "-")
         hist_line = f"Historis: {hist_label}"
     return (
