@@ -48,6 +48,19 @@ with open(_CONSTANTS_FILE) as _f:
 # ditambah, tidak perlu lagi diturunkan spt versi 3-fitur sebelumnya.
 TP_WR_FLOOR_PCT = 60.0
 
+# MBSS v2 (user request 2026-08-31 -- "/go DAY TRADE terlalu banyak"): TANPA
+# batas bawah, median TP1 candidate cuma level_pct=0.5% (97% populasi <2%,
+# lihat riwayat chat sesi ini) -- gain terlalu kecil utk actionable day
+# trade, kebanyakan cuma noise scalp. Dicoba floor WR>=65% + min level>=2%
+# dulu (n=60 hari bursa terakhir) -- TERLALU ekstrem (~0.5/malam, sering
+# kosong total). Compromise FINAL: floor WR TETAP 60% (tidak dinaikkan) +
+# min level>=1% -- ~2.7 kandidat/malam (vs 23.8/malam tanpa filter),
+# median TP level jadi 1.2%, penurunan besar tapi TIDAK sampai nyaris
+# kosong. Level di BAWAH floor ini (0.5%) TIDAK PERNAH dipertimbangkan
+# sama sekali (bukan cuma difilter belakangan) -- ladder walk mulai dari
+# TP_MIN_LEVEL_PCT, bukan dari level terkecil di _MODEL.
+TP_MIN_LEVEL_PCT = 1.0
+
 DAYTRADE_EXIT_WARNING = "TP CEPAT, JANGAN tahan sampai closing -- data: hold ke closing median RUGI (-0.72%, cuma 28% positif)."
 
 
@@ -74,11 +87,17 @@ def compute_tp1(features: dict, ref_price: float) -> dict | None:
     {"level_pct", "wr_pct", "price"} utk level TERJAUH yg WR-nya masih
     >=TP_WR_FLOOR_PCT (asumsi WR menurun monoton makin jauh level, sama
     pola compute_tp1_tp2 lane_confidence.py) -- None kalau fitur tak
-    lengkap ATAU level terdekat sudah di bawah floor.
+    lengkap ATAU level >=TP_MIN_LEVEL_PCT pertama sudah di bawah floor.
+    Level di bawah TP_MIN_LEVEL_PCT TIDAK PERNAH dipertimbangkan (ladder
+    mulai dari situ, bukan dari level terkecil di _MODEL) -- lihat catatan
+    TP_MIN_LEVEL_PCT.
     """
     if not ref_price:
         return None
-    level_keys = sorted(_MODEL["levels"].keys(), key=lambda k: float(k))
+    level_keys = sorted(
+        (k for k in _MODEL["levels"].keys() if float(k) >= TP_MIN_LEVEL_PCT),
+        key=lambda k: float(k),
+    )
     best_level_key = None
     best_wr = None
     for lvl_key in level_keys:

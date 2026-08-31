@@ -450,7 +450,7 @@ async def go_command(update, context):
             block = [
                 f"  • {t} — {price}",
                 f"     Setup: EOD High Conviction | Entry {price} (ref: open besok)",
-                f"     TP1 {tp1_info['price']:,.0f} (WR {tp1_info['wr_pct']:.0f}%)" + (f" | SL {cut_loss}" if cut_loss else ""),
+                f"     TP1 {tp1_info['price']:,.0f} / +{tp1_info['level_pct']:.1f}% (WR {tp1_info['wr_pct']:.0f}%)" + (f" | SL {cut_loss}" if cut_loss else ""),
             ]
             lines.append("\n".join(block))
     hc_candidates = [r for r, _ in daytrade_candidates]  # dipakai buttons di akhir command
@@ -1803,7 +1803,7 @@ async def high_conviction_command(update, context):
                 danger_note = f" | ⚠️ Danger {bb_info['predicted_danger']:.0f}/100"
             lines.append(
                 f"• {r['ticker']} — {r.get('price')}\n"
-                f"   TP1 {info['price']:,.0f} (WR {info['wr_pct']:.0f}%)" + (f" | SL {cut_loss}" if cut_loss else "")
+                f"   TP1 {info['price']:,.0f} / +{info['level_pct']:.1f}% (WR {info['wr_pct']:.0f}%)" + (f" | SL {cut_loss}" if cut_loss else "")
                 + f"{danger_note}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
             )
     else:
