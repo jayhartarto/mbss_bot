@@ -950,7 +950,7 @@ def decide_action(final_score, value_score, momentum_score, sentiment_score,
     }
 
 
-def compute_factor_scoring(ticker, include_quote_check=True):
+def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundamentals=False):
     """
     Returns a scored dict for one ticker, or None if data is unavailable/insufficient.
 
@@ -1018,12 +1018,29 @@ def compute_factor_scoring(ticker, include_quote_check=True):
     # just because the secondary fundamentals lookup failed. Falls back to an
     # empty info dict, which the existing pe==0/pb==0 handling already treats as
     # neutral rather than crashing.
-    try:
-        info = core.yf_fetch_with_retry(lambda: stock.info)
-    except Exception as e:
-        print(f"⚠️ {ticker}: yfinance PE/PB/dividend lookup failed ({e}) — scoring with iTick data only, "
-              f"value score will be neutral on the fundamentals it can't see.")
+    # MBSS v2 (BUGFIX, live incident 2026-09-01): skip_live_fundamentals --
+    # caller (_get_fresh_cross_momentum_watchlist/_get_pre_continuation_
+    # watchlist, engine/scanalert.py) memanggil ini utk SELURUH swing-lane
+    # universe (514-576 ticker) tiap kali watchlist harian dibangun ulang,
+    # SETIAP satu memicu live .info fetch per-ticker (endpoint yfinance
+    # paling lambat & paling gampang di-rate-limit, BEDA dari OHLCV bulk
+    # yg sudah dari SQLite lokal) -- terbukti live jadi HTTP 401 dari Yahoo
+    # + seluruh pipeline alert FCM/PRE-CONTINUATION/Conviction Sweep macet
+    # ~45 menit (watchlist gagal build berulang, retry tiap siklus 3 menit,
+    # tak pernah selesai). Value score TIDAK KRITIS utk live tracking ini
+    # (cuma dipakai penentuan momentum_score/final_score, BUKAN field yg
+    # dibaca caller -- caller hanya baca macd_cross_*/gain_since_cross/
+    # dist_to_sma20/pct_b), jadi aman di-skip drpd bikin seluruh alert
+    # pipeline stall nunggu 500+ live fetch selesai/timeout satu2.
+    if skip_live_fundamentals:
         info = {}
+    else:
+        try:
+            info = core.yf_fetch_with_retry(lambda: stock.info)
+        except Exception as e:
+            print(f"⚠️ {ticker}: yfinance PE/PB/dividend lookup failed ({e}) — scoring with iTick data only, "
+                  f"value score will be neutral on the fundamentals it can't see.")
+            info = {}
     close_prices = hist["Close"]
     volumes = hist["Volume"]
     low_prices = hist["Low"]

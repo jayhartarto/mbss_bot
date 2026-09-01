@@ -1826,7 +1826,7 @@ def _get_fresh_cross_momentum_watchlist(universe: list[str]) -> dict:
     watchlist = {}
     for t in universe:
         try:
-            r = scoring.compute_factor_scoring(t, include_quote_check=False)
+            r = scoring.compute_factor_scoring(t, include_quote_check=False, skip_live_fundamentals=True)
         except Exception:
             continue
         if not r:
@@ -1872,7 +1872,7 @@ def _get_pre_continuation_watchlist(universe: list[str]) -> dict:
     watchlist = {}
     for t in universe:
         try:
-            r = scoring.compute_factor_scoring(t, include_quote_check=False)
+            r = scoring.compute_factor_scoring(t, include_quote_check=False, skip_live_fundamentals=True)
         except Exception:
             continue
         if not r:
