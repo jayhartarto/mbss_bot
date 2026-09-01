@@ -7704,11 +7704,15 @@ def build_app():
         # 10:00-15:55 WIB, aman didaftarkan 24/7 spt job lain di atas.
         app.job_queue.run_repeating(run_conviction_sweep_job, interval=900, first=100)
         # MBSS v2 (user request 2026-08-29 -- unified BSJP "Beli Sore Jual
-        # Pagi" Fase 2, engine/scanalert.py run_bsjp_recheck_once):
-        # interval=BSJP_RECHECK_INTERVAL_SEC (1800s/30 menit, sesuai speks)
-        # -- job ini sendiri no-op murah di luar jendela BSJP_RECHECK_
-        # WINDOW_START-END (14:00-15:50 WIB) atau kalau belum ada shortlist
-        # /bsjp hari ini, aman didaftarkan 24/7 spt job lain di atas.
+        # Pagi" Fase 2, engine/scanalert.py run_bsjp_recheck_once): interval=
+        # BSJP_RECHECK_INTERVAL_SEC -- job ini sendiri no-op murah di luar
+        # jendela BSJP_RECHECK_WINDOW_START-END atau kalau belum ada
+        # shortlist /bsjp hari ini, aman didaftarkan 24/7 spt job lain di
+        # atas. UPDATE 2026-09-01: window dimajukan 14:00->09:30 (live case
+        # ARA terjadi sejak sesi 1) & interval dipercepat 1800s->900s,
+        # DISINKRONKAN dgn Fase 1 otomatis (BSJP_SHORTLIST_SCAN_INTERVAL_SEC)
+        # -- stagger first= (100/250/460 utk conviction_sweep/bsjp_recheck/
+        # bsjp_shortlist_scan) TETAP semua beda mod 900, tidak perlu diubah.
         app.job_queue.run_repeating(run_bsjp_recheck_job, interval=scanalert_engine.BSJP_RECHECK_INTERVAL_SEC, first=250)
         # MBSS v2 (user request 2026-08-31 -- BSJP Fase 1 OTOMATIS, engine/
         # scanalert.py run_bsjp_shortlist_scan_auto/run_bsjp_shortlist_scan_

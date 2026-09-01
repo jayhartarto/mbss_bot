@@ -693,7 +693,7 @@ def _fetch_daily_ref(tickers: list[str]) -> dict:
 #   Fase 1 (/bsjp manual, ATAU run_bsjp_shortlist_scan_auto JobQueue tiap
 #     15 menit 09:00-15:50 -- lihat revisi di bawah): scan SELURUH
 #     universe, simpan yg lolos 4 kriteria sbg shortlist.
-#   Fase 2 (run_bsjp_recheck_once, JobQueue tiap 30 menit 14:00-15:50):
+#   Fase 2 (run_bsjp_recheck_once, JobQueue tiap 15 menit 09:30-15:50):
 #     re-cek HANYA shortlist (murah), kirim alert final ke ticker yg MASIH
 #     lolos SEMUA 4 kriteria (proyeksi makin akurat makin sore) & belum
 #     pernah dialert hari ini.
@@ -726,39 +726,42 @@ BSJP_RET1D_MIN_PCT = 15.0
 BSJP_VOL_VS_PREV_DAY_MULT = 1.5
 BSJP_CLEAN_CLOSE_MULT = 1.01
 BSJP_VOL_VS_MA200_MULT = 1.0
-# MBSS v2 (user request 2026-08-31): thresholds di atas dikalibrasi thd data
-# EOD (ret_1d/prev_volume/vol_ma200 semua FULL hari), sedangkan FASE 1
-# shortlist scan jalan INTRADAY (sejak 09:00, tiap 15 menit) -- volume_so_far
-# di jam pagi otomatis jauh di bawah ambang full-day meski stok itu genuinely
-# ON PACE utk hari besar (bukan sinyal lemah, cuma belum genap waktunya).
-# User: tak perlu model proyeksi waktu-of-day yg rigid/rentan tak berkorelasi
-# -- cukup TOLERANSI: kalau sudah >=75% menuju tiap ambang MINIMUM, masuk
-# shortlist FASE 1 (jaring kandidat awal SAJA). FASE 2 recheck (14:00-15:50,
-# _check_bsjp_criteria tolerance=1.0 default) TETAP validasi PENUH/strict
-# sebelum alert final dgn TP1 dikirim -- toleransi ini TIDAK melemahkan alert
-# akhir, cuma memperlebar jaring awal yg toh divalidasi ulang ketat nanti.
-BSJP_SHORTLIST_TOLERANCE_PCT = 0.75
-# MBSS v2 (user request 2026-09-01, live case KKES): clean_close SENGAJA
-# di-KECUALIKAN dari toleransi di atas ("sudah longgar dgn sendirinya di
-# jam pagi, belum sempat pullback") -- TERBUKTI SALAH utk saham yg SEDANG
-# uptrend aktif (BUKAN pre-cross yg tenang): running high (high_so_far)
-# nyaris SELALU sedikit di atas current_price selama stok TERUS bikin high
-# baru, jadi clean_close < 1.01x justru GAGAL terus-menerus persis saat
-# harga masih kuat naik. Live case KKES 2026-09-01: ret_1d+vol_ma200 SUDAH
-# lolos sejak 09:15 (ret1d +16%), TAPI clean_close menahan sampai 11:06 --
-# tertahan >1.5 JAM murni krn kriteria ini, walau harga terus rally (rasio
-# high_so_far/current bertahan 1.01-1.06 sepanjang pagi). Sweep 1m riil (7
-# hari, n=25-32, KECIL -- indikatif) thd clean_close_mult 1.01->1.08: room-
-# ke-ARA naik nyata (avg_dist_ARA 8.84%->10.30% di 1.03), gap-quality
-# turun sedang (gap_pos 40.0%->34.5%) -- trade-off wajar utk FASE 1 (jaring
-# awal, BUKAN keputusan akhir -- FASE 2 recheck 14:00-15:50 tetap strict
-# 1.01x). 1.03 dipilih sbg titik tengah (bukan 1.05/1.08 yg makin
-# mengorbankan gap-quality tanpa tambahan room-ARA proporsional).
-BSJP_SHORTLIST_CLEAN_CLOSE_MULT = 1.03
+# MBSS v2 (user request 2026-09-01 -- redesign besar Fase 1/Fase 2 setelah
+# riset live case "nailunn" BSJP list + KKES + kalibrasi clean_close per
+# checkpoint waktu, lihat riwayat chat sesi 2026-09-01 utk detail lengkap):
+#
+# FASE 1 (jaring kandidat AWAL, longgar SENGAJA -- toh Fase 2 validasi ulang
+# ketat): ret_1d>=1% (BUKAN lagi toleransi 75% dari 15%=11.25% -- >=1% hampir
+# tanpa syarat return, krn EOD-based 15% terbukti membuang byk kandidat
+# genuine spt POWR/SOCI/SMLE/BEST/ICON/IATA/YELO/EPAC -- 10/14 nailunn list
+# gagal MURNI krn ret_1d, padahal 100% touch positif Day+1). vol_vs_prev/
+# vol_vs_ma200 KEMBALI ke ambang PENUH (1.5x/1.0x, TANPA toleransi lagi --
+# toleransi 75% utk 2 kriteria ini terbukti nyaris tak menambah kandidat di
+# sweep 1m sebelumnya). clean_close<=1.05 (naik dari 1.03 -- dites ulang
+# live case KKES: 1.05 vs 1.08/1.10 SAMA PERSIS waktu capture-nya [vol_vs_
+# prev jadi penghambat baru begitu clean_close dilonggarkan >=1.05], jadi
+# 1.05 sudah titik jenuh, tak perlu lebih longgar lagi).
+BSJP_SHORTLIST_RET1D_MIN_PCT = 1.0
+BSJP_SHORTLIST_CLEAN_CLOSE_MULT = 1.05
+#
+# FASE 2 (keputusan AKHIR sebelum alert "BELI SORE INI" beneran dikirim):
+# ret_1d DIHAPUS SAMA SEKALI sbg gate (user: "ret_1d kan dari EOD sebelumnya,
+# intraday sudah pasti bergerak lebih jauh, jadi basi sbg gate di titik
+# keputusan akhir"). clean_close TETAP KETAT (default 1.01x, TIDAK
+# dilonggarkan) -- kalibrasi per-checkpoint-waktu (1m riil, 7 hari, populasi
+# kandidat ret_1d>5%&vol_vs_prev>1x di checkpoint) nunjuk clean_close KETAT
+# justru MENANG di kedua metrik (P(EOD masih clean) DAN touch-rate Day+1
+# sungguhan) di SETIAP checkpoint yg dites -- melonggarkan clean_close utk
+# Fase 2 JUSTRU mengencerkan kualitas, bukan menambah kandidat baik. vol_vs_
+# prev/vol_vs_ma200 TETAP penuh (1.5x/1.0x, tak pernah berubah). Window
+# dimajukan drastis 14:00->09:30 (user: ARA beberapa kali sudah terjadi
+# SEJAK SESI 1 -- kalau nunggu 14:00 kandidat spt itu sudah kejauhan) DAN
+# interval dipercepat 1800s->900s, DISINKRONKAN dgn interval Fase 1 otomatis
+# (BSJP_SHORTLIST_SCAN_INTERVAL_SEC, sudah 900s sejak 2026-09-01).
 BSJP_TP1_MEDIAN_GAP_PCT = 3.1
-BSJP_RECHECK_WINDOW_START = datetime.time(14, 0)
+BSJP_RECHECK_WINDOW_START = datetime.time(9, 30)
 BSJP_RECHECK_WINDOW_END = datetime.time(15, 50)
-BSJP_RECHECK_INTERVAL_SEC = 1800  # 30 menit
+BSJP_RECHECK_INTERVAL_SEC = 900  # 15 menit -- disinkronkan dgn Fase 1 otomatis
 BSJP_SHORTLIST_SCAN_WINDOW_START = datetime.time(9, 0)  # Fase 1 otomatis -- mulai buka, BUKAN nunggu akhir sesi 1
 BSJP_SHORTLIST_SCAN_INTERVAL_SEC = 900  # 15 menit
 BSJP_MIN_HISTORY_DAYS = 260  # >200 hari (MA200) + buffer hari libur/data hilang
@@ -915,20 +918,27 @@ def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
     return snap
 
 
-def _check_bsjp_criteria(snap: dict, tolerance: float = 1.0, clean_close_mult: float | None = None) -> bool:
+def _check_bsjp_criteria(
+    snap: dict,
+    require_ret1d: bool = True,
+    ret1d_min: float | None = None,
+    clean_close_mult: float | None = None,
+) -> bool:
     """
-    SEMUA 4 kriteria wajib (AND) -- lihat catatan BSJP_RET1D_MIN_PCT di atas.
-    tolerance<1.0 (mis. BSJP_SHORTLIST_TOLERANCE_PCT): longgarkan 3 kriteria
-    MINIMUM (ret_1d, vol_vs_prev, vol_vs_ma200) proporsional -- dipakai FASE 1
-    shortlist SAJA (lihat run_bsjp_shortlist_scan).
+    4 kriteria (vol_vs_prev/vol_vs_ma200 SELALU wajib penuh, TIDAK PERNAH
+    ditoleransi -- lihat catatan MBSS v2 2026-09-01 di atas BSJP_RET1D_
+    MIN_PCT utk alasan lengkap redesign Fase 1/Fase 2 & riset pendukung).
 
-    clean_close_mult: override BSJP_CLEAN_CLOSE_MULT (default None -> pakai
-    1.01 strict). BUGFIX (user report 2026-09-01, live case KKES): SEBELUMNYA
-    clean-close SENGAJA tidak ikut ditoleransi ("sudah longgar dgn sendirinya
-    di jam pagi") -- TERBUKTI SALAH utk saham yg SEDANG uptrend aktif, lihat
-    catatan panjang BSJP_SHORTLIST_CLEAN_CLOSE_MULT di atas. FASE 1 sekarang
-    pass BSJP_SHORTLIST_CLEAN_CLOSE_MULT (1.03) via param ini. FASE 2 recheck
-    TETAP pakai default None -> 1.01 strict penuh sebelum alert final.
+    require_ret1d=False (FASE 2 SAJA): skip gate ret_1d sama sekali -- pada
+    titik recheck akhir (09:30-15:50), ret_1d sudah pasti jauh berubah dari
+    kapan kandidat ini pertama masuk shortlist, jadi basi sbg syarat
+    keputusan akhir. ret1d_min: override BSJP_RET1D_MIN_PCT (dipakai FASE 1
+    -> BSJP_SHORTLIST_RET1D_MIN_PCT=1.0, hampir tanpa syarat return).
+    clean_close_mult: override BSJP_CLEAN_CLOSE_MULT (FASE 1 -> BSJP_
+    SHORTLIST_CLEAN_CLOSE_MULT=1.05; FASE 2 SENGAJA TETAP default/None ->
+    1.01 ketat -- kalibrasi per-checkpoint nunjuk clean_close ketat MENANG
+    di P(EOD masih clean) & touch-rate Day+1 sungguhan, melonggarkannya
+    utk Fase 2 justru mengencerkan kualitas).
     """
     ret_1d = snap.get("ret_1d_pct")
     prev_volume = snap.get("prev_volume")
@@ -938,11 +948,13 @@ def _check_bsjp_criteria(snap: dict, tolerance: float = 1.0, clean_close_mult: f
     high_so_far = snap.get("high_so_far")
     if None in (ret_1d, prev_volume, vol_ma200, volume_so_far, current_price, high_so_far):
         return False
-    if ret_1d <= BSJP_RET1D_MIN_PCT * tolerance:
+    if require_ret1d:
+        effective_ret1d_min = ret1d_min if ret1d_min is not None else BSJP_RET1D_MIN_PCT
+        if ret_1d <= effective_ret1d_min:
+            return False
+    if not prev_volume or volume_so_far <= BSJP_VOL_VS_PREV_DAY_MULT * prev_volume:
         return False
-    if not prev_volume or volume_so_far <= BSJP_VOL_VS_PREV_DAY_MULT * tolerance * prev_volume:
-        return False
-    if not vol_ma200 or volume_so_far <= BSJP_VOL_VS_MA200_MULT * tolerance * vol_ma200:
+    if not vol_ma200 or volume_so_far <= BSJP_VOL_VS_MA200_MULT * vol_ma200:
         return False
     effective_clean_close_mult = clean_close_mult if clean_close_mult is not None else BSJP_CLEAN_CLOSE_MULT
     if not current_price or high_so_far >= effective_clean_close_mult * current_price:
@@ -975,13 +987,31 @@ async def run_bsjp_shortlist_scan(tickers: list[str]) -> list[dict]:
     snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, tickers, timeout=150, default={})
     passed = [
         {"ticker": t, **snap} for t, snap in snapshot.items()
-        if _check_bsjp_criteria(snap, tolerance=BSJP_SHORTLIST_TOLERANCE_PCT, clean_close_mult=BSJP_SHORTLIST_CLEAN_CLOSE_MULT)
+        if _check_bsjp_criteria(snap, ret1d_min=BSJP_SHORTLIST_RET1D_MIN_PCT, clean_close_mult=BSJP_SHORTLIST_CLEAN_CLOSE_MULT)
     ]
 
     state = _load_bsjp_state()
     today = _today_str()
     if state.get("trading_day_marker") != today:
-        state = {"trading_day_marker": today, "shortlist": [], "alerted": []}
+        # MBSS v2 (user request 2026-09-01, live case "nailunn" BSJP list --
+        # 14/14 checkable ticker SEMUA sudah lolos 4 kriteria PENUH KEMARIN
+        # sebelum direkomendasikan lagi hari ini): backtest 2thn/576 ISSI
+        # (chronological 70/30, validasi, n=347): ticker lolos BSJP PENUH
+        # hari T py touch>=3/5/6/10% hari T+1 = 69.5/65.4/63.4/58.2% (vs
+        # baseline 29.5/17.3/13.6/6.0%) -- edge KUAT, berdiri sendiri TANPA
+        # syarat tambahan hari T+1. User EKSPLISIT: BUKAN continuation/tahan
+        # posisi lebih lama (nama "Beli Sore Jual Pagi" py 1-malam hold yg
+        # tidak boleh diubah) -- cukup pastikan ticker kemarin TIDAK
+        # TERLEWAT dari kandidat pool hari ini. Tidak ada threshold/alert/
+        # exit BARU -- ticker ini masuk shortlist SAMA PERSIS spt kandidat
+        # lain, tetap lewat Fase 2 recheck STRICT & alert final standar yg
+        # SAMA SEKALI tidak berubah ("BELI SORE INI, jual besok pagi").
+        yesterday_alerted = state.get("alerted", []) if state.get("trading_day_marker") else []
+        state = {
+            "trading_day_marker": today,
+            "shortlist": sorted(set(yesterday_alerted)),
+            "alerted": [],
+        }
     state["shortlist"] = sorted(set(state.get("shortlist", [])) | {c["ticker"] for c in passed})
     state.setdefault("alerted", [])
     _save_bsjp_state(state)
@@ -995,7 +1025,7 @@ def _build_bsjp_shortlist_new_message(ticker: str, snap: dict) -> str:
         f"BSJP SHORTLIST (Fase 1 otomatis)\n"
         f"🌆 {ticker} baru masuk shortlist — {snap['current_price']:,.0f} ({snap['ret_1d_pct']:+.1f}%)\n"
         f"Vol {vol_vs_prev:.1f}x kemarin | {vol_vs_ma200:.1f}x MA200\n"
-        f"⚠️ BUKAN alert entry -- akan di-recheck live 14:00-15:50 WIB, alert final (dgn TP1) baru dikirim kalau MASIH lolos semua kriteria."
+        f"⚠️ BUKAN alert entry -- akan di-recheck live 09:30-15:50 WIB, alert final (dgn TP1) baru dikirim kalau MASIH lolos semua kriteria."
     )
 
 
@@ -1095,7 +1125,7 @@ async def run_bsjp_recheck_once() -> dict:
     fired = []
     for t in shortlist:
         snap = snapshot.get(t)
-        if not snap or not _check_bsjp_criteria(snap):
+        if not snap or not _check_bsjp_criteria(snap, require_ret1d=False):
             continue
         msg = _build_bsjp_message(t, snap)
         if bot is not None:
@@ -2375,7 +2405,7 @@ async def run_scan_alert_once() -> dict:
         # MBSS v2 (user request 2026-08-29, REVISI): BSJP DIKELUARKAN dari
         # loop scan-alert bersama ini -- sekarang sinyal 2-fase sendiri
         # (run_bsjp_shortlist_scan via /bsjp akhir sesi 1, run_bsjp_
-        # recheck_once tiap 30 menit 14:00-15:50), state & cadence
+        # recheck_once tiap 15 menit 09:30-15:50), state & cadence
         # sendiri, tidak lagi numpang fetch 1m bar loop 3-menitan ini.
 
         # FCM: beli di open, jendela pendek (FCM_OPEN_BUY_WINDOW_END) --
