@@ -7676,6 +7676,16 @@ def build_app():
     # penuh pertama). Guard hari-bursa/jam-bursa ada DI DALAM run_scan_
     # alert_once (dipakai bareng CLI --scanalert), bukan di sini -- job ini
     # boleh terus jalan 24/7, dia sendiri yg no-op murah di luar jam bursa.
+    # MBSS v2 (bugfix 2026-09-01, audit intraday jobs -- user request "audit
+    # job intraday, pastikan tidak ada clog"): SEMUA job di bawah SEBELUMNYA
+    # first=10 seragam, DAN kelima interval (60/180/900/900/1800) semuanya
+    # kelipatan 60 -- akibatnya SEMUA job nge-fire di detik wall-clock yg
+    # SAMA PERSIS tiap 30 menit, SELAMANYA (termasuk conviction_sweep &
+    # bsjp_shortlist_scan yg SAMA-SAMA 900s -- akan tabrakan tiap siklus,
+    # bukan cuma sesekali). first= di-stagger di bawah supaya beban fetch
+    # tersebar, bukan menumpuk bareng tiap 15/30 menit -- TIDAK mengubah
+    # perilaku job manapun (guard hari-bursa/jam-bursa/cache tetap sama),
+    # cuma jam MULAI pertama & rhythm periodiknya.
     if app.job_queue is not None:
         app.job_queue.run_repeating(run_scanalert_job, interval=180, first=10)
         # MBSS v2 (user request 2026-08-27 -- Alert REBOUND, engine/
@@ -7687,19 +7697,19 @@ def build_app():
         # produksi: scan-alert utama JALAN via JobQueue in-process ini,
         # BUKAN cron eksternal spt sempat diasumsikan saat REBOUND dibangun
         # dgn CLI --scanalert-rebound).
-        app.job_queue.run_repeating(run_gap_rebound_scan_job, interval=60, first=10)
+        app.job_queue.run_repeating(run_gap_rebound_scan_job, interval=60, first=25)
         # MBSS v2 (user request 2026-08-27 -- conviction sweep, engine/
         # scanalert.py run_conviction_sweep_once): interval=900s (15 menit,
         # sesuai speks) -- job ini sendiri no-op murah di luar jendela
         # 10:00-15:55 WIB, aman didaftarkan 24/7 spt job lain di atas.
-        app.job_queue.run_repeating(run_conviction_sweep_job, interval=900, first=10)
+        app.job_queue.run_repeating(run_conviction_sweep_job, interval=900, first=100)
         # MBSS v2 (user request 2026-08-29 -- unified BSJP "Beli Sore Jual
         # Pagi" Fase 2, engine/scanalert.py run_bsjp_recheck_once):
         # interval=BSJP_RECHECK_INTERVAL_SEC (1800s/30 menit, sesuai speks)
         # -- job ini sendiri no-op murah di luar jendela BSJP_RECHECK_
         # WINDOW_START-END (14:00-15:50 WIB) atau kalau belum ada shortlist
         # /bsjp hari ini, aman didaftarkan 24/7 spt job lain di atas.
-        app.job_queue.run_repeating(run_bsjp_recheck_job, interval=scanalert_engine.BSJP_RECHECK_INTERVAL_SEC, first=10)
+        app.job_queue.run_repeating(run_bsjp_recheck_job, interval=scanalert_engine.BSJP_RECHECK_INTERVAL_SEC, first=250)
         # MBSS v2 (user request 2026-08-31 -- BSJP Fase 1 OTOMATIS, engine/
         # scanalert.py run_bsjp_shortlist_scan_auto/run_bsjp_shortlist_scan_
         # job DI ATAS): SEBELUMNYA sengaja belum didaftarkan sampai user
@@ -7718,7 +7728,7 @@ def build_app():
         app.job_queue.run_repeating(
             run_bsjp_shortlist_scan_job,
             interval=scanalert_engine.BSJP_SHORTLIST_SCAN_INTERVAL_SEC,
-            first=10,
+            first=460,  # offset ~setengah interval dari conviction_sweep (900s, first=100) -- hindari tabrakan tiap siklus
         )
     else:
         print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
