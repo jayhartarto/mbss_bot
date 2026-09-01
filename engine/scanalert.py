@@ -738,6 +738,23 @@ BSJP_VOL_VS_MA200_MULT = 1.0
 # sebelum alert final dgn TP1 dikirim -- toleransi ini TIDAK melemahkan alert
 # akhir, cuma memperlebar jaring awal yg toh divalidasi ulang ketat nanti.
 BSJP_SHORTLIST_TOLERANCE_PCT = 0.75
+# MBSS v2 (user request 2026-09-01, live case KKES): clean_close SENGAJA
+# di-KECUALIKAN dari toleransi di atas ("sudah longgar dgn sendirinya di
+# jam pagi, belum sempat pullback") -- TERBUKTI SALAH utk saham yg SEDANG
+# uptrend aktif (BUKAN pre-cross yg tenang): running high (high_so_far)
+# nyaris SELALU sedikit di atas current_price selama stok TERUS bikin high
+# baru, jadi clean_close < 1.01x justru GAGAL terus-menerus persis saat
+# harga masih kuat naik. Live case KKES 2026-09-01: ret_1d+vol_ma200 SUDAH
+# lolos sejak 09:15 (ret1d +16%), TAPI clean_close menahan sampai 11:06 --
+# tertahan >1.5 JAM murni krn kriteria ini, walau harga terus rally (rasio
+# high_so_far/current bertahan 1.01-1.06 sepanjang pagi). Sweep 1m riil (7
+# hari, n=25-32, KECIL -- indikatif) thd clean_close_mult 1.01->1.08: room-
+# ke-ARA naik nyata (avg_dist_ARA 8.84%->10.30% di 1.03), gap-quality
+# turun sedang (gap_pos 40.0%->34.5%) -- trade-off wajar utk FASE 1 (jaring
+# awal, BUKAN keputusan akhir -- FASE 2 recheck 14:00-15:50 tetap strict
+# 1.01x). 1.03 dipilih sbg titik tengah (bukan 1.05/1.08 yg makin
+# mengorbankan gap-quality tanpa tambahan room-ARA proporsional).
+BSJP_SHORTLIST_CLEAN_CLOSE_MULT = 1.03
 BSJP_TP1_MEDIAN_GAP_PCT = 3.1
 BSJP_RECHECK_WINDOW_START = datetime.time(14, 0)
 BSJP_RECHECK_WINDOW_END = datetime.time(15, 50)
@@ -898,16 +915,20 @@ def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
     return snap
 
 
-def _check_bsjp_criteria(snap: dict, tolerance: float = 1.0) -> bool:
+def _check_bsjp_criteria(snap: dict, tolerance: float = 1.0, clean_close_mult: float | None = None) -> bool:
     """
     SEMUA 4 kriteria wajib (AND) -- lihat catatan BSJP_RET1D_MIN_PCT di atas.
     tolerance<1.0 (mis. BSJP_SHORTLIST_TOLERANCE_PCT): longgarkan 3 kriteria
     MINIMUM (ret_1d, vol_vs_prev, vol_vs_ma200) proporsional -- dipakai FASE 1
-    shortlist SAJA (lihat run_bsjp_shortlist_scan). Clean-close (kriteria ke-4,
-    sebuah CEILING bukan minimum) SENGAJA tidak ikut ditoleransi -- tidak pas
-    dgn framing "menuju target", dan sudah longgar dgn sendirinya di jam pagi
-    (belum sempat pullback). FASE 2 recheck pakai default tolerance=1.0
-    (strict penuh) sebelum alert final.
+    shortlist SAJA (lihat run_bsjp_shortlist_scan).
+
+    clean_close_mult: override BSJP_CLEAN_CLOSE_MULT (default None -> pakai
+    1.01 strict). BUGFIX (user report 2026-09-01, live case KKES): SEBELUMNYA
+    clean-close SENGAJA tidak ikut ditoleransi ("sudah longgar dgn sendirinya
+    di jam pagi") -- TERBUKTI SALAH utk saham yg SEDANG uptrend aktif, lihat
+    catatan panjang BSJP_SHORTLIST_CLEAN_CLOSE_MULT di atas. FASE 1 sekarang
+    pass BSJP_SHORTLIST_CLEAN_CLOSE_MULT (1.03) via param ini. FASE 2 recheck
+    TETAP pakai default None -> 1.01 strict penuh sebelum alert final.
     """
     ret_1d = snap.get("ret_1d_pct")
     prev_volume = snap.get("prev_volume")
@@ -923,7 +944,8 @@ def _check_bsjp_criteria(snap: dict, tolerance: float = 1.0) -> bool:
         return False
     if not vol_ma200 or volume_so_far <= BSJP_VOL_VS_MA200_MULT * tolerance * vol_ma200:
         return False
-    if not current_price or high_so_far >= BSJP_CLEAN_CLOSE_MULT * current_price:
+    effective_clean_close_mult = clean_close_mult if clean_close_mult is not None else BSJP_CLEAN_CLOSE_MULT
+    if not current_price or high_so_far >= effective_clean_close_mult * current_price:
         return False
     return True
 
@@ -953,7 +975,7 @@ async def run_bsjp_shortlist_scan(tickers: list[str]) -> list[dict]:
     snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, tickers, timeout=150, default={})
     passed = [
         {"ticker": t, **snap} for t, snap in snapshot.items()
-        if _check_bsjp_criteria(snap, tolerance=BSJP_SHORTLIST_TOLERANCE_PCT)
+        if _check_bsjp_criteria(snap, tolerance=BSJP_SHORTLIST_TOLERANCE_PCT, clean_close_mult=BSJP_SHORTLIST_CLEAN_CLOSE_MULT)
     ]
 
     state = _load_bsjp_state()

@@ -7702,15 +7702,24 @@ def build_app():
         app.job_queue.run_repeating(run_bsjp_recheck_job, interval=scanalert_engine.BSJP_RECHECK_INTERVAL_SEC, first=10)
         # MBSS v2 (user request 2026-08-31 -- BSJP Fase 1 OTOMATIS, engine/
         # scanalert.py run_bsjp_shortlist_scan_auto/run_bsjp_shortlist_scan_
-        # job DI ATAS): implementasi SUDAH ADA & siap pakai, TAPI SENGAJA
-        # BELUM didaftarkan di sini -- user request eksplisit "jangan bikin
-        # otomatis /bsjp dulu, manual saja dulu saya akan run beberapa
-        # kali" (setelah insiden VM lambat/SSH macet krn fetch lama tanpa
-        # cache -- lihat _fetch_bsjp_universe_snapshot). Aktifkan dgn:
-        # app.job_queue.run_repeating(run_bsjp_shortlist_scan_job,
-        # interval=scanalert_engine.BSJP_SHORTLIST_SCAN_INTERVAL_SEC,
-        # first=10) -- SETELAH user validasi manual /bsjp (skema cache
-        # baru) beberapa kali dulu, jangan aktifkan sepihak.
+        # job DI ATAS): SEBELUMNYA sengaja belum didaftarkan sampai user
+        # validasi manual /bsjp (skema cache baru) beberapa kali dulu.
+        # DIAKTIFKAN 2026-09-01 -- validasi manual hari ini sukses (beberapa
+        # run /bsjp lancar, live alert KKES terkirim, tanpa hang), DAN live
+        # case GTRA/PTSP/NZIA hari ini konfirmasi langsung: logic scanner
+        # (dgn toleransi Fase 1) SEBENARNYA capture kandidat dlm hitungan
+        # menit sejak qualify, tapi TANPA polling otomatis, tidak ada yg
+        # mendeteksi sampai jauh lebih telat (user cek manual, GTRA/PTSP
+        # sudah dekat ARA). Risiko overload dicek: fetch BSJP (yf.download
+        # batched, historical-base di-cache 1x/hari) SAMA SEKALI tidak
+        # menyentuh compute_factor_scoring/.info (akar insiden alert-stall
+        # 2026-09-01 pagi, sudah diperbaiki terpisah) -- independen dari
+        # insiden itu, aman didaftarkan.
+        app.job_queue.run_repeating(
+            run_bsjp_shortlist_scan_job,
+            interval=scanalert_engine.BSJP_SHORTLIST_SCAN_INTERVAL_SEC,
+            first=10,
+        )
     else:
         print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
               "scan-alert intraday TIDAK akan jalan otomatis. Install dgn: "
