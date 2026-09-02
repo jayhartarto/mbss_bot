@@ -532,8 +532,27 @@ async def run_gap_rebound_scan_once() -> dict:
         _save_rebound_state(state)
         return summary
 
-    if state.get("daily_ref") is None:
+    if not state.get("daily_ref"):
+        # BUGFIX (live incident 2026-09-02): SEBELUMNYA `state["daily_ref"] =
+        # daily_ref` di-assign TANPA SYARAT walau timeout (daily_ref={}) --
+        # kalau berhasil sempat ke-save ke disk, ini akan MEMBEKUKAN {}
+        # selamanya (state.get("daily_ref") is None jadi False permanen,
+        # persis bug conviction-sweep/swing-lane yg SUDAH diperbaiki di
+        # tempat lain -- kelewat di sini). Ditambah: ticker_list=[] dari
+        # daily_ref kosong lalu diteruskan ke _fetch_today_1m([]) ->
+        # yf.download(symbols=[]) -> ValueError "No objects to concatenate"
+        # (exception ASLI, BUKAN timeout, jadi TIDAK ketangkep _fetch_with_
+        # timeout) -- crash SETIAP siklus, coincidentally MENCEGAH state ke-
+        # save (fungsi crash sebelum sempat _save_rebound_state), jadi
+        # retry tiap menit (bukan macet selamanya) TAPI selalu crash.
+        # Fix: HANYA cache kalau genuinely terisi; kalau kosong (timeout
+        # ATAU genuinely tak ada data), skip bersih siklus ini -- TIDAK
+        # crash, TIDAK dibekukan, coba lagi siklus berikutnya.
         daily_ref = await _fetch_with_timeout(_fetch_daily_ref, universe, default={})
+        if not daily_ref:
+            summary["skipped_reason"] = "daily_ref_unavailable"
+            _save_rebound_state(state)
+            return summary
         state["daily_ref"] = daily_ref
     else:
         daily_ref = state["daily_ref"]
@@ -2401,6 +2420,16 @@ async def run_scan_alert_once() -> dict:
         f"🔍 Scan-alert: {len(full_ticker_set)} ticker ({len(alert_universe)} alert + {len(fcm_watchlist)} FCM + "
         f"{len(pre_continuation_watchlist)} PRE/CONTINUATION), fetch bar 1m..."
     )
+    # BUGFIX (live incident 2026-09-02, sama akar dgn run_gap_rebound_scan_
+    # once): kalau daily_ref/fcm_watchlist/pre_continuation_watchlist SEMUA
+    # kosong siklus ini (mis. semua lagi timeout bareng), full_ticker_set=[]
+    # -> _fetch_today_1m([]) -> yf.download(symbols=[]) -> ValueError "No
+    # objects to concatenate" (exception ASLI, lolos dari _fetch_with_
+    # timeout) -- crash job ini. Skip bersih drpd crash.
+    if not full_ticker_set:
+        summary["skipped_reason"] = "empty_ticker_set"
+        _save_state(state)
+        return summary
     data = await _fetch_with_timeout(_fetch_today_1m, full_ticker_set, default=pd.DataFrame())
 
     tickers_state = state.setdefault("tickers", {})
