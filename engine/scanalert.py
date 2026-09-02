@@ -1284,10 +1284,12 @@ async def run_bsjp_recheck_once() -> dict:
 def build_bsjp_tp_plan_message() -> str:
     """
     /bsjp tp (MBSS v2, user request 2026-09-02) -- panduan jual pre-open esok
-    pagi utk SEMUA ticker yang lolos Fase 2 hari bursa terakhir. Entry pakai
-    current_price yg SUDAH tersimpan di pick (harga ASLI saat alert fire,
-    BUKAN proxy Close EOD -- lihat catatan lengkap di atas BSJP_TP1_GAP_PCT
-    kenapa presisi ini penting).
+    pagi utk SEMUA ticker yang lolos Fase 2 hari bursa terakhir. Entry
+    direkonstruksi dari "tp1" yg tersimpan di pick (harga ASLI saat alert
+    fire, BUKAN proxy Close EOD -- lihat catatan lengkap di atas BSJP_TP1_
+    GAP_PCT kenapa presisi ini penting, dan catatan di dalam loop soal
+    KENAPA direkonstruksi bukan dibaca langsung -- lock_daily_daytrade_picks
+    tidak pernah simpan current_price mentah).
 
     PENTING soal tanggal (bug yg ketemu & DIPERBAIKI saat masih di sesi yg
     sama, sebelum sempat dipakai produksi): jangan panggil ulang
@@ -1321,12 +1323,22 @@ def build_bsjp_tp_plan_message() -> str:
 
     lines = [f"🌅 BSJP TP PLAN — {target_date} ({len(picks)} ticker lolos Fase 2){staleness_note}\n"]
     for p in sorted(picks, key=lambda x: x["ticker"]):
-        entry = p.get("current_price")
-        if not entry:
+        # MBSS v2 (bug ketemu & diperbaiki 2026-09-02, live case: /bsjp tp
+        # tampil kosong -- ternyata lock_daily_daytrade_picks TIDAK PERNAH
+        # simpan current_price mentah, cuma "tp1"/"cut_loss" flat di top
+        # level [lihat legacy_core.py], entry_price sengaja None sampai
+        # /winrate resolve belakangan). tp1 tersimpan SELALU = entry *
+        # (1+BSJP_TP1_MEDIAN_GAP_PCT/100) [lihat run_bsjp_recheck_once] --
+        # deterministik, jadi entry ASLI bisa direkonstruksi persis dari situ
+        # tanpa perlu ubah skema lock_daily_daytrade_picks yg dipakai byk
+        # caller lain.
+        tp1_stored = p.get("tp1")
+        if not tp1_stored:
             continue
+        entry = tp1_stored / (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0)
         tp1 = entry * (1 + BSJP_TP1_GAP_PCT / 100.0)
         tp2 = entry * (1 + BSJP_TP2_GAP_PCT / 100.0)
-        cut_loss = (p.get("targets") or {}).get("cut_loss")
+        cut_loss = p.get("cut_loss")
         line = (
             f"{p['ticker']} — entry {entry:,.0f}\n"
             f"  TP1 (moderat, ~{BSJP_TP1_HISTORICAL_HIT_PCT:.0f}% historis touch Day+1): {tp1:,.0f}\n"
