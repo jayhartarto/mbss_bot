@@ -745,19 +745,45 @@ BSJP_SHORTLIST_RET1D_MIN_PCT = 1.0
 BSJP_SHORTLIST_CLEAN_CLOSE_MULT = 1.05
 #
 # FASE 2 (keputusan AKHIR sebelum alert "BELI SORE INI" beneran dikirim):
-# ret_1d DIHAPUS SAMA SEKALI sbg gate (user: "ret_1d kan dari EOD sebelumnya,
-# intraday sudah pasti bergerak lebih jauh, jadi basi sbg gate di titik
-# keputusan akhir"). clean_close TETAP KETAT (default 1.01x, TIDAK
-# dilonggarkan) -- kalibrasi per-checkpoint-waktu (1m riil, 7 hari, populasi
-# kandidat ret_1d>5%&vol_vs_prev>1x di checkpoint) nunjuk clean_close KETAT
-# justru MENANG di kedua metrik (P(EOD masih clean) DAN touch-rate Day+1
-# sungguhan) di SETIAP checkpoint yg dites -- melonggarkan clean_close utk
-# Fase 2 JUSTRU mengencerkan kualitas, bukan menambah kandidat baik. vol_vs_
-# prev/vol_vs_ma200 TETAP penuh (1.5x/1.0x, tak pernah berubah). Window
-# dimajukan drastis 14:00->09:30 (user: ARA beberapa kali sudah terjadi
-# SEJAK SESI 1 -- kalau nunggu 14:00 kandidat spt itu sudah kejauhan) DAN
-# interval dipercepat 1800s->900s, DISINKRONKAN dgn interval Fase 1 otomatis
-# (BSJP_SHORTLIST_SCAN_INTERVAL_SEC, sudah 900s sejak 2026-09-01).
+# ret_1d awalnya DIHAPUS SAMA SEKALI sbg gate (user: "ret_1d kan dari EOD
+# sebelumnya, intraday sudah pasti bergerak lebih jauh, jadi basi sbg gate
+# di titik keputusan akhir"). clean_close TETAP KETAT (default 1.01x,
+# TIDAK dilonggarkan) -- kalibrasi per-checkpoint-waktu (1m riil, 7 hari,
+# populasi kandidat ret_1d>5%&vol_vs_prev>1x di checkpoint) nunjuk clean_
+# close KETAT justru MENANG di kedua metrik (P(EOD masih clean) DAN
+# touch-rate Day+1 sungguhan) di SETIAP checkpoint yg dites -- melonggarkan
+# clean_close utk Fase 2 JUSTRU mengencerkan kualitas, bukan menambah
+# kandidat baik. vol_vs_prev/vol_vs_ma200 TETAP penuh (1.5x/1.0x, tak
+# pernah berubah). Window dimajukan drastis 14:00->09:30 (user: ARA
+# beberapa kali sudah terjadi SEJAK SESI 1) DAN interval dipercepat
+# 1800s->900s, DISINKRONKAN dgn interval Fase 1 otomatis.
+#
+# UPDATE 2026-09-02 (live case MNCN lolos Fase 2 padahal sideways beberapa
+# hari): ret_1d intraday (bukan EOD kemarin -- field ret_1d_pct yg SAMA,
+# current_price vs prev_close, live SAAT dicek) DIKEMBALIKAN sbg gate
+# MINIMAL utk Fase 2, TAPI angka kecil (bukan 15% lama). Backtest EOD-
+# proxy (2thn/576 ISSI, chronological 70/30 validasi, populasi vol+clean_
+# close SAJA tanpa syarat return): pita 0-1% TERBUKTI terlemah (touch3=
+# 12.7%/touch6=5.2%, hampir sama dgn MNCN-style sideways) vs >=1%
+# (touch3=43.2%/touch6=30.0%) & >=3% (51.0%/37.0%) -- >=3% direkomendasikan
+# tapi user minta DILONGGARKAN spy kandidat tetap kelihatan (bukan terlalu
+# sedikit), jadi >=1% dipilih (n=1256 vs n=972 di validasi, tetap
+# menyingkirkan kasus sideways MNCN-style [+1.0% persis di batas]).
+# Cross-check checkpoint sesi 1 (1m riil, ~12:00 WIB, n kecil) nunjuk pola
+# LEBIH RUMIT -- ret_1d intraday TIDAK monoton memprediksi P(EOD masih
+# clean) sendirian (malah pita 0-1% py P(EOD_clean) TERTINGGI 45.4%,
+# turun ke 20-24% di pita 3-10% -- big mover pagi py lebih byk waktu utk
+# konsolidasi siang), TAPI ret_1d intraday KONSISTEN memprediksi MAGNITUDE
+# return EOD (med -1.4%->+13.8% monoton bersih di 7 pita). clean_close
+# SAAT checkpoint yg sama jauh lebih prediktif utk "akan tetap clean":
+# di antara ret1d_s1>=3%, yg SUDAH clean_close_s1<1.02 py P(EOD_clean)=
+# 34.3% vs yg SUDAH pullback (cc_s1>=1.05) cuma 5.2% -- clean_close SAAT
+# ITU (bukan return) yg jadi sinyal utama utk "akan tetap clean", ret_1d
+# lebih sbg sinyal MAGNITUDE. clean_close gate Fase 2 (1.01x ketat,
+# TETAP tidak berubah) SUDAH menangkap bagian ini scr langsung tiap kali
+# dicek -- floor ret_1d>=1% di sini melengkapi dgn menyaring kasus
+# sideways murni (spt MNCN) yg toh KEBETULAN clean pada momen dicek.
+BSJP_RECHECK_RET1D_MIN_PCT = 1.0
 BSJP_TP1_MEDIAN_GAP_PCT = 3.1
 BSJP_RECHECK_WINDOW_START = datetime.time(9, 30)
 BSJP_RECHECK_WINDOW_END = datetime.time(15, 50)
@@ -929,11 +955,15 @@ def _check_bsjp_criteria(
     ditoleransi -- lihat catatan MBSS v2 2026-09-01 di atas BSJP_RET1D_
     MIN_PCT utk alasan lengkap redesign Fase 1/Fase 2 & riset pendukung).
 
-    require_ret1d=False (FASE 2 SAJA): skip gate ret_1d sama sekali -- pada
-    titik recheck akhir (09:30-15:50), ret_1d sudah pasti jauh berubah dari
-    kapan kandidat ini pertama masuk shortlist, jadi basi sbg syarat
-    keputusan akhir. ret1d_min: override BSJP_RET1D_MIN_PCT (dipakai FASE 1
-    -> BSJP_SHORTLIST_RET1D_MIN_PCT=1.0, hampir tanpa syarat return).
+    require_ret1d=False: skip gate ret_1d sama sekali (tak dipakai lagi
+    produksi sejak live case MNCN -- lihat UPDATE 2026-09-02 di atas
+    BSJP_RECHECK_RET1D_MIN_PCT, TAPI param ini TETAP ada utk fleksibilitas
+    riset). ret1d_min: override BSJP_RET1D_MIN_PCT -- FASE 1 pakai
+    BSJP_SHORTLIST_RET1D_MIN_PCT=1.0 (hampir tanpa syarat), FASE 2 pakai
+    BSJP_RECHECK_RET1D_MIN_PCT=1.0 (floor kecil, skrg BUKAN lagi ret_1d
+    EOD basi tapi ret_1d_pct LIVE/intraday yg SAMA field-nya, dicek ULANG
+    tiap siklus -- cukup utk menyaring sideways murni spt MNCN, TIDAK
+    seketat 15% lama).
     clean_close_mult: override BSJP_CLEAN_CLOSE_MULT (FASE 1 -> BSJP_
     SHORTLIST_CLEAN_CLOSE_MULT=1.05; FASE 2 SENGAJA TETAP default/None ->
     1.01 ketat -- kalibrasi per-checkpoint nunjuk clean_close ketat MENANG
@@ -1125,7 +1155,7 @@ async def run_bsjp_recheck_once() -> dict:
     fired = []
     for t in shortlist:
         snap = snapshot.get(t)
-        if not snap or not _check_bsjp_criteria(snap, require_ret1d=False):
+        if not snap or not _check_bsjp_criteria(snap, ret1d_min=BSJP_RECHECK_RET1D_MIN_PCT):
             continue
         msg = _build_bsjp_message(t, snap)
         if bot is not None:
