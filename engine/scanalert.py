@@ -811,6 +811,38 @@ BSJP_SHORTLIST_SCAN_WINDOW_START = datetime.time(9, 0)  # Fase 1 otomatis -- mul
 BSJP_SHORTLIST_SCAN_INTERVAL_SEC = 900  # 15 menit
 BSJP_MIN_HISTORY_DAYS = 260  # >200 hari (MA200) + buffer hari libur/data hilang
 
+# MBSS v2 (user request 2026-09-02 -- "second tier" utk kandidat yg lolos
+# Fase 1 [clean_close<=1.05] tapi GAGAL Fase 2 ketat [clean_close<1.01]):
+# backtest presisi (1m riil, entry = harga checkpoint PERTAMA lolos, BUKAN
+# proxy Close(T) -- lihat riwayat sesi 2026-09-02 kenapa proxy melebih-
+# lebihkan), 5 hari bursa 08-24 s.d 08-31, n=122 kandidat reject: SELURUH
+# reject group cuma touch3=35.2%/touch10=7.4% (vs ACCEPT 39.6%/17.2%),
+# TAPI di-filter above_sma50 (trend naik, SMA50 dari 50 Close SEBELUM hari
+# ini -- causal, bisa dihitung live) naik jadi touch3=38.8% -- HAMPIR
+# menyamai ACCEPT persis di level TP1 (~3%), walau touch10 tetap jauh lebih
+# lemah (8.7% vs 17.2%, trend TIDAK menyelamatkan odds winner besar). Jadi
+# Tier 2 ("BSJP WATCH") pakai kriteria wide net Fase 1 (clean_close<=1.05)
+# + above_sma50, TAPI confidence-nya eksplisit lebih rendah & TP-nya
+# moderat SAJA (bukan stretch) -- reuse BSJP_SHORTLIST_CLEAN_CLOSE_MULT,
+# TIDAK bikin ambang clean_close baru.
+BSJP_WATCH_TP_GAP_PCT = 2.0
+BSJP_WATCH_TOUCH3_HISTORICAL_PCT = 38.8
+
+# MBSS v2 (user request 2026-09-02 -- /bsjp tp: panduan jual pre-open esok
+# pagi, dihitung SETELAH EOD close dari entry ASLI yg SUDAH tersimpan di
+# daytrade_picks_history.json [source="bsjp", current_price = harga SAAT
+# alert fire, BUKAN proxy Close EOD -- presisi ini yg terbukti penting,
+# lihat sesi 2026-09-02]). Backtest presisi sama (Fase 2 ACCEPT, n=134,
+# 5 hari bursa): touch>=2%=49.3% (TP1, target paling mungkin tersentuh),
+# touch>=6%=24.6% (TP2, target lebih besar tapi ~1 dari 4 kali tersentuh).
+# Sampel MASIH kecil (limitasi hard cap yfinance 8 hari utk data 1m) --
+# treat sbg directional, bukan final, recalibrate begitu data presisi lebih
+# banyak terkumpul.
+BSJP_TP1_GAP_PCT = 2.0
+BSJP_TP1_HISTORICAL_HIT_PCT = 49.3
+BSJP_TP2_GAP_PCT = 6.0
+BSJP_TP2_HISTORICAL_HIT_PCT = 24.6
+
 STATE_FILE_BSJP = os.path.join(core.PROJECT_ROOT, "bsjp_shortlist_state.json")
 
 
@@ -878,9 +910,14 @@ def _fetch_bsjp_historical_base(tickers: list[str]) -> dict:
             prev_close = float(prior["Close"].iloc[-1])
             prev_volume = float(prior["Volume"].iloc[-1])
             vol_ma200 = float(prior["Volume"].tail(200).mean())
+            # MBSS v2 (user request 2026-09-02, Tier 2 "BSJP WATCH" --
+            # above_sma50 causal, dari 50 Close SEBELUM hari ini SAJA, TIDAK
+            # ikut close hari berjalan yg belum final): dipakai sbg trend
+            # filter, lihat catatan lengkap di atas BSJP_WATCH_TP_GAP_PCT.
+            sma50 = float(prior["Close"].tail(50).mean()) if len(prior) >= 50 else None
             if prev_close <= 0:
                 continue
-            base[t] = {"prev_close": prev_close, "prev_volume": prev_volume, "vol_ma200": vol_ma200}
+            base[t] = {"prev_close": prev_close, "prev_volume": prev_volume, "vol_ma200": vol_ma200, "sma50": sma50}
         if i + _BSJP_FETCH_BATCH < len(tickers):
             time.sleep(0.5)
     return base
@@ -955,10 +992,12 @@ def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
         l = live.get(t)
         if not b or not l:
             continue
+        sma50 = b.get("sma50")
         snap[t] = {
             "current_price": l["current_price"], "high_so_far": l["high_so_far"], "volume_so_far": l["volume_so_far"],
             "prev_close": b["prev_close"], "prev_volume": b["prev_volume"], "vol_ma200": b["vol_ma200"],
             "ret_1d_pct": (l["current_price"] / b["prev_close"] - 1) * 100,
+            "above_sma50": (l["current_price"] > sma50) if sma50 else None,
         }
     return snap
 
@@ -1024,6 +1063,26 @@ def _build_bsjp_message(ticker: str, snap: dict) -> str:
     )
 
 
+def _build_bsjp_watch_message(ticker: str, snap: dict) -> str:
+    """
+    Tier 2 (MBSS v2, user request 2026-09-02) -- lolos Fase 1 (clean_close
+    <=1.05) & trend naik (above_sma50), TAPI GAGAL Fase 2 ketat (clean_close
+    <1.01). Confidence lebih rendah -- lihat catatan lengkap di atas
+    BSJP_WATCH_TP_GAP_PCT utk backtest & angka.
+    """
+    current_price = snap["current_price"]
+    tp_price = current_price * (1 + BSJP_WATCH_TP_GAP_PCT / 100.0)
+    vol_vs_prev = snap["volume_so_far"] / max(snap["prev_volume"], 1.0)
+    pullback_pct = (snap["high_so_far"] / current_price - 1) * 100
+    return (
+        f"BSJP WATCH (Tier 2 — confidence lebih rendah)\n"
+        f"🔶 {ticker} — vol {vol_vs_prev:.1f}x kemarin, trend naik, TAPI sudah {pullback_pct:.1f}% dari high hari ini (bukan clean close ketat)\n"
+        f"Harga sekarang: {current_price:,.0f}\n"
+        f"TP (estimasi, historis ~{BSJP_WATCH_TOUCH3_HISTORICAL_PCT:.0f}% touch Day+1): {tp_price:,.0f}\n"
+        f"⚠️ Bukan alert utama -- backtest: peluang touch TP kecil (~2-3%) mendekati alert utama, TAPI peluang winner besar jauh lebih rendah. Cocok utk TP cepat, bukan incar gain besar."
+    )
+
+
 async def run_bsjp_shortlist_scan(tickers: list[str]) -> list[dict]:
     """
     FASE 1 -- scan SELURUH universe thd 4 kriteria, simpan yg lolos sbg
@@ -1060,9 +1119,11 @@ async def run_bsjp_shortlist_scan(tickers: list[str]) -> list[dict]:
             "trading_day_marker": today,
             "shortlist": sorted(set(yesterday_alerted)),
             "alerted": [],
+            "watch_alerted": [],  # Tier 2 (2026-09-02) -- dedup terpisah dari alert utama
         }
     state["shortlist"] = sorted(set(state.get("shortlist", [])) | {c["ticker"] for c in passed})
     state.setdefault("alerted", [])
+    state.setdefault("watch_alerted", [])
     _save_bsjp_state(state)
     return passed
 
@@ -1170,27 +1231,46 @@ async def run_bsjp_recheck_once() -> dict:
         bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
 
     n_alerted = 0
+    n_watch_alerted = 0
     alerted_list = state.setdefault("alerted", [])
+    watch_alerted_already = set(state.get("watch_alerted", []))
+    watch_alerted_list = state.setdefault("watch_alerted", [])
     fired = []
     for t in shortlist:
         snap = snapshot.get(t)
-        if not snap or not _check_bsjp_criteria(snap, ret1d_min=BSJP_RECHECK_RET1D_MIN_PCT):
+        if not snap:
             continue
-        msg = _build_bsjp_message(t, snap)
-        if bot is not None:
-            await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
-        else:
-            print(f"[NO TELEGRAM TOKEN] {msg}")
-        alerted_list.append(t)
-        n_alerted += 1
-        # MBSS v2 (user request -- lock HANYA saat alert BENERAN fire, bukan
-        # di shortlist Fase 1 yg belum tentu konfirmasi): cut_loss pakai
-        # prev_close (thesis "buy power" gagal kalau balik ke bawah closing
-        # kemarin) -- proksi wajar, bukan angka backtest terpisah.
-        fired.append({
-            "ticker": t, "current_price": snap["current_price"],
-            "targets": {"tp_1": snap["current_price"] * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0), "cut_loss": snap["prev_close"]},
-        })
+        if _check_bsjp_criteria(snap, ret1d_min=BSJP_RECHECK_RET1D_MIN_PCT):
+            msg = _build_bsjp_message(t, snap)
+            if bot is not None:
+                await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+            else:
+                print(f"[NO TELEGRAM TOKEN] {msg}")
+            alerted_list.append(t)
+            n_alerted += 1
+            # MBSS v2 (user request -- lock HANYA saat alert BENERAN fire, bukan
+            # di shortlist Fase 1 yg belum tentu konfirmasi): cut_loss pakai
+            # prev_close (thesis "buy power" gagal kalau balik ke bawah closing
+            # kemarin) -- proksi wajar, bukan angka backtest terpisah.
+            fired.append({
+                "ticker": t, "current_price": snap["current_price"],
+                "targets": {"tp_1": snap["current_price"] * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0), "cut_loss": snap["prev_close"]},
+            })
+        elif (
+            t not in watch_alerted_already
+            and snap.get("above_sma50")
+            and _check_bsjp_criteria(snap, ret1d_min=BSJP_RECHECK_RET1D_MIN_PCT, clean_close_mult=BSJP_SHORTLIST_CLEAN_CLOSE_MULT)
+        ):
+            # Tier 2 "BSJP WATCH" (2026-09-02) -- gagal Fase 2 ketat, TAPI
+            # masih lolos wide net Fase 1 (clean_close<=1.05) & trend naik.
+            # Lihat catatan lengkap di atas BSJP_WATCH_TP_GAP_PCT.
+            msg = _build_bsjp_watch_message(t, snap)
+            if bot is not None:
+                await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+            else:
+                print(f"[NO TELEGRAM TOKEN] {msg}")
+            watch_alerted_list.append(t)
+            n_watch_alerted += 1
 
     _save_bsjp_state(state)
     if fired:
@@ -1198,7 +1278,69 @@ async def run_bsjp_recheck_once() -> dict:
             await asyncio.to_thread(core.lock_daily_daytrade_picks, fired, "bsjp")
         except Exception as e:
             print(f"⚠️ Gagal mengunci picks BSJP untuk /winrate: {e}")
-    return {"checked": len(shortlist), "alerted": n_alerted}
+    return {"checked": len(shortlist), "alerted": n_alerted, "watch_alerted": n_watch_alerted}
+
+
+def build_bsjp_tp_plan_message() -> str:
+    """
+    /bsjp tp (MBSS v2, user request 2026-09-02) -- panduan jual pre-open esok
+    pagi utk SEMUA ticker yang lolos Fase 2 hari bursa terakhir. Entry pakai
+    current_price yg SUDAH tersimpan di pick (harga ASLI saat alert fire,
+    BUKAN proxy Close EOD -- lihat catatan lengkap di atas BSJP_TP1_GAP_PCT
+    kenapa presisi ini penting).
+
+    PENTING soal tanggal (bug yg ketemu & DIPERBAIKI saat masih di sesi yg
+    sama, sebelum sempat dipakai produksi): jangan panggil ulang
+    get_current_trading_day_close_marker() DI SINI utk cari pick_date target
+    -- alert Fase 2 SELALU dikunci SAAT market masih buka (sebelum 16:30
+    WIB, lihat BSJP_RECHECK_WINDOW_END=15:50), jadi marker SAAT lock masih
+    mundur 1 hari (msh nunjuk hari SEBELUMNYA, blm "tutup" per ambang 16:30
+    itu). Kalau /bsjp tp dipanggil NANTI (malam ini SETELAH 16:30, atau
+    besok pagi) lalu panggil ULANG marker itu, hasilnya SUDAH maju 1 hari
+    drpd pick_date yg kesimpan -- SELALU MISMATCH, tidak akan pernah ketemu
+    picks-nya. Fix: cari pick_date TERBARU yang genuinely ada di history
+    utk source="bsjp" (bukan hitung ulang tanggal dari nol) -- robust
+    terlepas kapan /bsjp tp dipanggil.
+    """
+    history = core.load_daytrade_picks_history()
+    bsjp_picks = [p for p in history if p.get("source") == "bsjp" and p.get("pick_date")]
+    if not bsjp_picks:
+        return "📋 Belum pernah ada BSJP yang lolos Fase 2 -- tidak ada panduan TP."
+
+    target_date = max(p["pick_date"] for p in bsjp_picks)
+    picks = [p for p in bsjp_picks if p["pick_date"] == target_date]
+
+    staleness_note = ""
+    try:
+        target_dt = datetime.datetime.strptime(target_date, "%Y-%m-%d").date()
+        days_old = (datetime.datetime.now(core.WIB).date() - target_dt).days
+        if days_old > 2:
+            staleness_note = f"\n⚠️ Pick TERBARU dari {target_date} ({days_old} hari lalu) -- kemungkinan TIDAK ada alert Fase 2 baru-baru ini, ini BUKAN rencana malam ini.\n"
+    except Exception:
+        pass
+
+    lines = [f"🌅 BSJP TP PLAN — {target_date} ({len(picks)} ticker lolos Fase 2){staleness_note}\n"]
+    for p in sorted(picks, key=lambda x: x["ticker"]):
+        entry = p.get("current_price")
+        if not entry:
+            continue
+        tp1 = entry * (1 + BSJP_TP1_GAP_PCT / 100.0)
+        tp2 = entry * (1 + BSJP_TP2_GAP_PCT / 100.0)
+        cut_loss = (p.get("targets") or {}).get("cut_loss")
+        line = (
+            f"{p['ticker']} — entry {entry:,.0f}\n"
+            f"  TP1 (moderat, ~{BSJP_TP1_HISTORICAL_HIT_PCT:.0f}% historis touch Day+1): {tp1:,.0f}\n"
+            f"  TP2 (stretch, ~{BSJP_TP2_HISTORICAL_HIT_PCT:.0f}% historis touch Day+1): {tp2:,.0f}"
+        )
+        if cut_loss:
+            line += f"\n  Cut loss: {cut_loss:,.0f}"
+        lines.append(line)
+
+    lines.append(
+        "\n⚠️ Probabilitas dari backtest presisi (1m riil, entry ASLI saat alert fire) 5 hari bursa -- "
+        "sampel masih kecil, treat sbg directional. TP1 lebih mungkin tersentuh; TP2 upside lebih besar tapi lebih jarang."
+    )
+    return "\n\n".join(lines)
 
 
 # MBSS v2 (user request 2026-08-27 -- live case: "248 Failed downloads" SEMUA

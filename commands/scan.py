@@ -2389,6 +2389,15 @@ async def bsjp_screening_command(update, context):
     """
     import engine.scanalert as scanalert_engine  # import lokal -- hindari circular import di level modul
 
+    # MBSS v2 (user request 2026-09-02): /bsjp tp -- panduan jual pre-open
+    # esok pagi (TP1/TP2 dari entry ASLI Fase 2 hari bursa terakhir), TIDAK
+    # dibatasi jendela 09:00-16:00 spt scan Fase 1 di bawah -- justru
+    # dipakai MALAM hari yg sama atau PAGI besok SEBELUM market buka.
+    if context.args and context.args[0].lower() == "tp":
+        msg = scanalert_engine.build_bsjp_tp_plan_message()
+        await core.safe_reply(update.message, msg)
+        return
+
     now_wib = datetime.datetime.now(core.WIB)
     bsjp_window_start = datetime.time(9, 0)
     bsjp_window_end = datetime.time(16, 0)  # akhir pra-penutupan, sama batas atas semua sesi IDX
