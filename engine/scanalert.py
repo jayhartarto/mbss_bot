@@ -811,37 +811,75 @@ BSJP_SHORTLIST_SCAN_WINDOW_START = datetime.time(9, 0)  # Fase 1 otomatis -- mul
 BSJP_SHORTLIST_SCAN_INTERVAL_SEC = 900  # 15 menit
 BSJP_MIN_HISTORY_DAYS = 260  # >200 hari (MA200) + buffer hari libur/data hilang
 
-# MBSS v2 (user request 2026-09-02 -- "second tier" utk kandidat yg lolos
-# Fase 1 [clean_close<=1.05] tapi GAGAL Fase 2 ketat [clean_close<1.01]):
-# backtest presisi (1m riil, entry = harga checkpoint PERTAMA lolos, BUKAN
-# proxy Close(T) -- lihat riwayat sesi 2026-09-02 kenapa proxy melebih-
-# lebihkan), 5 hari bursa 08-24 s.d 08-31, n=122 kandidat reject: SELURUH
-# reject group cuma touch3=35.2%/touch10=7.4% (vs ACCEPT 39.6%/17.2%),
-# TAPI di-filter above_sma50 (trend naik, SMA50 dari 50 Close SEBELUM hari
-# ini -- causal, bisa dihitung live) naik jadi touch3=38.8% -- HAMPIR
-# menyamai ACCEPT persis di level TP1 (~3%), walau touch10 tetap jauh lebih
-# lemah (8.7% vs 17.2%, trend TIDAK menyelamatkan odds winner besar). Jadi
-# Tier 2 ("BSJP WATCH") pakai kriteria wide net Fase 1 (clean_close<=1.05)
-# + above_sma50, TAPI confidence-nya eksplisit lebih rendah & TP-nya
-# moderat SAJA (bukan stretch) -- reuse BSJP_SHORTLIST_CLEAN_CLOSE_MULT,
-# TIDAK bikin ambang clean_close baru.
+# MBSS v2 (BUGFIX 2026-09-02, DIKOREKSI setelah versi pertama shipped):
+# angka DI BAWAH INI (Tier 2 + /bsjp tp) awalnya dihitung dari backtest yg
+# TERCEMAR -- daily_2y_issi_extended.pkl punya baris hantu 2026-08-25
+# (libur, TIDAK ada transaksi) dgn Close=NaN utk 548/576 ticker, dan
+# prev_close SEBELUMNYA diambil TANPA dropna() dulu -- utk T=2026-08-26
+# prev_close jadi NaN, ret_1d jadi NaN, dan gate `ret_1d<=RET1D_MIN` diam-
+# diam TIDAK PERNAH menolak (NaN<=x selalu False) -- 41 dari 134 kandidat
+# Fase 2 "presisi" awal ternyata SPURIOUS (lolos gate ret_1d yg seharusnya
+# gagal). Di-fix (.dropna() sebelum .iloc[-1]) & backtest diulang bersih --
+# n Fase 2 valid jadi 93 (bukan 134), n Fase1-reject jadi 79 (bukan 122).
+#
+# Tier 2 "BSJP WATCH" (kandidat lolos Fase 1 [clean_close<=1.05] tapi
+# GAGAL Fase 2 ketat [clean_close<1.01]): reject group (n=79, CORRECTED)
+# touch3=38.0%/touch10=8.9% (vs ACCEPT 44.1%/20.4%). above_sma50 TERNYATA
+# TIDAK banyak menyelamatkan lagi setelah dikoreksi (reject&above_sma50
+# n=70 touch3=38.6% -- HAMPIR SAMA dgn reject keseluruhan 38.0%, beda dari
+# klaim awal yg [tercemar] nunjuk gap besar) -- above_sma50 dipertahankan
+# sbg filter ringan (matches 70/79 = 89% populasi reject secara alami,
+# tidak merugikan), TAPI JANGAN klaim ini "rescue" kuat lagi, cuma
+# menyaring tipis. Reject group SENDIRI (bahkan tanpa trend filter) masih
+# py edge nyata di atas baseline populasi umum (~31% dari studi EOD 2yr
+# sebelumnya) -- itu alasan Tier 2 tetap dipertahankan, BUKAN krn
+# above_sma50-nya.
 BSJP_WATCH_TP_GAP_PCT = 2.0
-BSJP_WATCH_TOUCH3_HISTORICAL_PCT = 38.8
+BSJP_WATCH_TOUCH3_HISTORICAL_PCT = 38.6
 
-# MBSS v2 (user request 2026-09-02 -- /bsjp tp: panduan jual pre-open esok
-# pagi, dihitung SETELAH EOD close dari entry ASLI yg SUDAH tersimpan di
-# daytrade_picks_history.json [source="bsjp", current_price = harga SAAT
-# alert fire, BUKAN proxy Close EOD -- presisi ini yg terbukti penting,
-# lihat sesi 2026-09-02]). Backtest presisi sama (Fase 2 ACCEPT, n=134,
-# 5 hari bursa): touch>=2%=49.3% (TP1, target paling mungkin tersentuh),
-# touch>=6%=24.6% (TP2, target lebih besar tapi ~1 dari 4 kali tersentuh).
-# Sampel MASIH kecil (limitasi hard cap yfinance 8 hari utk data 1m) --
-# treat sbg directional, bukan final, recalibrate begitu data presisi lebih
-# banyak terkumpul.
-BSJP_TP1_GAP_PCT = 2.0
-BSJP_TP1_HISTORICAL_HIT_PCT = 49.3
-BSJP_TP2_GAP_PCT = 6.0
-BSJP_TP2_HISTORICAL_HIT_PCT = 24.6
+# /bsjp tp -- panduan jual pre-open esok pagi, dihitung SETELAH EOD close
+# dari entry ASLI yg SUDAH tersimpan di daytrade_picks_history.json
+# (direkonstruksi dari "tp1", lihat catatan di build_bsjp_tp_plan_message).
+# INDIVIDUALIZED per ticker (2026-09-02, user request -- awalnya flat 2%/
+# 6% utk semua ticker, user minta dibedakan per karakter gerakan): segmen
+# by ret_1d_pct SAAT entry Fase 2 (field yg SAMA persis dgn snap["ret_1d_
+# pct"], sudah live/intraday, disimpan ke feature_snapshot saat alert
+# fire). Backtest presisi CORRECTED (Fase 2 ACCEPT, n=93, 5 hari bursa),
+# metodologi "jalan tangga naik selama WR >= floor" (SAMA konvensi dgn
+# compute_tp1 di daytrade_hc_confidence.py / compute_tp1_tp2 di lane_
+# confidence.py -- floor TP1=50%, floor TP2=25%):
+#   ret_1d 1-5%   (n=42): TP1=1.5% (50.0%)  TP2=3%  (28.6%)
+#   ret_1d 5-10%  (n=17): TP1=2.5% (52.9%)  TP2=7%  (29.4%)
+#   ret_1d 10-20% (n=20): TP1=5%   (50.0%)  TP2=15% (25.0%)
+#   ret_1d >=20%  (n=14): TP1=10%  (50.0%)  TP2=20% (35.7%)
+# Makin besar ret_1d saat entry, makin besar TP1/TP2 -- konsisten dgn
+# temuan big-mover vs moderate-mover sesi ini (gap nyata, bukan noise).
+# Sampel PER TIER kecil (14-42) -- treat sbg directional, recalibrate
+# begitu data presisi lebih banyak terkumpul. Fallback flat 2%/6% dipakai
+# HANYA utk pick LAMA yg belum py ret_1d_pct tersimpan di feature_snapshot
+# (dari sebelum fix ini).
+BSJP_TP_TIERS = [
+    # (ret1d_lo, ret1d_hi, tp1_gap_pct, tp1_hit_pct, tp2_gap_pct, tp2_hit_pct)
+    (1.0, 5.0, 1.5, 50.0, 3.0, 28.6),
+    (5.0, 10.0, 2.5, 52.9, 7.0, 29.4),
+    (10.0, 20.0, 5.0, 50.0, 15.0, 25.0),
+    (20.0, float("inf"), 10.0, 50.0, 20.0, 35.7),
+]
+BSJP_TP1_GAP_PCT = 2.0  # fallback (pick lama tanpa ret_1d_pct tersimpan)
+BSJP_TP1_HISTORICAL_HIT_PCT = 46.2
+BSJP_TP2_GAP_PCT = 6.0  # fallback (pick lama tanpa ret_1d_pct tersimpan)
+BSJP_TP2_HISTORICAL_HIT_PCT = 26.9
+
+
+def _bsjp_tp_for_ret1d(ret1d_pct: float | None) -> tuple[float, float, float, float]:
+    """Return (tp1_gap_pct, tp1_hit_pct, tp2_gap_pct, tp2_hit_pct) utk ret_1d_pct
+    tertentu -- reuse BSJP_TP_TIERS, fallback ke flat BSJP_TP1_GAP_PCT/BSJP_TP2_
+    GAP_PCT kalau ret1d_pct None atau di luar seluruh tier (mis. persis 1.0%)."""
+    if ret1d_pct is not None:
+        for lo, hi, tp1, tp1_hit, tp2, tp2_hit in BSJP_TP_TIERS:
+            if lo <= ret1d_pct < hi:
+                return tp1, tp1_hit, tp2, tp2_hit
+    return BSJP_TP1_GAP_PCT, BSJP_TP1_HISTORICAL_HIT_PCT, BSJP_TP2_GAP_PCT, BSJP_TP2_HISTORICAL_HIT_PCT
 
 STATE_FILE_BSJP = os.path.join(core.PROJECT_ROOT, "bsjp_shortlist_state.json")
 
@@ -1254,6 +1292,11 @@ async def run_bsjp_recheck_once() -> dict:
             # kemarin) -- proksi wajar, bukan angka backtest terpisah.
             fired.append({
                 "ticker": t, "current_price": snap["current_price"],
+                # ret_1d_pct (2026-09-02) -- mengalir otomatis ke feature_
+                # snapshot lock_daily_daytrade_picks (sudah ada field ini di
+                # sana), dipakai build_bsjp_tp_plan_message utk pilih tier
+                # TP1/TP2 individualized -- lihat BSJP_TP_TIERS.
+                "ret_1d_pct": snap["ret_1d_pct"],
                 "targets": {"tp_1": snap["current_price"] * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0), "cut_loss": snap["prev_close"]},
             })
         elif (
@@ -1336,21 +1379,28 @@ def build_bsjp_tp_plan_message() -> str:
         if not tp1_stored:
             continue
         entry = tp1_stored / (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0)
-        tp1 = entry * (1 + BSJP_TP1_GAP_PCT / 100.0)
-        tp2 = entry * (1 + BSJP_TP2_GAP_PCT / 100.0)
+        # Individualized per ticker (2026-09-02) -- ret_1d_pct SAAT alert
+        # fire (feature_snapshot, lihat catatan lengkap di atas BSJP_TP_
+        # TIERS), fallback flat kalau pick lama belum py field ini.
+        ret1d_at_entry = (p.get("feature_snapshot") or {}).get("ret_1d_pct")
+        tp1_gap, tp1_hit, tp2_gap, tp2_hit = _bsjp_tp_for_ret1d(ret1d_at_entry)
+        tp1 = entry * (1 + tp1_gap / 100.0)
+        tp2 = entry * (1 + tp2_gap / 100.0)
         cut_loss = p.get("cut_loss")
+        ret1d_label = f" (ret_1d saat alert: {ret1d_at_entry:+.1f}%)" if ret1d_at_entry is not None else " (ret_1d tidak tersimpan, pakai fallback flat)"
         line = (
-            f"{p['ticker']} — entry {entry:,.0f}\n"
-            f"  TP1 (moderat, ~{BSJP_TP1_HISTORICAL_HIT_PCT:.0f}% historis touch Day+1): {tp1:,.0f}\n"
-            f"  TP2 (stretch, ~{BSJP_TP2_HISTORICAL_HIT_PCT:.0f}% historis touch Day+1): {tp2:,.0f}"
+            f"{p['ticker']} — entry {entry:,.0f}{ret1d_label}\n"
+            f"  TP1 (moderat, ~{tp1_hit:.0f}% historis touch Day+1): {tp1:,.0f} (+{tp1_gap:.1f}%)\n"
+            f"  TP2 (stretch, ~{tp2_hit:.0f}% historis touch Day+1): {tp2:,.0f} (+{tp2_gap:.1f}%)"
         )
         if cut_loss:
             line += f"\n  Cut loss: {cut_loss:,.0f}"
         lines.append(line)
 
     lines.append(
-        "\n⚠️ Probabilitas dari backtest presisi (1m riil, entry ASLI saat alert fire) 5 hari bursa -- "
-        "sampel masih kecil, treat sbg directional. TP1 lebih mungkin tersentuh; TP2 upside lebih besar tapi lebih jarang."
+        "\n⚠️ Probabilitas dari backtest presisi (1m riil, entry ASLI saat alert fire) 5 hari bursa, "
+        "disegmentasi by ret_1d saat entry -- sampel PER TIER kecil (14-42), treat sbg directional. "
+        "TP1 lebih mungkin tersentuh; TP2 upside lebih besar tapi lebih jarang."
     )
     return "\n\n".join(lines)
 
