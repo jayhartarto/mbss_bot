@@ -7729,10 +7729,14 @@ def build_app():
         # jendela BSJP_RECHECK_WINDOW_START-END atau kalau belum ada
         # shortlist /bsjp hari ini, aman didaftarkan 24/7 spt job lain di
         # atas. UPDATE 2026-09-01: window dimajukan 14:00->09:30 (live case
-        # ARA terjadi sejak sesi 1) & interval dipercepat 1800s->900s,
-        # DISINKRONKAN dgn Fase 1 otomatis (BSJP_SHORTLIST_SCAN_INTERVAL_SEC)
-        # -- stagger first= (100/250/460 utk conviction_sweep/bsjp_recheck/
-        # bsjp_shortlist_scan) TETAP semua beda mod 900, tidak perlu diubah.
+        # ARA terjadi sejak sesi 1) & interval dipercepat 1800s->900s.
+        # UPDATE 2026-09-02: interval dipercepat LAGI 900s->300s, SENGAJA
+        # TIDAK LAGI disamakan dgn Fase 1 (BSJP_SHORTLIST_SCAN_INTERVAL_SEC
+        # tetap 900s) -- lihat catatan lengkap di atas BSJP_RECHECK_INTERVAL_
+        # SEC (engine/scanalert.py) knp presisi timing Fase 2 lebih penting.
+        # first=250 TETAP aman -- gcd(300,900)=300, (250-460) & (250-100)
+        # tidak habis dibagi 300, jadi TIDAK PERNAH align dgn bsjp_shortlist_
+        # scan (first=460/900s) ATAU conviction_sweep (first=100/900s).
         app.job_queue.run_repeating(run_bsjp_recheck_job, interval=scanalert_engine.BSJP_RECHECK_INTERVAL_SEC, first=250)
         # MBSS v2 (user request 2026-08-31 -- BSJP Fase 1 OTOMATIS, engine/
         # scanalert.py run_bsjp_shortlist_scan_auto/run_bsjp_shortlist_scan_

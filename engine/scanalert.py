@@ -806,9 +806,23 @@ BSJP_RECHECK_RET1D_MIN_PCT = 1.0
 BSJP_TP1_MEDIAN_GAP_PCT = 3.1
 BSJP_RECHECK_WINDOW_START = datetime.time(9, 30)
 BSJP_RECHECK_WINDOW_END = datetime.time(15, 50)
-BSJP_RECHECK_INTERVAL_SEC = 900  # 15 menit -- disinkronkan dgn Fase 1 otomatis
+# MBSS v2 (user request 2026-09-02): 900s->300s -- alasan LANGSUNG terkait
+# temuan presisi sesi ini: entry ASLI (harga saat checkpoint pertama lolos)
+# rata-rata +0.85% s.d +1.81% DI ATAS Close(T) [snap["current_price"] pd
+# saat alert fire vs closing hari itu] -- ticker biasanya SUDAH mulai fade
+# dari titik lolos gate sebelum sempat dialert, cek lebih SERING mengurangi
+# lag deteksi (bukan lag antar TICK, tapi lag SEJAK ticker genuinely lolos
+# s.d TERDETEKSI) jadi entry lebih dekat ke harga saat genuinely lolos, BUKAN
+# beberapa menit setelahnya. SENGAJA TIDAK disamakan dgn Fase 1 (TETAP 900s
+# di bawah) -- Fase 1 cuma jaring kandidat awal (longgar, tidak time-
+# sensitive), Fase 2 yg genuinely butuh presisi timing krn itu yg jadi
+# harga alert beneran. first=250 (job registration, legacy_core.py)
+# TIDAK bentrok dgn Fase 1 (first=460/900s) atau conviction sweep
+# (first=100/900s) di interval BARU ini -- gcd(300,900)=300, (250-460) &
+# (250-100) SAMA SEKALI TIDAK habis dibagi 300, jadi TIDAK PERNAH align.
+BSJP_RECHECK_INTERVAL_SEC = 300  # 5 menit
 BSJP_SHORTLIST_SCAN_WINDOW_START = datetime.time(9, 0)  # Fase 1 otomatis -- mulai buka, BUKAN nunggu akhir sesi 1
-BSJP_SHORTLIST_SCAN_INTERVAL_SEC = 900  # 15 menit
+BSJP_SHORTLIST_SCAN_INTERVAL_SEC = 900  # 15 menit -- Fase 1 TETAP, lihat catatan BSJP_RECHECK_INTERVAL_SEC knp Fase 2 dipercepat sendiri
 BSJP_MIN_HISTORY_DAYS = 260  # >200 hari (MA200) + buffer hari libur/data hilang
 
 # MBSS v2 (BUGFIX 2026-09-02, DIKOREKSI setelah versi pertama shipped):
@@ -966,7 +980,9 @@ def _fetch_bsjp_live_bar(tickers: list[str]) -> dict:
     Bagian LIVE (HARI INI saja) -- period KECIL (5 hari, bukan 260),
     dipanggil TIAP kali _fetch_bsjp_universe_snapshot jalan (beda dari
     historical base yg di-cache 1x/hari). Inilah fetch yg genuinely perlu
-    fresh tiap 15 menit -- payload-nya jauh lebih kecil drpd base.
+    fresh tiap siklus -- Fase 1 tiap 15 menit, Fase 2 tiap 5 menit (2026-
+    09-02, lihat BSJP_RECHECK_INTERVAL_SEC) -- payload-nya jauh lebih kecil
+    drpd base.
     """
     today_date = datetime.datetime.now(core.WIB).date()
     live = {}
@@ -2668,8 +2684,9 @@ async def run_scan_alert_once() -> dict:
         # MBSS v2 (user request 2026-08-29, REVISI): BSJP DIKELUARKAN dari
         # loop scan-alert bersama ini -- sekarang sinyal 2-fase sendiri
         # (run_bsjp_shortlist_scan via /bsjp akhir sesi 1, run_bsjp_
-        # recheck_once tiap 15 menit 09:30-15:50), state & cadence
-        # sendiri, tidak lagi numpang fetch 1m bar loop 3-menitan ini.
+        # recheck_once tiap 5 menit 09:30-15:50, dipercepat dari 15 menit
+        # 2026-09-02), state & cadence sendiri, tidak lagi numpang fetch
+        # 1m bar loop 3-menitan ini.
 
         # FCM: beli di open, jendela pendek (FCM_OPEN_BUY_WINDOW_END) --
         # dicek SEBELUM confirmation/pullback (independen, bisa dua-duanya

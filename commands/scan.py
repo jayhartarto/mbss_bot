@@ -2358,9 +2358,10 @@ async def high_conviction_command(update, context):
 # close-based/exit-efficiency validation, daily_2y_issi_raw.pkl) -- lihat
 # catatan lengkap di engine/scanalert.py run_bsjp_shortlist_scan/run_bsjp_
 # recheck_once. Command ini = FASE 1 (scan penuh universe akhir sesi 1,
-# simpan shortlist) -- FASE 2 (recheck live tiap 15 menit 09:30-15:50,
-# kirim alert final) jalan otomatis via JobQueue, lihat engine/legacy_
-# core.py run_bsjp_recheck_job.
+# simpan shortlist) -- FASE 2 (recheck live tiap 5 menit 09:30-15:50 --
+# dipercepat dari 15 menit 2026-09-02, lihat catatan lengkap di atas
+# BSJP_RECHECK_INTERVAL_SEC engine/scanalert.py, kirim alert final) jalan
+# otomatis via JobQueue, lihat engine/legacy_core.py run_bsjp_recheck_job.
 # ==========================================
 
 
@@ -2373,7 +2374,7 @@ async def bsjp_screening_command(update, context):
       3. High hari ini < 1.01x harga sekarang ("clean close")
       4. Volume hari ini > 1.0x rata-rata volume 200 hari
     Simpan yg lolos sbg shortlist (dipakai FASE 2 -- recheck live otomatis
-    tiap 15 menit 09:30-15:50 WIB, lihat run_bsjp_recheck_job).
+    tiap 5 menit 09:30-15:50 WIB, lihat run_bsjp_recheck_job).
 
     MBSS v2 (user request 2026-08-31 -- "harusnya tetap bisa di running
     ketika istirahat, kan hanya untuk jaring kandidat awal?"): jendela
@@ -2432,7 +2433,7 @@ async def bsjp_screening_command(update, context):
         return
 
     passed.sort(key=lambda r: r["ret_1d_pct"], reverse=True)
-    lines = [f"🌆 BSJP SHORTLIST — {len(passed)} kandidat lolos SEMUA 4 kriteria (akan di-recheck live tiap 15 menit 09:30-15:50)\n"]
+    lines = [f"🌆 BSJP SHORTLIST — {len(passed)} kandidat lolos SEMUA 4 kriteria (akan di-recheck live tiap 5 menit 09:30-15:50)\n"]
     for i, r in enumerate(passed, 1):
         vol_vs_prev = r["volume_so_far"] / max(r["prev_volume"], 1.0)
         vol_vs_ma200 = r["volume_so_far"] / max(r["vol_ma200"], 1.0)
