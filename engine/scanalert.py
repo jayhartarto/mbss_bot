@@ -1290,6 +1290,7 @@ async def run_bsjp_recheck_once() -> dict:
     watch_alerted_already = set(state.get("watch_alerted", []))
     watch_alerted_list = state.setdefault("watch_alerted", [])
     fired = []
+    fired_watch = []
     for t in shortlist:
         snap = snapshot.get(t)
         if not snap:
@@ -1330,6 +1331,16 @@ async def run_bsjp_recheck_once() -> dict:
                 print(f"[NO TELEGRAM TOKEN] {msg}")
             watch_alerted_list.append(t)
             n_watch_alerted += 1
+            # MBSS v2 (user request 2026-09-02 -- "BSJP WATCH tetap masuk
+            # /bsjp tp"): lock TERPISAH (source="bsjp_watch", BUKAN "bsjp")
+            # -- confidence beda, TP beda (moderat saja, BSJP_WATCH_TP_GAP_
+            # PCT), jangan campur dgn alert utama supaya /bsjp tp bisa
+            # tampilkan keduanya dgn label yg jelas berbeda.
+            fired_watch.append({
+                "ticker": t, "current_price": snap["current_price"],
+                "ret_1d_pct": snap["ret_1d_pct"],
+                "targets": {"tp_1": snap["current_price"] * (1 + BSJP_WATCH_TP_GAP_PCT / 100.0), "cut_loss": snap["prev_close"]},
+            })
 
     _save_bsjp_state(state)
     if fired:
@@ -1337,18 +1348,26 @@ async def run_bsjp_recheck_once() -> dict:
             await asyncio.to_thread(core.lock_daily_daytrade_picks, fired, "bsjp")
         except Exception as e:
             print(f"⚠️ Gagal mengunci picks BSJP untuk /winrate: {e}")
+    if fired_watch:
+        try:
+            await asyncio.to_thread(core.lock_daily_daytrade_picks, fired_watch, "bsjp_watch")
+        except Exception as e:
+            print(f"⚠️ Gagal mengunci picks BSJP WATCH untuk /winrate: {e}")
     return {"checked": len(shortlist), "alerted": n_alerted, "watch_alerted": n_watch_alerted}
 
 
 def build_bsjp_tp_plan_message() -> str:
     """
     /bsjp tp (MBSS v2, user request 2026-09-02) -- panduan jual pre-open esok
-    pagi utk SEMUA ticker yang lolos Fase 2 hari bursa terakhir. Entry
-    direkonstruksi dari "tp1" yg tersimpan di pick (harga ASLI saat alert
-    fire, BUKAN proxy Close EOD -- lihat catatan lengkap di atas BSJP_TP1_
-    GAP_PCT kenapa presisi ini penting, dan catatan di dalam loop soal
-    KENAPA direkonstruksi bukan dibaca langsung -- lock_daily_daytrade_picks
-    tidak pernah simpan current_price mentah).
+    pagi utk SEMUA ticker yang lolos Fase 2 (source="bsjp") ATAU Tier 2
+    WATCH (source="bsjp_watch", ditambahkan 2026-09-02 -- "BSJP WATCH tetap
+    masuk /bsjp tp") hari bursa terakhir. Entry direkonstruksi dari "tp1"
+    yg tersimpan di pick (harga ASLI saat alert fire, BUKAN proxy Close EOD
+    -- lihat catatan lengkap di atas BSJP_TP1_GAP_PCT kenapa presisi ini
+    penting). Dua source ini dikunci dgn multiplier tp1 BEDA (BSJP_TP1_
+    MEDIAN_GAP_PCT utk "bsjp", BSJP_WATCH_TP_GAP_PCT utk "bsjp_watch" --
+    lihat run_bsjp_recheck_once) jadi rekonstruksi entry HARUS pakai
+    multiplier yg sesuai sumbernya, tidak bisa disamakan.
 
     PENTING soal tanggal (bug yg ketemu & DIPERBAIKI saat masih di sesi yg
     sama, sebelum sempat dipakai produksi): jangan panggil ulang
@@ -1360,63 +1379,79 @@ def build_bsjp_tp_plan_message() -> str:
     besok pagi) lalu panggil ULANG marker itu, hasilnya SUDAH maju 1 hari
     drpd pick_date yg kesimpan -- SELALU MISMATCH, tidak akan pernah ketemu
     picks-nya. Fix: cari pick_date TERBARU yang genuinely ada di history
-    utk source="bsjp" (bukan hitung ulang tanggal dari nol) -- robust
-    terlepas kapan /bsjp tp dipanggil.
+    (gabungan kedua source) -- robust terlepas kapan /bsjp tp dipanggil.
     """
     history = core.load_daytrade_picks_history()
-    bsjp_picks = [p for p in history if p.get("source") == "bsjp" and p.get("pick_date")]
+    bsjp_picks = [p for p in history if p.get("source") in ("bsjp", "bsjp_watch") and p.get("pick_date")]
     if not bsjp_picks:
-        return "📋 Belum pernah ada BSJP yang lolos Fase 2 -- tidak ada panduan TP."
+        return "📋 Belum pernah ada BSJP (Fase 2 maupun WATCH) -- tidak ada panduan TP."
 
     target_date = max(p["pick_date"] for p in bsjp_picks)
     picks = [p for p in bsjp_picks if p["pick_date"] == target_date]
+    main_picks = [p for p in picks if p["source"] == "bsjp"]
+    watch_picks = [p for p in picks if p["source"] == "bsjp_watch"]
 
     staleness_note = ""
     try:
         target_dt = datetime.datetime.strptime(target_date, "%Y-%m-%d").date()
         days_old = (datetime.datetime.now(core.WIB).date() - target_dt).days
         if days_old > 2:
-            staleness_note = f"\n⚠️ Pick TERBARU dari {target_date} ({days_old} hari lalu) -- kemungkinan TIDAK ada alert Fase 2 baru-baru ini, ini BUKAN rencana malam ini.\n"
+            staleness_note = f"\n⚠️ Pick TERBARU dari {target_date} ({days_old} hari lalu) -- kemungkinan TIDAK ada alert baru-baru ini, ini BUKAN rencana malam ini.\n"
     except Exception:
         pass
 
-    lines = [f"🌅 BSJP TP PLAN — {target_date} ({len(picks)} ticker lolos Fase 2){staleness_note}\n"]
-    for p in sorted(picks, key=lambda x: x["ticker"]):
-        # MBSS v2 (bug ketemu & diperbaiki 2026-09-02, live case: /bsjp tp
-        # tampil kosong -- ternyata lock_daily_daytrade_picks TIDAK PERNAH
-        # simpan current_price mentah, cuma "tp1"/"cut_loss" flat di top
-        # level [lihat legacy_core.py], entry_price sengaja None sampai
-        # /winrate resolve belakangan). tp1 tersimpan SELALU = entry *
-        # (1+BSJP_TP1_MEDIAN_GAP_PCT/100) [lihat run_bsjp_recheck_once] --
-        # deterministik, jadi entry ASLI bisa direkonstruksi persis dari situ
-        # tanpa perlu ubah skema lock_daily_daytrade_picks yg dipakai byk
-        # caller lain.
-        tp1_stored = p.get("tp1")
-        if not tp1_stored:
-            continue
-        entry = tp1_stored / (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0)
-        # Individualized per ticker (2026-09-02) -- ret_1d_pct SAAT alert
-        # fire (feature_snapshot, lihat catatan lengkap di atas BSJP_TP_
-        # TIERS), fallback flat kalau pick lama belum py field ini.
-        ret1d_at_entry = (p.get("feature_snapshot") or {}).get("ret_1d_pct")
-        tp1_gap, tp1_hit, tp2_gap, tp2_hit = _bsjp_tp_for_ret1d(ret1d_at_entry)
-        tp1 = entry * (1 + tp1_gap / 100.0)
-        tp2 = entry * (1 + tp2_gap / 100.0)
-        cut_loss = p.get("cut_loss")
-        ret1d_label = f" (ret_1d saat alert: {ret1d_at_entry:+.1f}%)" if ret1d_at_entry is not None else " (ret_1d tidak tersimpan, pakai fallback flat)"
-        line = (
-            f"{p['ticker']} — entry {entry:,.0f}{ret1d_label}\n"
-            f"  TP1 (moderat, ~{tp1_hit:.0f}% historis touch Day+1): {tp1:,.0f} (+{tp1_gap:.1f}%)\n"
-            f"  TP2 (stretch, ~{tp2_hit:.0f}% historis touch Day+1): {tp2:,.0f} (+{tp2_gap:.1f}%)"
-        )
-        if cut_loss:
-            line += f"\n  Cut loss: {cut_loss:,.0f}"
-        lines.append(line)
+    lines = [f"🌅 BSJP TP PLAN — {target_date} ({len(main_picks)} alert utama, {len(watch_picks)} WATCH){staleness_note}\n"]
+
+    if main_picks:
+        lines.append("🔥 ALERT UTAMA (BELI SORE INI)")
+        for p in sorted(main_picks, key=lambda x: x["ticker"]):
+            # MBSS v2 (bug ketemu & diperbaiki 2026-09-02, live case: /bsjp tp
+            # tampil kosong -- lock_daily_daytrade_picks TIDAK PERNAH simpan
+            # current_price mentah, cuma "tp1"/"cut_loss" flat di top level
+            # [lihat legacy_core.py], entry_price sengaja None sampai /winrate
+            # resolve belakangan). tp1 tersimpan SELALU = entry * (1+BSJP_TP1_
+            # MEDIAN_GAP_PCT/100) [lihat run_bsjp_recheck_once] -- deterministik,
+            # jadi entry ASLI bisa direkonstruksi persis dari situ.
+            tp1_stored = p.get("tp1")
+            if not tp1_stored:
+                continue
+            entry = tp1_stored / (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0)
+            ret1d_at_entry = (p.get("feature_snapshot") or {}).get("ret_1d_pct")
+            tp1_gap, tp1_hit, tp2_gap, tp2_hit = _bsjp_tp_for_ret1d(ret1d_at_entry)
+            tp1 = entry * (1 + tp1_gap / 100.0)
+            tp2 = entry * (1 + tp2_gap / 100.0)
+            cut_loss = p.get("cut_loss")
+            ret1d_label = f" (ret_1d saat alert: {ret1d_at_entry:+.1f}%)" if ret1d_at_entry is not None else " (ret_1d tidak tersimpan, pakai fallback flat)"
+            line = (
+                f"{p['ticker']} — entry {entry:,.0f}{ret1d_label}\n"
+                f"  TP1 (moderat, ~{tp1_hit:.0f}% historis touch Day+1): {tp1:,.0f} (+{tp1_gap:.1f}%)\n"
+                f"  TP2 (stretch, ~{tp2_hit:.0f}% historis touch Day+1): {tp2:,.0f} (+{tp2_gap:.1f}%)"
+            )
+            if cut_loss:
+                line += f"\n  Cut loss: {cut_loss:,.0f}"
+            lines.append(line)
+
+    if watch_picks:
+        lines.append("🔶 WATCH (Tier 2 — confidence lebih rendah, TP moderat saja)")
+        for p in sorted(watch_picks, key=lambda x: x["ticker"]):
+            tp1_stored = p.get("tp1")
+            if not tp1_stored:
+                continue
+            entry = tp1_stored / (1 + BSJP_WATCH_TP_GAP_PCT / 100.0)
+            cut_loss = p.get("cut_loss")
+            line = (
+                f"{p['ticker']} — entry {entry:,.0f}\n"
+                f"  TP (moderat, ~{BSJP_WATCH_TOUCH3_HISTORICAL_PCT:.0f}% historis touch Day+1): {tp1_stored:,.0f} (+{BSJP_WATCH_TP_GAP_PCT:.1f}%)"
+            )
+            if cut_loss:
+                line += f"\n  Cut loss: {cut_loss:,.0f}"
+            lines.append(line)
 
     lines.append(
-        "\n⚠️ Probabilitas dari backtest presisi (1m riil, entry ASLI saat alert fire) 5 hari bursa, "
-        "disegmentasi by ret_1d saat entry -- sampel PER TIER kecil (14-42), treat sbg directional. "
-        "TP1 lebih mungkin tersentuh; TP2 upside lebih besar tapi lebih jarang."
+        "\n⚠️ Probabilitas dari backtest presisi (1m riil, entry ASLI saat alert fire) 5 hari bursa -- "
+        "sampel kecil, treat sbg directional. Alert utama: TP1 lebih mungkin tersentuh, TP2 upside lebih "
+        "besar tapi lebih jarang. WATCH: confidence lebih rendah drpd alert utama, TP moderat saja -- "
+        "TIDAK ada TP2 stretch krn odds winner besar jauh lebih tipis di grup ini."
     )
     return "\n\n".join(lines)
 
