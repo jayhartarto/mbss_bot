@@ -1800,12 +1800,31 @@ def populate_from_yfinance(tickers: list, period: str = "2y", batch_size: int = 
     }
 
 
-def get_ohlcv_smart(ticker: str, limit: int = 500) -> pd.DataFrame:
+_ohlcv_db_initialized = False
+
+
+def get_ohlcv_smart(ticker: str, limit: int = 500, skip_live_refresh: bool = False) -> pd.DataFrame:
     """
     Entry point utama — cek SQLite dulu, refresh dari Yahoo Finance bila bar
     terbaru belum ada, lalu return data dari SQLite.
+
+    skip_live_refresh=True: BUGFIX (live incident 2026-09-02, /eodscan
+    manual-only & sempat kelewat 1 malam): kalau `latest_in_db != today_
+    marker` utk SEMUA/hampir semua ticker (DB stale semalam), caller yg
+    scan RATUSAN ticker sekaligus (mis. _get_fresh_cross_momentum_
+    watchlist/_get_pre_continuation_watchlist, engine/scanalert.py) akan
+    memicu ratusan live yfinance_get_kline() SEKUENSIAL -- pola persis
+    insiden .info kemarin, cuma beda pemicu. Live-tracking screening ini
+    TIDAK butuh OHLCV paling segar (MACD/technical state tetap valid dari
+    data 1 hari lalu) -- skip_live_refresh=True pakai APAPUN yg ada di DB
+    lokal, TIDAK PERNAH trigger live fetch krn staleness (ticker BENAR-
+    BENAR BARU/kosong di DB TETAP tetap di-backfill -- itu bukan soal
+    staleness, tanpa data sama sekali hasilnya kosong bukan stale).
     """
-    init_ohlcv_db()
+    global _ohlcv_db_initialized
+    if not _ohlcv_db_initialized:
+        init_ohlcv_db()
+        _ohlcv_db_initialized = True
     latest_in_db = get_latest_daily_date_in_db(ticker)
     today_marker = get_current_trading_day_close_marker()
 
@@ -1820,12 +1839,13 @@ def get_ohlcv_smart(ticker: str, limit: int = 500) -> pd.DataFrame:
     # cuma dapat ~10 bar, backfill penuh tidak pernah ke-trigger — padahal
     # saham itu sendiri sudah listing lama dan datanya ADA di Yahoo. Diperbaiki:
     # ticker BARU (latest_in_db None) SELALU dapat backfill 2 tahun langsung,
-    # bukan cuma fallback.
+    # bukan cuma fallback. TIDAK ikut skip_live_refresh -- ticker kosong bukan
+    # kasus "stale", tanpa fetch ini datanya genuinely nihil.
     if latest_in_db is None:
         full = yfinance_get_kline(ticker, period="2y")
         if full is not None and not full.empty:
             upsert_ohlcv_daily(ticker, full)
-    elif latest_in_db != today_marker:
+    elif not skip_live_refresh and latest_in_db != today_marker:
         fresh = yfinance_get_kline(ticker, period="10d")
         if fresh is not None and not fresh.empty:
             upsert_ohlcv_daily(ticker, fresh)

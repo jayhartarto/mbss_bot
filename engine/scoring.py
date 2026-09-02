@@ -950,7 +950,7 @@ def decide_action(final_score, value_score, momentum_score, sentiment_score,
     }
 
 
-def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundamentals=False):
+def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundamentals=False, skip_live_refresh=False):
     """
     Returns a scored dict for one ticker, or None if data is unavailable/insufficient.
 
@@ -968,11 +968,16 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
     include_quote_check: retained for compatibility. EOD screening now relies on
     Yahoo-backed OHLCV data, so the extra direct quote check is optional and only
     used where a separate live-status signal is still desired.
+
+    skip_live_refresh: diteruskan ke core.get_ohlcv_smart -- lihat catatan
+    lengkap di sana (live incident 2026-09-02, /eodscan manual-only kelewat
+    semalam -> ratusan live OHLCV fetch sekuensial). Dipakai caller yg scan
+    ratusan ticker sekaligus utk live tracking (bukan EOD final).
     """
     # Gunakan SQLite layer dulu (get_ohlcv_smart) — fetch delta dari iTick hanya
     # kalau bar hari ini belum ada di DB. Menghemat ~99% panggilan iTick untuk
     # ticker yang sudah pernah di-scan sebelumnya.
-    hist = core.get_ohlcv_smart(ticker, limit=500)
+    hist = core.get_ohlcv_smart(ticker, limit=500, skip_live_refresh=skip_live_refresh)
 
     if hist is None or hist.empty or len(hist) < 20:
         bars = 0 if hist is None or hist.empty else len(hist)
