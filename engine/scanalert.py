@@ -851,44 +851,60 @@ BSJP_MIN_HISTORY_DAYS = 260  # >200 hari (MA200) + buffer hari libur/data hilang
 BSJP_WATCH_TP_GAP_PCT = 2.0
 BSJP_WATCH_TOUCH3_HISTORICAL_PCT = 38.6
 
-# /bsjp tp -- panduan jual pre-open esok pagi, dihitung SETELAH EOD close
-# dari entry ASLI yg SUDAH tersimpan di daytrade_picks_history.json
-# (direkonstruksi dari "tp1", lihat catatan di build_bsjp_tp_plan_message).
-# INDIVIDUALIZED per ticker (2026-09-02, user request -- awalnya flat 2%/
-# 6% utk semua ticker, user minta dibedakan per karakter gerakan): segmen
-# by ret_1d_pct SAAT entry Fase 2 (field yg SAMA persis dgn snap["ret_1d_
-# pct"], sudah live/intraday, disimpan ke feature_snapshot saat alert
-# fire). Backtest presisi CORRECTED (Fase 2 ACCEPT, n=93, 5 hari bursa),
-# metodologi "jalan tangga naik selama WR >= floor" (SAMA konvensi dgn
-# compute_tp1 di daytrade_hc_confidence.py / compute_tp1_tp2 di lane_
-# confidence.py -- floor TP1=50%, floor TP2=25%):
-#   ret_1d 1-5%   (n=42): TP1=1.5% (50.0%)  TP2=3%  (28.6%)
-#   ret_1d 5-10%  (n=17): TP1=2.5% (52.9%)  TP2=7%  (29.4%)
-#   ret_1d 10-20% (n=20): TP1=5%   (50.0%)  TP2=15% (25.0%)
-#   ret_1d >=20%  (n=14): TP1=10%  (50.0%)  TP2=20% (35.7%)
-# Makin besar ret_1d saat entry, makin besar TP1/TP2 -- konsisten dgn
-# temuan big-mover vs moderate-mover sesi ini (gap nyata, bukan noise).
-# Sampel PER TIER kecil (14-42) -- treat sbg directional, recalibrate
-# begitu data presisi lebih banyak terkumpul. Fallback flat 2%/6% dipakai
-# HANYA utk pick LAMA yg belum py ret_1d_pct tersimpan di feature_snapshot
-# (dari sebelum fix ini).
+# /bsjp tp -- panduan jual pre-open esok pagi. ANCHOR = CLOSING harga hari
+# alert (2026-09-02, user request, live case KKES -- avg cost 111, closing
+# ternyata 94-95, TP1/TP2 lama yg dihitung dari entry ALERT FIRE [109]
+# terbukti TIDAK REALISTIS: backtest utk grup "faded>=5%" spt KKES nunjuk
+# 0% (BUKAN rendah, NOL) ticker yg PERNAH balik ke harga entry lagi di Day+1,
+# apalagi ke TP1/TP2 dari situ. User: "sesuai disiplin BSJP yg memang
+# seharusnya beli di sore hari (>15:30)" -- closing HARIAN (yg sudah
+# mencerminkan harga sore/akhir sesi) adalah anchor yg BENAR secara disiplin
+# MAUPUN backtest, bukan harga alert-fire yg bisa jauh dari closing.
+#
+# Backtest presisi CORRECTED (Fase 2 ACCEPT, n=93, 5 hari bursa) dgn ANCHOR
+# CLOSE (bukan entry): overall touch>=1%=74.2%/>=3%=48.4%/>=5%=34.4% (semua
+# LEBIH TINGGI drpd anchor entry yg sebelumnya touch>=1%=57.0%/>=3%=40.9%/
+# >=5%=33.3% -- closing adalah anchor yg lebih baik, bukan cuma lebih benar
+# disiplin). Tier ret_1d_pct (segmen SAMA, floor-walk SAMA, TAPI touch
+# dihitung dari CLOSE):
+#   ret_1d 1-5%   (n=42): TP1=1.5% (52.4%)  TP2=3%  (31.0%)
+#   ret_1d 5-10%  (n=17): TP1=3%   (58.8%)  TP2=7%  (29.4%)
+#   ret_1d 10-20% (n=18): TP1=4%   (50.0%)  TP2=10% (27.8%)
+#   ret_1d >=20%  (n=16): TP1=10%  (50.0%)  TP2=20% (25.0%)
+#
+# FADE CAP (kritis, live case KKES): drift entry->close BUKAN noise --
+# ticker yg closing-nya SUDAH >=5% di bawah harga alert-fire (spt KKES,
+# -12.8%) py profil BEDA SAMA SEKALI: n=11, TP1 floor-walk(50%) cuma 2.5%
+# (54.5%), dan NOL kejadian tembus >=8% dari closing (bukan rendah, betul2
+# nol di sampel ini). Kandidat spt ini TIDAK BOLEH dikasih TP2 stretch dari
+# tier ret_1d biasa (misal tier >=20% yg nawarin TP2=20% -- itu klaim palsu
+# utk ticker yg sudah crash separuh hari). Override: kalau drift<=-5%, TP1
+# diturunkan ke BSJP_FADE_TP1_GAP_PCT & TP2 DIHILANGKAN SAMA SEKALI (bukan
+# dikecilkan -- backtest literally 0% di atas 7-8%, menampilkan angka apa
+# pun di situ menyesatkan).
 BSJP_TP_TIERS = [
     # (ret1d_lo, ret1d_hi, tp1_gap_pct, tp1_hit_pct, tp2_gap_pct, tp2_hit_pct)
-    (1.0, 5.0, 1.5, 50.0, 3.0, 28.6),
-    (5.0, 10.0, 2.5, 52.9, 7.0, 29.4),
-    (10.0, 20.0, 5.0, 50.0, 15.0, 25.0),
-    (20.0, float("inf"), 10.0, 50.0, 20.0, 35.7),
+    (1.0, 5.0, 1.5, 52.4, 3.0, 31.0),
+    (5.0, 10.0, 3.0, 58.8, 7.0, 29.4),
+    (10.0, 20.0, 4.0, 50.0, 10.0, 27.8),
+    (20.0, float("inf"), 10.0, 50.0, 20.0, 25.0),
 ]
 BSJP_TP1_GAP_PCT = 2.0  # fallback (pick lama tanpa ret_1d_pct tersimpan)
 BSJP_TP1_HISTORICAL_HIT_PCT = 46.2
 BSJP_TP2_GAP_PCT = 6.0  # fallback (pick lama tanpa ret_1d_pct tersimpan)
 BSJP_TP2_HISTORICAL_HIT_PCT = 26.9
 
+BSJP_FADE_DRIFT_THRESHOLD_PCT = -5.0  # closing >=5% di bawah harga alert-fire
+BSJP_FADE_TP1_GAP_PCT = 2.5
+BSJP_FADE_TP1_HISTORICAL_HIT_PCT = 54.5
+
 
 def _bsjp_tp_for_ret1d(ret1d_pct: float | None) -> tuple[float, float, float, float]:
     """Return (tp1_gap_pct, tp1_hit_pct, tp2_gap_pct, tp2_hit_pct) utk ret_1d_pct
     tertentu -- reuse BSJP_TP_TIERS, fallback ke flat BSJP_TP1_GAP_PCT/BSJP_TP2_
-    GAP_PCT kalau ret1d_pct None atau di luar seluruh tier (mis. persis 1.0%)."""
+    GAP_PCT kalau ret1d_pct None atau di luar seluruh tier (mis. persis 1.0%).
+    TIDAK menghandle fade-cap -- itu override TERPISAH di caller (butuh drift,
+    bukan cuma ret1d_pct), lihat build_bsjp_tp_plan_message."""
     if ret1d_pct is not None:
         for lo, hi, tp1, tp1_hit, tp2, tp2_hit in BSJP_TP_TIERS:
             if lo <= ret1d_pct < hi:
@@ -1008,6 +1024,37 @@ def _fetch_bsjp_live_bar(tickers: list[str]) -> dict:
         if i + _BSJP_FETCH_BATCH < len(tickers):
             time.sleep(0.5)
     return live
+
+
+def _fetch_bsjp_closing_prices(tickers: list[str], target_date_str: str) -> dict:
+    """
+    /bsjp tp (2026-09-02) -- closing HARIAN (bukan harga live/hari ini) utk
+    hari bursa target_date_str ("YYYY-MM-DD"), dipakai sbg anchor TP1/TP2
+    (lihat catatan panjang di atas BSJP_TP_TIERS knp closing, bukan harga
+    alert-fire). List ticker kecil (jumlah pick Fase 2 + WATCH 1 hari, bukan
+    seluruh universe) jadi live fetch di sini murah -- TIDAK perlu di-cache.
+    period="10d" (bukan 5d spt _fetch_bsjp_live_bar) -- /bsjp tp bisa
+    dipanggil BEBERAPA hari setelah target_date_str kalau user telat cek.
+    """
+    target_date = datetime.datetime.strptime(target_date_str, "%Y-%m-%d").date()
+    closes = {}
+    for i in range(0, len(tickers), _BSJP_FETCH_BATCH):
+        batch = tickers[i:i + _BSJP_FETCH_BATCH]
+        symbols = [t + ".JK" for t in batch]
+        data = yf.download(symbols, period="10d", interval="1d", group_by="ticker", threads=True, progress=False)
+        for t in batch:
+            sym = t + ".JK"
+            try:
+                d = data[sym].dropna(how="all")
+            except Exception:
+                continue
+            rows = d[d.index.date == target_date]
+            if rows.empty or pd.isna(rows["Close"].iloc[-1]):
+                continue
+            closes[t] = float(rows["Close"].iloc[-1])
+        if i + _BSJP_FETCH_BATCH < len(tickers):
+            time.sleep(0.5)
+    return closes
 
 
 def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
@@ -1358,28 +1405,32 @@ async def run_bsjp_recheck_once() -> dict:
 
 def build_bsjp_tp_plan_message() -> str:
     """
-    /bsjp tp (MBSS v2, user request 2026-09-02) -- panduan jual pre-open esok
-    pagi utk SEMUA ticker yang lolos Fase 2 (source="bsjp") ATAU Tier 2
-    WATCH (source="bsjp_watch", ditambahkan 2026-09-02 -- "BSJP WATCH tetap
-    masuk /bsjp tp") hari bursa terakhir. Entry direkonstruksi dari "tp1"
-    yg tersimpan di pick (harga ASLI saat alert fire, BUKAN proxy Close EOD
-    -- lihat catatan lengkap di atas BSJP_TP1_GAP_PCT kenapa presisi ini
-    penting). Dua source ini dikunci dgn multiplier tp1 BEDA (BSJP_TP1_
-    MEDIAN_GAP_PCT utk "bsjp", BSJP_WATCH_TP_GAP_PCT utk "bsjp_watch" --
-    lihat run_bsjp_recheck_once) jadi rekonstruksi entry HARUS pakai
-    multiplier yg sesuai sumbernya, tidak bisa disamakan.
+    /bsjp tp (MBSS v2, user request 2026-09-02, REVISI setelah live case
+    KKES) -- panduan jual pre-open esok pagi utk SEMUA ticker yang lolos
+    Fase 2 (source="bsjp") ATAU Tier 2 WATCH (source="bsjp_watch") hari
+    bursa terakhir. ANCHOR = closing HARI ALERT (fetch live, BUKAN harga
+    alert-fire) -- user: "sesuai disiplin BSJP yg memang seharusnya beli di
+    sore hari (>15:30)", DAN backtest presisi CORRECTED konfirmasi closing
+    anchor genuinely lebih baik (bukan cuma lebih benar disiplin) -- lihat
+    catatan panjang di atas BSJP_TP_TIERS. Entry ALERT-FIRE (dari "tp1"
+    tersimpan, direkonstruksi) TETAP dihitung & ditampilkan sbg REFERENSI
+    (drift context), TAPI bukan lagi anchor TP.
 
-    PENTING soal tanggal (bug yg ketemu & DIPERBAIKI saat masih di sesi yg
-    sama, sebelum sempat dipakai produksi): jangan panggil ulang
-    get_current_trading_day_close_marker() DI SINI utk cari pick_date target
-    -- alert Fase 2 SELALU dikunci SAAT market masih buka (sebelum 16:30
-    WIB, lihat BSJP_RECHECK_WINDOW_END=15:50), jadi marker SAAT lock masih
-    mundur 1 hari (msh nunjuk hari SEBELUMNYA, blm "tutup" per ambang 16:30
-    itu). Kalau /bsjp tp dipanggil NANTI (malam ini SETELAH 16:30, atau
-    besok pagi) lalu panggil ULANG marker itu, hasilnya SUDAH maju 1 hari
-    drpd pick_date yg kesimpan -- SELALU MISMATCH, tidak akan pernah ketemu
-    picks-nya. Fix: cari pick_date TERBARU yang genuinely ada di history
-    (gabungan kedua source) -- robust terlepas kapan /bsjp tp dipanggil.
+    FADE CAP: kalau closing sudah >=5% di bawah harga alert-fire (drift),
+    TP2 stretch DIHILANGKAN & TP1 diturunkan ke BSJP_FADE_TP1_GAP_PCT --
+    backtest nunjuk grup ini literally 0% pernah tembus >=8% dari closing.
+    Live case: KKES (avg cost user 111, closing 94-95, drift ~-13%) --
+    dgn desain lama TP1/TP2 dari entry (109) nunjuk 111/116 yg TIDAK PERNAH
+    kejadian di backtest (0/11). Dgn fade cap: TP1 = closing*1.025 (~97,
+    ~55% historis), TIDAK ada TP2.
+
+    PENTING soal tanggal (bug yg ketemu & DIPERBAIKI 2026-09-02, sebelum
+    sempat dipakai produksi): jangan panggil ulang get_current_trading_day_
+    close_marker() DI SINI utk cari pick_date target -- alert Fase 2 SELALU
+    dikunci SAAT market masih buka (sebelum 16:30 WIB), jadi marker SAAT
+    lock masih mundur 1 hari. Fix: cari pick_date TERBARU yang genuinely
+    ada di history (gabungan kedua source) -- robust terlepas kapan /bsjp
+    tp dipanggil.
     """
     history = core.load_daytrade_picks_history()
     bsjp_picks = [p for p in history if p.get("source") in ("bsjp", "bsjp_watch") and p.get("pick_date")]
@@ -1400,33 +1451,62 @@ def build_bsjp_tp_plan_message() -> str:
     except Exception:
         pass
 
+    all_tickers = sorted({p["ticker"] for p in picks})
+    closes = _fetch_bsjp_closing_prices(all_tickers, target_date)
+
     lines = [f"🌅 BSJP TP PLAN — {target_date} ({len(main_picks)} alert utama, {len(watch_picks)} WATCH){staleness_note}\n"]
+
+    def _entry_and_close(p: dict, tp1_multiplier_pct: float) -> tuple[float, float | None] | None:
+        # MBSS v2 (bug ketemu & diperbaiki 2026-09-02, live case: /bsjp tp
+        # tampil kosong -- lock_daily_daytrade_picks TIDAK PERNAH simpan
+        # current_price mentah, cuma "tp1"/"cut_loss" flat di top level.
+        # tp1 tersimpan SELALU = entry * (1+tp1_multiplier_pct/100) --
+        # deterministik, entry ASLI direkonstruksi persis dari situ.
+        tp1_stored = p.get("tp1")
+        if not tp1_stored:
+            return None
+        entry = tp1_stored / (1 + tp1_multiplier_pct / 100.0)
+        close_px = closes.get(p["ticker"])
+        return entry, close_px
 
     if main_picks:
         lines.append("🔥 ALERT UTAMA (BELI SORE INI)")
         for p in sorted(main_picks, key=lambda x: x["ticker"]):
-            # MBSS v2 (bug ketemu & diperbaiki 2026-09-02, live case: /bsjp tp
-            # tampil kosong -- lock_daily_daytrade_picks TIDAK PERNAH simpan
-            # current_price mentah, cuma "tp1"/"cut_loss" flat di top level
-            # [lihat legacy_core.py], entry_price sengaja None sampai /winrate
-            # resolve belakangan). tp1 tersimpan SELALU = entry * (1+BSJP_TP1_
-            # MEDIAN_GAP_PCT/100) [lihat run_bsjp_recheck_once] -- deterministik,
-            # jadi entry ASLI bisa direkonstruksi persis dari situ.
-            tp1_stored = p.get("tp1")
-            if not tp1_stored:
+            res = _entry_and_close(p, BSJP_TP1_MEDIAN_GAP_PCT)
+            if res is None:
                 continue
-            entry = tp1_stored / (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0)
-            ret1d_at_entry = (p.get("feature_snapshot") or {}).get("ret_1d_pct")
-            tp1_gap, tp1_hit, tp2_gap, tp2_hit = _bsjp_tp_for_ret1d(ret1d_at_entry)
-            tp1 = entry * (1 + tp1_gap / 100.0)
-            tp2 = entry * (1 + tp2_gap / 100.0)
+            entry, close_px = res
             cut_loss = p.get("cut_loss")
-            ret1d_label = f" (ret_1d saat alert: {ret1d_at_entry:+.1f}%)" if ret1d_at_entry is not None else " (ret_1d tidak tersimpan, pakai fallback flat)"
-            line = (
-                f"{p['ticker']} — entry {entry:,.0f}{ret1d_label}\n"
-                f"  TP1 (moderat, ~{tp1_hit:.0f}% historis touch Day+1): {tp1:,.0f} (+{tp1_gap:.1f}%)\n"
-                f"  TP2 (stretch, ~{tp2_hit:.0f}% historis touch Day+1): {tp2:,.0f} (+{tp2_gap:.1f}%)"
-            )
+
+            if close_px is None:
+                # Closing belum berhasil di-fetch -- fallback entry-anchor
+                # LAMA drpd tidak nampilkan apa-apa, TAPI beri label jelas.
+                ret1d_at_entry = (p.get("feature_snapshot") or {}).get("ret_1d_pct")
+                tp1_gap, tp1_hit, tp2_gap, tp2_hit = _bsjp_tp_for_ret1d(ret1d_at_entry)
+                line = (
+                    f"{p['ticker']} — entry alert-fire {entry:,.0f} (closing GAGAL di-fetch, pakai entry sbg fallback)\n"
+                    f"  TP1: {entry * (1 + tp1_gap / 100.0):,.0f} (+{tp1_gap:.1f}%)   TP2: {entry * (1 + tp2_gap / 100.0):,.0f} (+{tp2_gap:.1f}%)"
+                )
+            else:
+                drift = (close_px / entry - 1) * 100
+                drift_label = f"{drift:+.1f}%"
+                if drift <= BSJP_FADE_DRIFT_THRESHOLD_PCT:
+                    tp1 = close_px * (1 + BSJP_FADE_TP1_GAP_PCT / 100.0)
+                    line = (
+                        f"{p['ticker']} — closing {close_px:,.0f} (entry alert-fire {entry:,.0f}, drift {drift_label} — FADE, "
+                        f"TP2 DIHILANGKAN, backtest 0% tembus >=8% dari closing utk grup ini)\n"
+                        f"  TP1 (moderat, ~{BSJP_FADE_TP1_HISTORICAL_HIT_PCT:.0f}% historis touch Day+1): {tp1:,.0f} (+{BSJP_FADE_TP1_GAP_PCT:.1f}%)"
+                    )
+                else:
+                    ret1d_at_entry = (p.get("feature_snapshot") or {}).get("ret_1d_pct")
+                    tp1_gap, tp1_hit, tp2_gap, tp2_hit = _bsjp_tp_for_ret1d(ret1d_at_entry)
+                    tp1 = close_px * (1 + tp1_gap / 100.0)
+                    tp2 = close_px * (1 + tp2_gap / 100.0)
+                    line = (
+                        f"{p['ticker']} — closing {close_px:,.0f} (entry alert-fire {entry:,.0f}, drift {drift_label})\n"
+                        f"  TP1 (moderat, ~{tp1_hit:.0f}% historis touch Day+1): {tp1:,.0f} (+{tp1_gap:.1f}%)\n"
+                        f"  TP2 (stretch, ~{tp2_hit:.0f}% historis touch Day+1): {tp2:,.0f} (+{tp2_gap:.1f}%)"
+                    )
             if cut_loss:
                 line += f"\n  Cut loss: {cut_loss:,.0f}"
             lines.append(line)
@@ -1434,24 +1514,28 @@ def build_bsjp_tp_plan_message() -> str:
     if watch_picks:
         lines.append("🔶 WATCH (Tier 2 — confidence lebih rendah, TP moderat saja)")
         for p in sorted(watch_picks, key=lambda x: x["ticker"]):
-            tp1_stored = p.get("tp1")
-            if not tp1_stored:
+            res = _entry_and_close(p, BSJP_WATCH_TP_GAP_PCT)
+            if res is None:
                 continue
-            entry = tp1_stored / (1 + BSJP_WATCH_TP_GAP_PCT / 100.0)
+            entry, close_px = res
             cut_loss = p.get("cut_loss")
+            anchor_px = close_px if close_px is not None else entry
+            tp1 = anchor_px * (1 + BSJP_WATCH_TP_GAP_PCT / 100.0)
+            close_label = f"closing {close_px:,.0f}" if close_px is not None else f"entry alert-fire {entry:,.0f} (closing gagal di-fetch)"
             line = (
-                f"{p['ticker']} — entry {entry:,.0f}\n"
-                f"  TP (moderat, ~{BSJP_WATCH_TOUCH3_HISTORICAL_PCT:.0f}% historis touch Day+1): {tp1_stored:,.0f} (+{BSJP_WATCH_TP_GAP_PCT:.1f}%)"
+                f"{p['ticker']} — {close_label}\n"
+                f"  TP (moderat, ~{BSJP_WATCH_TOUCH3_HISTORICAL_PCT:.0f}% historis touch Day+1): {tp1:,.0f} (+{BSJP_WATCH_TP_GAP_PCT:.1f}%)"
             )
             if cut_loss:
                 line += f"\n  Cut loss: {cut_loss:,.0f}"
             lines.append(line)
 
     lines.append(
-        "\n⚠️ Probabilitas dari backtest presisi (1m riil, entry ASLI saat alert fire) 5 hari bursa -- "
-        "sampel kecil, treat sbg directional. Alert utama: TP1 lebih mungkin tersentuh, TP2 upside lebih "
-        "besar tapi lebih jarang. WATCH: confidence lebih rendah drpd alert utama, TP moderat saja -- "
-        "TIDAK ada TP2 stretch krn odds winner besar jauh lebih tipis di grup ini."
+        "\n⚠️ TP1/TP2 dihitung dari CLOSING hari alert (sesuai disiplin BSJP beli sore >15:30), BUKAN dari harga "
+        "alert-fire lagi -- backtest presisi (1m riil, 5 hari bursa) konfirmasi closing anchor lebih akurat, "
+        "terutama utk ticker yg fade jauh dari harga alert-fire. FADE (drift closing vs alert-fire <=-5%) hanya "
+        "dapat TP1 moderat, TIDAK ada TP2 -- backtest 0% tembus di atas 7-8% dari closing utk grup itu. "
+        "Sampel per tier masih kecil (11-42), treat sbg directional."
     )
     return "\n\n".join(lines)
 

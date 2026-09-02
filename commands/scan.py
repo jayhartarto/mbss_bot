@@ -2391,11 +2391,16 @@ async def bsjp_screening_command(update, context):
     import engine.scanalert as scanalert_engine  # import lokal -- hindari circular import di level modul
 
     # MBSS v2 (user request 2026-09-02): /bsjp tp -- panduan jual pre-open
-    # esok pagi (TP1/TP2 dari entry ASLI Fase 2 hari bursa terakhir), TIDAK
-    # dibatasi jendela 09:00-16:00 spt scan Fase 1 di bawah -- justru
-    # dipakai MALAM hari yg sama atau PAGI besok SEBELUM market buka.
+    # esok pagi (TP1/TP2 dari CLOSING hari alert, lihat catatan lengkap di
+    # atas build_bsjp_tp_plan_message), TIDAK dibatasi jendela 09:00-16:00
+    # spt scan Fase 1 di bawah -- justru dipakai MALAM hari yg sama atau
+    # PAGI besok SEBELUM market buka. Sekarang fetch closing LIVE (blocking
+    # I/O) -- wrap _fetch_with_timeout spt fetch BSJP lain di file ini.
     if context.args and context.args[0].lower() == "tp":
-        msg = scanalert_engine.build_bsjp_tp_plan_message()
+        msg = await scanalert_engine._fetch_with_timeout(
+            scanalert_engine.build_bsjp_tp_plan_message, timeout=60,
+            default="⚠️ Gagal ambil harga closing (timeout/Yahoo error) -- coba lagi.",
+        )
         await core.safe_reply(update.message, msg)
         return
 
