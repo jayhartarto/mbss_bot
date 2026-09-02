@@ -1026,17 +1026,38 @@ def _fetch_bsjp_live_bar(tickers: list[str]) -> dict:
     return live
 
 
-def _fetch_bsjp_closing_prices(tickers: list[str], target_date_str: str) -> dict:
+def _fetch_bsjp_closing_prices(picks: list[dict]) -> dict:
     """
-    /bsjp tp (2026-09-02) -- closing HARIAN (bukan harga live/hari ini) utk
-    hari bursa target_date_str ("YYYY-MM-DD"), dipakai sbg anchor TP1/TP2
-    (lihat catatan panjang di atas BSJP_TP_TIERS knp closing, bukan harga
-    alert-fire). List ticker kecil (jumlah pick Fase 2 + WATCH 1 hari, bukan
-    seluruh universe) jadi live fetch di sini murah -- TIDAK perlu di-cache.
-    period="10d" (bukan 5d spt _fetch_bsjp_live_bar) -- /bsjp tp bisa
-    dipanggil BEBERAPA hari setelah target_date_str kalau user telat cek.
+    /bsjp tp -- closing HARIAN (bukan harga live) utk HARI ALERT ASLI tiap
+    pick, dipakai sbg anchor TP1/TP2 (lihat catatan panjang di atas BSJP_
+    TP_TIERS knp closing, bukan harga alert-fire).
+
+    BUGFIX 2026-09-02 (live case: closing yg tampil PERSIS SAMA dgn cut_loss
+    utk ICON/JARR/KKES -- ketahuan krn user bandingkan langsung): versi
+    PERTAMA pakai pick_date sbg tanggal target fetch -- SALAH, pick_date
+    SELALU 1 hari SEBELUM hari alert beneran (get_current_trading_day_close_
+    marker() dipanggil SAAT lock, SEBELUM 16:30 WIB, jadi masih mundur 1
+    hari -- lihat catatan panjang di build_bsjp_tp_plan_message). Fetch
+    "closing pick_date" scr harfiah = fetch closing HARI SEBELUM alert =
+    PERSIS prev_close/cut_loss yg SUDAH tersimpan -- itu sebabnya closing
+    yg tampil identik dgn cut_loss.
+
+    Fix: JANGAN coba rekonstruksi tanggal alert dari pick_date (rapuh
+    lewat weekend/libur -- +1 hari kalender BISA salah kalau alert hari
+    Senin [pick_date jadi Jumat, bukan Minggu]). Sebagai gantinya, cocokkan
+    NILAI cut_loss (prev_close) yg SUDAH tersimpan tiap pick thd baris
+    daily bars -- begitu ketemu baris yg cocok, ambil baris SETELAHNYA
+    (posisi berikutnya di data yfinance, yg SUDAH otomatis skip weekend/
+    libur dgn sendirinya) sbg closing hari alert yg SEBENARNYA. Robust
+    thd off-by-one apa pun penyebabnya, tidak perlu tau exact tanggal.
     """
-    target_date = datetime.datetime.strptime(target_date_str, "%Y-%m-%d").date()
+    tickers = sorted({p["ticker"] for p in picks})
+    cut_loss_by_ticker = {}
+    for p in picks:
+        cl = p.get("cut_loss")
+        if cl:
+            cut_loss_by_ticker[p["ticker"]] = cl  # sama utk semua pick ticker yg sama di hari yg sama
+
     closes = {}
     for i in range(0, len(tickers), _BSJP_FETCH_BATCH):
         batch = tickers[i:i + _BSJP_FETCH_BATCH]
@@ -1044,14 +1065,28 @@ def _fetch_bsjp_closing_prices(tickers: list[str], target_date_str: str) -> dict
         data = yf.download(symbols, period="10d", interval="1d", group_by="ticker", threads=True, progress=False)
         for t in batch:
             sym = t + ".JK"
+            prev_close = cut_loss_by_ticker.get(t)
+            if not prev_close:
+                continue
             try:
                 d = data[sym].dropna(how="all")
             except Exception:
                 continue
-            rows = d[d.index.date == target_date]
-            if rows.empty or pd.isna(rows["Close"].iloc[-1]):
+            if d.empty:
                 continue
-            closes[t] = float(rows["Close"].iloc[-1])
+            close_series = d["Close"]
+            match_idx = None
+            for idx in range(len(close_series) - 1, -1, -1):  # cari dari PALING BARU mundur -- ambil match terdekat
+                val = close_series.iloc[idx]
+                if not pd.isna(val) and abs(val - prev_close) < 0.5:
+                    match_idx = idx
+                    break
+            if match_idx is None or match_idx + 1 >= len(close_series):
+                continue  # prev_close tidak ketemu di window 10 hari, ATAU match adalah baris TERAKHIR (belum ada hari sesudahnya di data)
+            next_close = close_series.iloc[match_idx + 1]
+            if pd.isna(next_close):
+                continue
+            closes[t] = float(next_close)
         if i + _BSJP_FETCH_BATCH < len(tickers):
             time.sleep(0.5)
     return closes
@@ -1451,8 +1486,7 @@ def build_bsjp_tp_plan_message() -> str:
     except Exception:
         pass
 
-    all_tickers = sorted({p["ticker"] for p in picks})
-    closes = _fetch_bsjp_closing_prices(all_tickers, target_date)
+    closes = _fetch_bsjp_closing_prices(picks)
 
     lines = [f"🌅 BSJP TP PLAN — {target_date} ({len(main_picks)} alert utama, {len(watch_picks)} WATCH){staleness_note}\n"]
 
