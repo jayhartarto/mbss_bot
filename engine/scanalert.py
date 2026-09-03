@@ -1533,6 +1533,12 @@ def build_bsjp_tp_plan_message() -> str:
                 continue
             entry, close_px = res
             cut_loss = p.get("cut_loss")
+            # MBSS v2 (user request 2026-09-03, live case SMBR/MDIA: closing
+            # sudah DI BAWAH cut_loss [prev_close] sendiri saat /bsjp tp
+            # ditampilkan -- thesis "buy power" sudah gagal per definisinya
+            # sendiri, TP1 moderat msh tampil seolah setup normal, menyesatkan
+            # sama spt pelajaran KKES). Tag eksplisit, bukan cuma dihitung diam2.
+            invalid_tag = " 🚫INVALID" if (close_px is not None and cut_loss and close_px < cut_loss) else ""
 
             if close_px is None:
                 # Closing belum berhasil di-fetch -- fallback entry-anchor
@@ -1540,7 +1546,7 @@ def build_bsjp_tp_plan_message() -> str:
                 ret1d_at_entry = (p.get("feature_snapshot") or {}).get("ret_1d_pct")
                 tp1_gap, tp1_hit, tp2_gap, tp2_hit = _bsjp_tp_for_ret1d(ret1d_at_entry)
                 line = (
-                    f"{p['ticker']} — entry alert-fire {entry:,.0f} (closing GAGAL di-fetch, pakai entry sbg fallback)\n"
+                    f"{p['ticker']}{invalid_tag} — entry alert-fire {entry:,.0f} (closing GAGAL di-fetch, pakai entry sbg fallback)\n"
                     f"  TP1: {entry * (1 + tp1_gap / 100.0):,.0f} (+{tp1_gap:.1f}%)   TP2: {entry * (1 + tp2_gap / 100.0):,.0f} (+{tp2_gap:.1f}%)"
                 )
             else:
@@ -1549,7 +1555,7 @@ def build_bsjp_tp_plan_message() -> str:
                 if drift <= BSJP_FADE_DRIFT_THRESHOLD_PCT:
                     tp1 = close_px * (1 + BSJP_FADE_TP1_GAP_PCT / 100.0)
                     line = (
-                        f"{p['ticker']} — closing {close_px:,.0f} (entry alert-fire {entry:,.0f}, drift {drift_label} — FADE, "
+                        f"{p['ticker']}{invalid_tag} — closing {close_px:,.0f} (entry alert-fire {entry:,.0f}, drift {drift_label} — FADE, "
                         f"TP2 DIHILANGKAN, backtest 0% tembus >=8% dari closing utk grup ini)\n"
                         f"  TP1 (moderat, ~{BSJP_FADE_TP1_HISTORICAL_HIT_PCT:.0f}% historis touch Day+1): {tp1:,.0f} (+{BSJP_FADE_TP1_GAP_PCT:.1f}%)"
                     )
@@ -1559,7 +1565,7 @@ def build_bsjp_tp_plan_message() -> str:
                     tp1 = close_px * (1 + tp1_gap / 100.0)
                     tp2 = close_px * (1 + tp2_gap / 100.0)
                     line = (
-                        f"{p['ticker']} — closing {close_px:,.0f} (entry alert-fire {entry:,.0f}, drift {drift_label})\n"
+                        f"{p['ticker']}{invalid_tag} — closing {close_px:,.0f} (entry alert-fire {entry:,.0f}, drift {drift_label})\n"
                         f"  TP1 (moderat, ~{tp1_hit:.0f}% historis touch Day+1): {tp1:,.0f} (+{tp1_gap:.1f}%)\n"
                         f"  TP2 (stretch, ~{tp2_hit:.0f}% historis touch Day+1): {tp2:,.0f} (+{tp2_gap:.1f}%)"
                     )
@@ -1577,9 +1583,10 @@ def build_bsjp_tp_plan_message() -> str:
             cut_loss = p.get("cut_loss")
             anchor_px = close_px if close_px is not None else entry
             tp1 = anchor_px * (1 + BSJP_WATCH_TP_GAP_PCT / 100.0)
+            invalid_tag = " 🚫INVALID" if (close_px is not None and cut_loss and close_px < cut_loss) else ""
             close_label = f"closing {close_px:,.0f}" if close_px is not None else f"entry alert-fire {entry:,.0f} (closing gagal di-fetch)"
             line = (
-                f"{p['ticker']} — {close_label}\n"
+                f"{p['ticker']}{invalid_tag} — {close_label}\n"
                 f"  TP (moderat, ~{BSJP_WATCH_TOUCH3_HISTORICAL_PCT:.0f}% historis touch Day+1): {tp1:,.0f} (+{BSJP_WATCH_TP_GAP_PCT:.1f}%)"
             )
             if cut_loss:
