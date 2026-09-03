@@ -2351,6 +2351,10 @@ def lock_daily_daytrade_picks(top_candidates: list, source: str = "screendaytrad
             "is_volume_spike_anomaly": r.get("is_volume_spike_anomaly"),
             "day_range_percentile": bb_info.get("day_range_percentile"),
             "ret_1d_pct": r.get("ret_1d_pct"),
+            # BSJP tier fire-emoji (2026-09-03, engine/scanalert.py
+            # _bsjp_tier) -- None utk source lain, dipakai build_bsjp_tp_
+            # plan_message tampilkan tier di /bsjp tp.
+            "tier": r.get("tier"),
             # Granularitas MACD tambahan (state/cross boolean sudah ada di
             # tempat lain, ini versi lebih detail).
             "macd_hist": r.get("macd_hist"),

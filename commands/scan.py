@@ -2368,13 +2368,15 @@ async def high_conviction_command(update, context):
 async def bsjp_screening_command(update, context):
     """
     /bsjp -- FASE 1 unified BSJP: scan SELURUH universe ISSI thd 4 kriteria
-    wajib (AND, lihat engine/scanalert.py utk detail & sumber angka):
-      1. ret_1d > 18%
-      2. Volume hari ini > 1.5x volume kemarin
-      3. High hari ini < 1.01x harga sekarang ("clean close")
-      4. Volume hari ini > 1.0x rata-rata volume 200 hari
+    wajib (AND, REDESIGN 2026-09-03, lihat engine/scanalert.py utk detail &
+    sumber angka lengkap -- BSJP_SHORTLIST_RET1D_MIN_PCT dkk):
+      1. ret_1d > 12%
+      2. Volume hari ini > 3x volume kemarin (pace-adjusted, lihat TOTAL_DAY_BARS)
+      3. High hari ini < 1.15x harga sekarang ("clean close", wide net)
+      4. Volume hari ini > 3x rata-rata volume 200 hari (pace-adjusted)
     Simpan yg lolos sbg shortlist (dipakai FASE 2 -- recheck live otomatis
-    tiap 5 menit 09:30-15:50 WIB, lihat run_bsjp_recheck_job).
+    tiap 5 menit 09:30-15:50 WIB, ret_1d>12% & vol>4x & clean_close<1.025,
+    lihat run_bsjp_recheck_job).
 
     MBSS v2 (user request 2026-08-31 -- "harusnya tetap bisa di running
     ketika istirahat, kan hanya untuk jaring kandidat awal?"): jendela
