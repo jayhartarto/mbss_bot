@@ -146,6 +146,37 @@ async def _fetch_with_timeout(fn, *args, timeout: float = JOB_FETCH_TIMEOUT_SEC,
         print(f"⚠️ Timeout {timeout:.0f}s: {fn.__name__}({arg_hint}) -- skip siklus ini, coba lagi siklus berikutnya.")
         return default
 
+
+# MBSS v2 (bugfix 2026-09-03, live case: "Scan-alert job gagal: can't start
+# new thread" -- root cause DITEMUKAN saat investigasi bareng user: 5 job
+# berbeda [run_gap_rebound_scan_once 60s, run_scan_alert_once 180s,
+# run_bsjp_shortlist_scan_auto 900s, run_bsjp_recheck_once 300s SEJAK
+# BSJP_RECHECK_INTERVAL_SEC dipercepat 2026-09-02, run_conviction_sweep_once
+# 900s] SEMUA bikin telegram.Bot(token=...) BARU tiap siklus, TIDAK PERNAH
+# di-shutdown/close -- python-telegram-bot v20+ bikin httpx.AsyncClient baru
+# di dalamnya tiap instantiate, jadi resource (thread/koneksi) numpuk pelan2
+# selama proses jalan lama, akhirnya OS menolak bikin thread baru. User
+# eksplisit TOLAK opsi "perlambat interval job" (itu cuma menunda, BUKAN
+# memperbaiki, DAN py biaya nyata -- run_gap_rebound_scan_once perlu cek
+# SERING dlm jendela sempit 09:00-09:10 utk nangkap rebound cepat) -- minta
+# perbaikan akar: SATU Bot instance di-cache & DIPAKAI ULANG lintas SEMUA
+# job, bukan dibikin baru tiap siklus. TIDAK pakai context.bot (JobQueue
+# punya itu) krn fungsi2 ini SENGAJA bisa dipanggil manual DI LUAR job
+# context juga (mis. /bsjp) -- caching module-level ini TETAP self-contained
+# tanpa perlu context, cuma menghindari re-instantiate.
+_shared_telegram_bot = None
+
+
+def _get_shared_bot():
+    """Satu telegram.Bot instance di-cache utk seumur proses (bukan re-create
+    tiap job cycle) -- lihat catatan panjang di atas soal insiden 2026-09-03."""
+    global _shared_telegram_bot
+    if _shared_telegram_bot is None and core.TELEGRAM_BOT_TOKEN:
+        import telegram
+        _shared_telegram_bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
+    return _shared_telegram_bot
+
+
 # MBSS v2 (user request 2026-08-27 -- audit backtest 1m riil 27 hari bursa):
 # Alert A (rolling 3-bar spike) & Alert B (pullback-rebound) TERBUKTI edge-nya
 # nyaris 0 sbg sinyal actionable -- confirm-then-notify di berbagai delay/
@@ -571,10 +602,7 @@ async def run_gap_rebound_scan_once() -> dict:
     data = await _fetch_with_timeout(_fetch_today_1m, ticker_list, default=pd.DataFrame())
 
     tickers_state = state.setdefault("tickers", {})
-    bot = None
-    if core.TELEGRAM_BOT_TOKEN:
-        import telegram
-        bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
+    bot = _get_shared_bot()
 
     for t in ticker_list:
         ref = daily_ref.get(t)
@@ -1322,10 +1350,7 @@ async def run_bsjp_shortlist_scan_auto() -> dict:
 
     new_tickers = sorted({c["ticker"] for c in passed} - shortlist_before)
     if new_tickers:
-        bot = None
-        if core.TELEGRAM_BOT_TOKEN:
-            import telegram
-            bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
+        bot = _get_shared_bot()
         passed_by_ticker = {c["ticker"]: c for c in passed}
         for t in new_tickers:
             msg = _build_bsjp_shortlist_new_message(t, passed_by_ticker[t])
@@ -1361,10 +1386,7 @@ async def run_bsjp_recheck_once() -> dict:
         return {"checked": 0, "alerted": 0}
 
     snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, shortlist, default={})
-    bot = None
-    if core.TELEGRAM_BOT_TOKEN:
-        import telegram
-        bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
+    bot = _get_shared_bot()
 
     n_alerted = 0
     n_watch_alerted = 0
@@ -2806,10 +2828,7 @@ async def run_scan_alert_once() -> dict:
     data = await _fetch_with_timeout(_fetch_today_1m, full_ticker_set, default=pd.DataFrame())
 
     tickers_state = state.setdefault("tickers", {})
-    bot = None
-    if core.TELEGRAM_BOT_TOKEN:
-        import telegram
-        bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
+    bot = _get_shared_bot()
 
     for t in full_ticker_set:
         ref = daily_ref.get(t)
@@ -3240,10 +3259,7 @@ async def run_conviction_sweep_once() -> dict:
 
     data = await _fetch_with_timeout(_fetch_today_1m, list(universe.keys()), default=pd.DataFrame())
     tickers_state = state.setdefault("tickers", {})
-    bot = None
-    if core.TELEGRAM_BOT_TOKEN:
-        import telegram
-        bot = telegram.Bot(token=core.TELEGRAM_BOT_TOKEN)
+    bot = _get_shared_bot()
 
     for t, info in universe.items():
         tag = info["tag"]
