@@ -1347,7 +1347,7 @@ async def run_bsjp_shortlist_scan_auto() -> dict:
     shortlist SEBELUM scan ini dimulai) -- bukan re-broadcast seluruh
     shortlist tiap 15 menit (spam).
     """
-    summary = {"skipped_reason": None, "scanned": 0, "new_shortlist": 0}
+    summary = {"skipped_reason": None, "scanned": 0, "new_shortlist": 0, "instant_phase2": 0}
     now_wib = datetime.datetime.now(core.WIB)
     if now_wib.weekday() >= 5:
         summary["skipped_reason"] = "weekend"
@@ -1378,17 +1378,65 @@ async def run_bsjp_shortlist_scan_auto() -> dict:
 
     new_tickers = sorted({c["ticker"] for c in passed} - shortlist_before)
     if new_tickers:
+        # MBSS v2 (user request 2026-09-04, live case TRUK/UANG -- kejar
+        # entry ARA-bound berarti masuk secepat mungkin, bukan nunggu siklus
+        # Fase2 berikutnya [s.d 5 menit lagi]): snapshot Fase1 SUDAH punya
+        # SEMUA field yg dibutuhkan _check_bsjp_criteria (ret_1d_pct,
+        # vol_vs_X_fair, high_so_far/current_price) -- cek Fase2 LANGSUNG di
+        # snapshot yg SAMA, ZERO fetch tambahan. Kalau ticker BARU masuk
+        # shortlist TERNYATA juga sudah lolos Fase2 saat itu juga, kirim
+        # alert Fase2 PENUH (dgn tier) LANGSUNG drpd cuma pesan shortlist
+        # biasa -- shortlist message "BUKAN alert entry" jadi TIDAK relevan
+        # lagi utk kasus ini, redundant kalau dikirim berdua.
         bot = _get_shared_bot()
         passed_by_ticker = {c["ticker"]: c for c in passed}
+        state = _load_bsjp_state()
+        alerted_list = state.setdefault("alerted", [])
+        tier_map = state.setdefault("tier", {})
+        already_alerted = set(alerted_list)
+        fired = []
+        state_dirty = False
         for t in new_tickers:
-            msg = _build_bsjp_shortlist_new_message(t, passed_by_ticker[t])
+            snap = passed_by_ticker[t]
+            if t not in already_alerted and _check_bsjp_criteria(
+                snap, ret1d_min=BSJP_RECHECK_RET1D_MIN_PCT, vol_mult=BSJP_RECHECK_VOL_MULT,
+                clean_close_mult=BSJP_CLEAN_CLOSE_MULT,
+            ):
+                tier = _bsjp_tier(snap)
+                msg = _build_bsjp_message(t, snap, tier)
+                if bot is not None:
+                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                else:
+                    print(f"[NO TELEGRAM TOKEN] {msg}")
+                alerted_list.append(t)
+                tier_map[t] = tier
+                state_dirty = True
+                fired.append({
+                    "ticker": t, "current_price": snap["current_price"],
+                    "ret_1d_pct": snap["ret_1d_pct"], "tier": tier,
+                    "targets": {"tp_1": snap["current_price"] * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0), "cut_loss": snap["prev_close"]},
+                })
+                summary["new_shortlist"] += 1
+                summary["instant_phase2"] = summary.get("instant_phase2", 0) + 1
+                continue
+
+            msg = _build_bsjp_shortlist_new_message(t, snap)
             if bot is not None:
                 await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
             else:
                 print(f"[NO TELEGRAM TOKEN] {msg}")
             summary["new_shortlist"] += 1
 
-    print(f"✅ BSJP shortlist scan (auto): {summary['scanned']} ticker discan, {summary['new_shortlist']} baru masuk shortlist.")
+        if state_dirty:
+            _save_bsjp_state(state)
+        if fired:
+            try:
+                await asyncio.to_thread(core.lock_daily_daytrade_picks, fired, "bsjp")
+            except Exception as e:
+                print(f"⚠️ Gagal mengunci picks BSJP (instant Fase2) untuk /winrate: {e}")
+
+    print(f"✅ BSJP shortlist scan (auto): {summary['scanned']} ticker discan, {summary['new_shortlist']} baru masuk shortlist "
+          f"({summary.get('instant_phase2', 0)} langsung lolos Fase2 juga).")
     return summary
 
 
