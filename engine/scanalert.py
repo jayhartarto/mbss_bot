@@ -1388,7 +1388,7 @@ async def run_bsjp_shortlist_scan_auto() -> dict:
     # yg sudah shortlisted TAPI belum alerted, dibandingkan ke last_ret1d
     # tersimpan, lalu last_ret1d SELALU di-update ke nilai skrg (baseline
     # SEGAR utk siklus berikutnya) terlepas naik/tidak.
-    still_shortlisted = (set(passed_by_ticker) & shortlist_before) - new_tickers
+    still_shortlisted = (set(passed_by_ticker) & shortlist_before) - set(new_tickers)
     if new_tickers or still_shortlisted:
         # MBSS v2 (user request 2026-09-04, live case TRUK/UANG -- kejar
         # entry ARA-bound berarti masuk secepat mungkin, bukan nunggu siklus
