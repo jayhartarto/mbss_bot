@@ -1311,11 +1311,13 @@ async def run_bsjp_shortlist_scan(tickers: list[str]) -> list[dict]:
             "alerted": [],
             "faded": [],  # 2026-09-03 -- ticker yg SUDAH alerted lalu gagal gate FADING, TIDAK dicek lagi hari itu
             "tier": {},  # 2026-09-03 -- {ticker: tier_terakhir} utk deteksi UPGRADE tier
+            "last_ret1d": {},  # 2026-09-04 -- {ticker: ret_1d checkpoint TERAKHIR} utk "BSJP MENGUAT"
         }
     state["shortlist"] = sorted(set(state.get("shortlist", [])) | {c["ticker"] for c in passed})
     state.setdefault("alerted", [])
     state.setdefault("faded", [])
     state.setdefault("tier", {})
+    state.setdefault("last_ret1d", {})
     _save_bsjp_state(state)
     return passed
 
@@ -1377,7 +1379,17 @@ async def run_bsjp_shortlist_scan_auto() -> dict:
     summary["scanned"] = len(universe)
 
     new_tickers = sorted({c["ticker"] for c in passed} - shortlist_before)
-    if new_tickers:
+    passed_by_ticker = {c["ticker"]: c for c in passed}
+    # MBSS v2 (user request 2026-09-04, "BSJP MENGUAT" -- backtest: kandidat
+    # yg ret_1d MASIH naik antar 2 checkpoint Fase1 pertama py touch10 Day+1
+    # ~2x drpd yg sudah plateau [~50% vs ~28%, n=53, sampel kecil treat sbg
+    # directional]): fire TIAP siklus (BUKAN sekali) selama masih naik
+    # drpd checkpoint SEBELUMNYA (bukan drpd checkpoint pertama) -- ticker
+    # yg sudah shortlisted TAPI belum alerted, dibandingkan ke last_ret1d
+    # tersimpan, lalu last_ret1d SELALU di-update ke nilai skrg (baseline
+    # SEGAR utk siklus berikutnya) terlepas naik/tidak.
+    still_shortlisted = (set(passed_by_ticker) & shortlist_before) - new_tickers
+    if new_tickers or still_shortlisted:
         # MBSS v2 (user request 2026-09-04, live case TRUK/UANG -- kejar
         # entry ARA-bound berarti masuk secepat mungkin, bukan nunggu siklus
         # Fase2 berikutnya [s.d 5 menit lagi]): snapshot Fase1 SUDAH punya
@@ -1389,10 +1401,10 @@ async def run_bsjp_shortlist_scan_auto() -> dict:
         # biasa -- shortlist message "BUKAN alert entry" jadi TIDAK relevan
         # lagi utk kasus ini, redundant kalau dikirim berdua.
         bot = _get_shared_bot()
-        passed_by_ticker = {c["ticker"]: c for c in passed}
         state = _load_bsjp_state()
         alerted_list = state.setdefault("alerted", [])
         tier_map = state.setdefault("tier", {})
+        last_ret1d = state.setdefault("last_ret1d", {})
         already_alerted = set(alerted_list)
         fired = []
         state_dirty = False
@@ -1426,6 +1438,29 @@ async def run_bsjp_shortlist_scan_auto() -> dict:
             else:
                 print(f"[NO TELEGRAM TOKEN] {msg}")
             summary["new_shortlist"] += 1
+            last_ret1d[t] = snap["ret_1d_pct"]
+            state_dirty = True
+
+        for t in still_shortlisted:
+            if t in already_alerted:
+                continue  # sudah lulus ke Fase2 -- continuous monitoring (run_bsjp_recheck_once) yg ambil alih
+            snap = passed_by_ticker[t]
+            prev_ret1d = last_ret1d.get(t)
+            current_ret1d = snap["ret_1d_pct"]
+            if prev_ret1d is not None and current_ret1d > prev_ret1d:
+                msg = (
+                    f"BSJP MENGUAT\n"
+                    f"🚀 {t} masih naik — ret_1d {prev_ret1d:.1f}% → {current_ret1d:.1f}% (checkpoint sebelumnya)\n"
+                    f"Harga sekarang: {snap['current_price']:,.0f}\n"
+                    f"⚠️ Masih di Fase 1, belum lolos Fase2."
+                )
+                if bot is not None:
+                    await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
+                else:
+                    print(f"[NO TELEGRAM TOKEN] {msg}")
+                summary["menguat"] = summary.get("menguat", 0) + 1
+            last_ret1d[t] = current_ret1d
+            state_dirty = True
 
         if state_dirty:
             _save_bsjp_state(state)
@@ -1436,7 +1471,7 @@ async def run_bsjp_shortlist_scan_auto() -> dict:
                 print(f"⚠️ Gagal mengunci picks BSJP (instant Fase2) untuk /winrate: {e}")
 
     print(f"✅ BSJP shortlist scan (auto): {summary['scanned']} ticker discan, {summary['new_shortlist']} baru masuk shortlist "
-          f"({summary.get('instant_phase2', 0)} langsung lolos Fase2 juga).")
+          f"({summary.get('instant_phase2', 0)} langsung lolos Fase2 juga, {summary.get('menguat', 0)} MENGUAT).")
     return summary
 
 
