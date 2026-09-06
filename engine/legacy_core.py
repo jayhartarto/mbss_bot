@@ -7588,6 +7588,72 @@ async def run_bsjp_shortlist_scan_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ BSJP shortlist scan (auto) job gagal: {e}")
 
 
+async def run_entry_pagi_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH (MBSS v2, user request 2026-09-06 -- lane
+    ENTRY PAGI baru, engine/scanalert.py run_entry_pagi_scan_once): fire
+    SEKALI/hari di jendela 09:05-09:20 WIB (guard `fired` internal di state
+    entry_pagi_state.json -- state file TERPISAH dari semua lane lain).
+    Try/except sendiri spt job lain di file ini -- JobQueue TIDAK lewat
+    global_error_handler, exception di sini kalau tak ditangkap akan diam2
+    menghentikan job berulang ini tanpa pemberitahuan. Isolasi ini SENGAJA
+    ketat (user request eksplisit: "implementasi dengan hati2, jangan
+    sampai script error di besok pagi, yang menyebabkan gagal scan entry
+    pagi") -- kalaupun lane ini error, job lain (scan-alert/BSJP/dst) TIDAK
+    ikut terganggu.
+    """
+    try:
+        await scanalert_engine.run_entry_pagi_scan_once()
+    except Exception as e:
+        print(f"⚠️ Entry Pagi scan job gagal: {e}")
+
+
+async def run_entry_pagi_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH -- monitor D1 ENTRY PAGI (avg-down/TP/SL,
+    edit-in-place), engine/scanalert.py run_entry_pagi_monitor_once.
+    """
+    try:
+        await scanalert_engine.run_entry_pagi_monitor_once()
+    except Exception as e:
+        print(f"⚠️ Entry Pagi monitor job gagal: {e}")
+
+
+async def run_entry_pagi_d2_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH -- lanjutan D+2 ENTRY PAGI (trailing exit),
+    engine/scanalert.py run_entry_pagi_d2_once.
+    """
+    try:
+        await scanalert_engine.run_entry_pagi_d2_once()
+    except Exception as e:
+        print(f"⚠️ Entry Pagi D+2 job gagal: {e}")
+
+
+async def run_bsjp_pyramid_validation_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH -- ENTRY SORE Sequential Tier1-3 @ 15:00
+    (full redesign, user request 2026-09-06), engine/scanalert.py
+    run_bsjp_pyramid_validation_once. State file SENDIRI (bsjp_pyramid_
+    state.json) -- TIDAK menyentuh mekanisme Fase2 live yg sudah ada.
+    """
+    try:
+        await scanalert_engine.run_bsjp_pyramid_validation_once()
+    except Exception as e:
+        print(f"⚠️ Entry Sore pyramid validation job gagal: {e}")
+
+
+async def run_bsjp_pyramid_d1_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH -- ENTRY SORE D+1 exit (avg-down tier2/3,
+    TP/SL per tier), engine/scanalert.py run_bsjp_pyramid_d1_once.
+    """
+    try:
+        await scanalert_engine.run_bsjp_pyramid_d1_once()
+    except Exception as e:
+        print(f"⚠️ Entry Sore pyramid D+1 job gagal: {e}")
+
+
 async def send_startup_notice(app: Application):
     """Sent once automatically when the bot process starts — the person's cue that
     it's alive, and the one place the disclaimer appears instead of every message."""
@@ -7762,6 +7828,30 @@ def build_app():
             interval=scanalert_engine.BSJP_SHORTLIST_SCAN_INTERVAL_SEC,
             first=460,  # offset ~setengah interval dari conviction_sweep (900s, first=100) -- hindari tabrakan tiap siklus
         )
+        # MBSS v2 (user request 2026-09-06 -- lane ENTRY PAGI baru, lihat
+        # blok panjang "ENTRY PAGI" di engine/scanalert.py utk mekanisme
+        # lengkap): TIGA job TERPISAH, semua interval=180s (sama cadence dgn
+        # run_scanalert_job di atas -- cukup rapat utk jendela sempit
+        # 09:05-09:20 & monitoring TP/SL intraday) TAPI first= sengaja BEDA
+        # (70/95/115, semuanya != 10 mod 180) supaya TIDAK selalu align pas
+        # detik yg sama dgn run_scanalert_job tiap siklus. Ketiganya no-op
+        # murah di luar jendela masing2 (guard di dalam fungsi
+        # run_entry_pagi_*_once) -- aman didaftarkan rapat sepanjang hari
+        # spt job lain di atas. State file (entry_pagi_state.json) & toggle
+        # (ENTRY_PAGI_ENABLED) TERPISAH SEPENUHNYA dari lane lain.
+        app.job_queue.run_repeating(run_entry_pagi_scan_job, interval=180, first=70)
+        app.job_queue.run_repeating(run_entry_pagi_monitor_job, interval=180, first=95)
+        app.job_queue.run_repeating(run_entry_pagi_d2_job, interval=180, first=115)
+        # MBSS v2 (user request 2026-09-06 -- ENTRY SORE full redesign, lihat
+        # blok "ENTRY SORE -- Sequential Tier1-3" di engine/scanalert.py):
+        # DUA job TERPISAH LAGI, DI ATAS mekanisme Fase2 live yg sudah ada
+        # (run_bsjp_recheck_job dkk, TIDAK diubah). Validation job fire
+        # sekali/hari (guard internal) jendela sempit 15:00-15:15 -- interval
+        # 180s cukup rapat. D1 job (monitor avg-down/TP/SL D+1) interval 180s
+        # jg, sepanjang jendela D+1 09:00-15:49. first= (140/160) beda dari
+        # job lain di atas.
+        app.job_queue.run_repeating(run_bsjp_pyramid_validation_job, interval=180, first=140)
+        app.job_queue.run_repeating(run_bsjp_pyramid_d1_job, interval=180, first=160)
     else:
         print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
               "scan-alert intraday TIDAK akan jalan otomatis. Install dgn: "

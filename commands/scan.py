@@ -53,6 +53,7 @@ import engine.scoring as scoring_engine
 import engine.market as market_engine
 import engine.backbone as backbone_engine
 import engine.lane_confidence as lane_confidence
+import engine.scanalert as scanalert_engine
 import engine.swing_horizon_confidence as swing_horizon_confidence
 import engine.daytrade_hc_confidence as daytrade_hc_confidence
 
@@ -348,7 +349,32 @@ async def all_setup_candidates_command(update, context):
                 line += f" | {STATIC_WR.get(lane_name, '')}"
             lines.append(line)
 
-    all_tickers = [r["ticker"] for cands in lanes.values() for r in cands]
+    # MBSS v2 (user request 2026-09-06 -- safety-net ENTRY PAGI): tampilkan
+    # top-20 kandidat yg SUDAH lolos filter RSI(Wilder)>=65 & MACD histogram
+    # (SMA produksi)>0 -- REUSE persis threshold & field yg dipakai lane
+    # ENTRY PAGI (engine/scanalert.py run_entry_pagi_scan_once), TANPA
+    # opening-range (belum ada pra-bursa) -- fallback MANUAL kalau scan
+    # otomatis 09:05 gagal/error. Backtest: RSI>=65/MACD>0 -> n=39
+    # (3.25/hari), median D1=6.00%, win=84.6% (lihat memory
+    # reference_bpjs_bsjp_external_strategy_doc.md).
+    entry_pagi_pool = [
+        r for r in all_values
+        if r.get("rsi") is not None and r.get("macd_hist") is not None
+        and r["rsi"] >= scanalert_engine.ENTRY_PAGI_RSI_MIN and r["macd_hist"] > scanalert_engine.ENTRY_PAGI_MACD_MIN
+    ]
+    entry_pagi_top20 = sorted(entry_pagi_pool, key=lambda r: r["macd_hist"], reverse=True)[:20]
+    lines.append(f"\n🌅 ENTRY PAGI pre-filter ({len(entry_pagi_pool)} lolos RSI>=65 & MACD>0, top 20 by MACD)")
+    if not entry_pagi_top20:
+        lines.append("  (kosong)")
+    else:
+        for r in entry_pagi_top20:
+            lines.append(f"  {r['ticker']} | RSI {r['rsi']:.0f} | MACD {r['macd_hist']:.2f}")
+        lines.append(
+            "  ⚠️ Ini kandidat PRE-filter (D-1 close), BELUM lewat ranking opening-range 09:00-09:05 "
+            "-- fallback manual kalau scan otomatis ENTRY PAGI 09:05 gagal, bukan pengganti alert asli."
+        )
+
+    all_tickers = [r["ticker"] for cands in lanes.values() for r in cands] + [r["ticker"] for r in entry_pagi_top20]
     buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
 
@@ -2399,6 +2425,15 @@ async def bsjp_screening_command(update, context):
     # PAGI besok SEBELUM market buka. Sekarang fetch closing LIVE (blocking
     # I/O) -- wrap _fetch_with_timeout spt fetch BSJP lain di file ini.
     if context.args and context.args[0].lower() == "tp":
+        # MBSS v2 (user request 2026-09-06 -- ENTRY SORE full redesign):
+        # prioritaskan pesan pyramid LIVE (avg-down/TP/SL dari validasi
+        # 15:00) kalau sudah ada posisi -- fallback ke pesan closing lama
+        # (build_bsjp_tp_plan_message) kalau belum ada posisi pyramid sama
+        # sekali (mis. belum ada ticker yg lolos validasi 15:00 hari itu).
+        pyramid_msg = scanalert_engine.build_bsjp_pyramid_tp_message()
+        if pyramid_msg is not None:
+            await core.safe_reply(update.message, pyramid_msg)
+            return
         msg = await scanalert_engine._fetch_with_timeout(
             scanalert_engine.build_bsjp_tp_plan_message, timeout=60,
             default="⚠️ Gagal ambil harga closing (timeout/Yahoo error) -- coba lagi.",
@@ -3244,6 +3279,28 @@ async def consensus_command(update, context):
             if sym in hc_selected: also_in.append("HC")
             also_str = f" | Juga di: {', '.join(also_in)}" if also_in else ""
             lines.append(f"• {sym} — Multibagger {c.get('multibagger_score', '-')}/100, {c.get('potential_return', '-')} ({c.get('timeframe', '-')}){also_str}")
+
+    # === ENTRY PAGI ∩ HC/allsetup (MBSS v2, user request 2026-09-06) ===
+    # Irisan kandidat ENTRY PAGI hari ini (top-10 opening-range + RSI>=65/
+    # MACD>0, engine/scanalert.py run_entry_pagi_scan_once) dgn HC/SDT --
+    # PROXY "allsetup" pakai sdt_selected (union lane MACD yg SAMA dgn
+    # /allsetup's 9-lane pool, REUSE drpd re-derive semua lane di sini).
+    # entry_pagi_state.json HANYA terisi kalau job 09:05 sudah fire hari
+    # ini (butuh data opening-range live) -- kosong/none kalau /consensus
+    # dipanggil malam hari sebelum sesi 1 besok, itu WAJAR bukan error.
+    entry_pagi_state = scanalert_engine.load_entry_pagi_state_for_consensus()
+    entry_pagi_tickers = set(entry_pagi_state.get("tickers") or [])
+    if entry_pagi_tickers:
+        entry_pagi_cross = sorted(entry_pagi_tickers & (hc_selected | sdt_selected))
+        lines.append(f"\n🌅 ENTRY PAGI ∩ HC/allsetup — {len(entry_pagi_cross)} saham (dari {len(entry_pagi_tickers)} kandidat Entry Pagi hari ini)")
+        if entry_pagi_cross:
+            for t in entry_pagi_cross:
+                tags = []
+                if t in hc_selected: tags.append("HC")
+                if t in sdt_selected: tags.append("SDT/allsetup")
+                lines.append(f"• {t} — juga lolos: {', '.join(tags)}")
+        else:
+            lines.append("Tidak ada irisan hari ini.")
 
     lines.append("\nDetail lengkap & konfirmasi live: /check TICKER")
     if staleness_note:

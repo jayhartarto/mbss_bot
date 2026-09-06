@@ -853,7 +853,7 @@ BSJP_RECHECK_WINDOW_END = datetime.time(15, 50)
 # (first=100/900s) di interval BARU ini -- gcd(300,900)=300, (250-460) &
 # (250-100) SAMA SEKALI TIDAK habis dibagi 300, jadi TIDAK PERNAH align.
 BSJP_RECHECK_INTERVAL_SEC = 300  # 5 menit
-BSJP_SHORTLIST_SCAN_WINDOW_START = datetime.time(9, 0)  # Fase 1 otomatis -- mulai buka, BUKAN nunggu akhir sesi 1
+BSJP_SHORTLIST_SCAN_WINDOW_START = datetime.time(11, 0)  # MBSS v2 (user request 2026-09-06): 09:00->11:00, "biar gak noisy" -- kandidat BARU Fase1 cukup mulai siang, carryover kemarin (shortlist dari yesterday_alerted) TETAP dicek Fase2 dari BSJP_RECHECK_WINDOW_START (09:30) spt biasa, TIDAK ikut mundur
 BSJP_SHORTLIST_SCAN_INTERVAL_SEC = 900  # 15 menit -- Fase 1 TETAP, lihat catatan BSJP_RECHECK_INTERVAL_SEC knp Fase 2 dipercepat sendiri
 BSJP_MIN_HISTORY_DAYS = 260  # >200 hari (MA200) + buffer hari libur/data hilang
 
@@ -1423,6 +1423,7 @@ async def run_bsjp_shortlist_scan_auto() -> dict:
                 alerted_list.append(t)
                 tier_map[t] = tier
                 state_dirty = True
+                _record_bsjp_pyramid_entry(t, snap)
                 fired.append({
                     "ticker": t, "current_price": snap["current_price"],
                     "ret_1d_pct": snap["ret_1d_pct"], "tier": tier,
@@ -1584,6 +1585,7 @@ async def run_bsjp_recheck_once() -> dict:
             alerted_list.append(t)
             tier_map[t] = tier
             n_alerted += 1
+            _record_bsjp_pyramid_entry(t, snap)
             # MBSS v2 (user request -- lock HANYA saat alert BENERAN fire, bukan
             # di shortlist Fase 1 yg belum tentu konfirmasi): cut_loss pakai
             # prev_close (thesis "buy power" gagal kalau balik ke bawah closing
@@ -1606,6 +1608,502 @@ async def run_bsjp_recheck_once() -> dict:
         except Exception as e:
             print(f"⚠️ Gagal mengunci picks BSJP untuk /winrate: {e}")
     return {"checked": len(to_check), "alerted": n_alerted, "faded": n_faded, "upgraded": n_upgraded}
+
+
+# ═══════════════════ ENTRY SORE — Sequential Tier1-3 @ 15:00 + D+1 exit ═══════════════════
+# MBSS v2 (user request 2026-09-06, full redesign confirmed setelah user
+# eksplisit pilih "full redesign" atas pertanyaan konfirmasi cakupan):
+# lapisan BARU di ATAS mekanisme Fase2 live yg SUDAH ADA (alert real-time +
+# gate FADING + UPGRADE tier, run_bsjp_recheck_once di atas -- TIDAK
+# disentuh/diganti sama sekali, tetap jalan persis spt sebelumnya). Lapisan
+# ini MENAMBAHKAN klasifikasi "trajektori sejak entry Fase2" di titik
+# keputusan 15:00 WIB (riset session 2026-09-04/05, terkunci di memory
+# project_bsjp_sequential_pyramid_tier1_4_2026_09_04.md):
+#
+#   TIER1 "masih menguat kuat" : delta_ret1d>0 DAN delta_vvm>0 (keduanya naik
+#                                  sejak entry Fase2)
+#   TIER2 "masih menguat (ret1d)": delta_ret1d>0 SENDIRIAN
+#   TIER3 "masih menguat (vol)"  : delta_vvm>0 SENDIRIAN
+#   rest (TIDAK dialert)         : keduanya turun -- user request eksplisit
+#                                  "cukup tier 1-3 saja" (Tier4/rest DIHAPUS
+#                                  dari desain asli, TERMASUK mekanisme
+#                                  filler Fase1-only-never-Fase2 -- tidak
+#                                  dibangun sama sekali). Backtest 18-hari:
+#                                  "rest" TETAP positive-EV (+5.70%/80.3%
+#                                  win) tapi terlemah -- gate FADING yg
+#                                  SUDAH ADA (live) tetap jadi safety net
+#                                  utknya, bukan mekanisme baru ini.
+#
+# Backtest 18-hari (n lebih besar, MENGGANTIKAN angka 8-hari yg overstated):
+# TIER1 +12.0%/69.2% win, TIER2/3 +8.3%/78.8% win.
+#
+# State file TERPISAH LAGI (bsjp_pyramid_state.json, BUKAN bsjp_shortlist_
+# state.json) -- SENGAJA, krn bsjp_shortlist_state.json di-reset TIAP HARI
+# (run_bsjp_shortlist_scan, trading_day_marker mismatch -> state baru),
+# padahal posisi D+1 exit (avg-down/TP/SL) lapisan ini HARUS bertahan
+# lintas hari (dari 15:00 hari alert s.d closing D+1). Baseline entry
+# Fase2 (dicatat _record_bsjp_pyramid_entry, dipanggil dari KEDUA titik
+# alert-fire di atas) & posisi aktif SEMUA hidup di file terpisah ini.
+BSJP_PYRAMID_DECISION_TIME = datetime.time(15, 0)
+BSJP_PYRAMID_WINDOW_END = datetime.time(15, 15)  # toleransi kalau job telat fire dari 15:00 persis
+BSJP_ARA_TOLERANCE_PCT = 0.5  # ret_1d dlm 0.5pp dari ceiling ARA dianggap "kena ARA"
+BSJP_ARA_NEAR_HIGH_PCT = 0.5  # current_price dlm 0.5% dari high_so_far hari itu
+
+# Avg-down 3-tier (external doc's mechanic, riset 2026-09-05: lift win rate
+# +15 s.d +21pp vs tanpa avg-down) -- tier2/tier3 checked HANYA dari D+1
+# 09:00 (BUKAN sore yg sama), sesuai disiplin "beli sore, kelola besok".
+BSJP_D1_TIER2_DIP_PCT = -2.0
+BSJP_D1_TIER3_DIP_PCT = -5.0
+BSJP_D1_SPLIT = (0.4, 0.3, 0.3)  # tier1(15:00)/tier2(-2%)/tier3(-5%) porsi modal
+
+BSJP_D1_TIER1_TP_PCT = 12.0
+BSJP_D1_TIER1_SL_PCT = 6.0
+
+BSJP_D1_TIER23_TP_S1_PCT = 12.0        # flat, Sesi 1 D+1 (09:00-11:59)
+BSJP_D1_TIER23_TP_S2_START_PCT = 6.0   # decay linear -> floor, Sesi 2 D+1 (13:30-15:49)
+BSJP_D1_TIER23_TP_S2_FLOOR_PCT = 2.0
+BSJP_D1_TIER23_SL_S1_PCT = 8.0         # flat, Sesi 1
+BSJP_D1_TIER23_SL_S2_FLOOR_PCT = 2.0   # decay linear 8%->2%, Sesi 2
+
+BSJP_D1_SESSION1_START = datetime.time(9, 0)
+BSJP_D1_SESSION1_END = datetime.time(11, 59, 59)
+BSJP_D1_SESSION2_START = datetime.time(13, 30)
+BSJP_D1_SESSION2_END = datetime.time(15, 49)
+
+STATE_FILE_BSJP_PYRAMID = os.path.join(core.PROJECT_ROOT, "bsjp_pyramid_state.json")
+
+
+def _load_bsjp_pyramid_state() -> dict:
+    if not os.path.exists(STATE_FILE_BSJP_PYRAMID):
+        return {}
+    try:
+        with open(STATE_FILE_BSJP_PYRAMID) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_bsjp_pyramid_state(state: dict):
+    with open(STATE_FILE_BSJP_PYRAMID, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def _record_bsjp_pyramid_entry(ticker: str, snap: dict):
+    """
+    Simpan baseline Fase2-entry (ret_1d/vol_vs_ma200_fair/harga) SEKALI
+    saat alert Fase2 PERTAMA fire -- dipakai run_bsjp_pyramid_validation_
+    once utk hitung delta di titik keputusan 15:00. Dipanggil dari KEDUA
+    titik alert-fire (run_bsjp_shortlist_scan_auto's instant-Fase2 path &
+    run_bsjp_recheck_once's path normal) -- try/except sendiri, KEGAGALAN
+    DI SINI TIDAK BOLEH mengganggu alert Fase2 asli yg SUDAH terkirim.
+    """
+    try:
+        state = _load_bsjp_pyramid_state()
+        entries = state.setdefault("entries", {})
+        entries[ticker] = {
+            "date": _today_str(), "entry_ret1d": snap.get("ret_1d_pct"),
+            "entry_vvm": snap.get("vol_vs_ma200_fair"), "entry_price": snap.get("current_price"),
+        }
+        _save_bsjp_pyramid_state(state)
+    except Exception as e:
+        print(f"⚠️ Entry Sore: gagal simpan baseline pyramid utk {ticker}: {e}")
+
+
+def _bsjp_ara_ceiling_pct(prev_close: float) -> float:
+    """Band auto-reject-atas IDX (external doc, lebih presisi drpd heuristik plateau)."""
+    if prev_close < 200:
+        return 35.0
+    if prev_close < 5000:
+        return 25.0
+    return 20.0
+
+
+def _bsjp_is_ara_locked(snap: dict) -> bool:
+    """
+    ARA-lock exclusion (memory: "ticker sudah beku di ceiling ARA saat/
+    sebelum titik keputusan -- untradeable, tidak ada likuiditas di harga
+    itu"). Pakai band ARA riil IDX (bukan heuristik plateau 1m yg butuh
+    data granular yg tak tersedia di sumber data BSJP) -- ret_1d SUDAH
+    dekat ceiling band DAN harga sekarang dekat high hari ini.
+    """
+    prev_close = snap.get("prev_close")
+    current_price = snap.get("current_price")
+    high_so_far = snap.get("high_so_far")
+    ret_1d = snap.get("ret_1d_pct")
+    if not prev_close or not current_price or not high_so_far or ret_1d is None:
+        return False
+    ceiling = _bsjp_ara_ceiling_pct(prev_close)
+    near_ceiling = ret_1d >= ceiling - BSJP_ARA_TOLERANCE_PCT
+    near_high = current_price >= high_so_far * (1 - BSJP_ARA_NEAR_HIGH_PCT / 100.0)
+    return near_ceiling and near_high
+
+
+def _bsjp_pyramid_tier(entry: dict, snap: dict) -> str | None:
+    """
+    Return 'TIER1'/'TIER2'/'TIER3', atau None ('rest' -- TIDAK dialert,
+    lihat catatan panjang di atas blok ENTRY SORE knp Tier4/rest dihapus).
+    """
+    entry_ret1d, entry_vvm = entry.get("entry_ret1d"), entry.get("entry_vvm")
+    current_ret1d, current_vvm = snap.get("ret_1d_pct"), snap.get("vol_vs_ma200_fair")
+    if None in (entry_ret1d, entry_vvm, current_ret1d, current_vvm):
+        return None
+    delta_ret1d = current_ret1d - entry_ret1d
+    delta_vvm = current_vvm - entry_vvm
+    if delta_ret1d > 0 and delta_vvm > 0:
+        return "TIER1"
+    if delta_ret1d > 0:
+        return "TIER2"
+    if delta_vvm > 0:
+        return "TIER3"
+    return None
+
+
+_BSJP_TIER_LABEL = {
+    "TIER1": "masih menguat kuat (ret_1d & volume dua-duanya naik sejak entry)",
+    "TIER2": "masih menguat (ret_1d naik, volume melandai sejak entry)",
+    "TIER3": "masih menguat (volume naik, ret_1d melandai sejak entry)",
+}
+
+
+def _bsjp_d1_tp_sl_for_tier1(avg_cost: float) -> tuple[float, float]:
+    return avg_cost * (1 + BSJP_D1_TIER1_TP_PCT / 100.0), avg_cost * (1 - BSJP_D1_TIER1_SL_PCT / 100.0)
+
+
+def _bsjp_d1_decay_pct(now_time: datetime.time, start_pct: float, floor_pct: float) -> float:
+    """
+    Sesi 1 D+1 (09:00-11:59): FLAT start_pct. Sesi 2 D+1 (13:30-15:49):
+    decay LINEAR start_pct->floor_pct. Di luar kedua sesi (istirahat siang
+    11:59-13:30): masih flat start_pct (belum masuk sesi 2). Dipakai utk
+    TIER2/3 TP (start=12,floor=2) & SL (start=8,floor=2) -- riset 2026-
+    09-05: decay LEBIH BAIK drpd hybrid/lompatan tunggal.
+    """
+    if now_time < BSJP_D1_SESSION2_START:
+        return start_pct
+    total_s2 = (
+        datetime.datetime.combine(datetime.date.today(), BSJP_D1_SESSION2_END)
+        - datetime.datetime.combine(datetime.date.today(), BSJP_D1_SESSION2_START)
+    ).total_seconds()
+    elapsed = (
+        datetime.datetime.combine(datetime.date.today(), min(now_time, BSJP_D1_SESSION2_END))
+        - datetime.datetime.combine(datetime.date.today(), BSJP_D1_SESSION2_START)
+    ).total_seconds()
+    frac = max(0.0, min(1.0, elapsed / total_s2)) if total_s2 > 0 else 1.0
+    return start_pct - (start_pct - floor_pct) * frac
+
+
+def _bsjp_d1_tp_sl_for_tier23(avg_cost: float, now_time: datetime.time) -> tuple[float, float]:
+    # TP Sesi2 decay dari 6% (BUKAN dari 12% flat Sesi1) -- lihat konstanta TP_S2_START_PCT.
+    if now_time >= BSJP_D1_SESSION2_START:
+        tp_pct = _bsjp_d1_decay_pct(now_time, BSJP_D1_TIER23_TP_S2_START_PCT, BSJP_D1_TIER23_TP_S2_FLOOR_PCT)
+    else:
+        tp_pct = BSJP_D1_TIER23_TP_S1_PCT
+    sl_pct = _bsjp_d1_decay_pct(now_time, BSJP_D1_TIER23_SL_S1_PCT, BSJP_D1_TIER23_SL_S2_FLOOR_PCT)
+    return avg_cost * (1 + tp_pct / 100.0), avg_cost * (1 - sl_pct / 100.0)
+
+
+def _render_bsjp_pyramid_message(positions: list[dict]) -> str:
+    """Satu pesan per hari alert, di-edit-in-place sepanjang D+1 (avg-down/TP/SL/masuk sesi 2)."""
+    header = (
+        "ENTRY SORE\n"
+        "Posisi lolos validasi 15:00 -- avg down maks 2x besok (tier2 -2%, tier3 -5%)\n"
+        "TIER1: TP+12%/SL-6% tetap sepanjang D+1\n"
+        "TIER2/3: TP & SL menurun dari sesi 1 ke sesi 2 D+1"
+    )
+    marker = {
+        "OPEN": "⏳ Menunggu D+1",
+        "SESSION2": "🔄 Masuk Sesi 2",
+        "TP": "✅ TP TERCAPAI",
+        "SL": "✅ SL KENA",
+        "FORCE_EXIT": "🔚 FORCE EXIT (closing D+1)",
+    }
+    blocks = []
+    for i, p in enumerate(positions, start=1):
+        avgdown_note = ""
+        if p.get("filled_tier3"):
+            avgdown_note = " (avg down tier2+tier3 TERISI)"
+        elif p.get("filled_tier2"):
+            avgdown_note = " (avg down tier2 TERISI)"
+        if p["status"] == "SESSION2":
+            blocks.append(
+                f"TICK {i}\n{p['ticker']} — {p['tier']}\n"
+                f"🔄 Masuk Sesi 2\nTP : {p['tp']:,.0f} | SL : {p['sl']:,.0f}"
+            )
+        else:
+            blocks.append(
+                f"TICK {i}\n"
+                f"{p['ticker']} — {p['tier']} ({_BSJP_TIER_LABEL.get(p['tier'], '')})\n"
+                f"Harga keputusan (15:00): {p['decision_price']:,.0f}\n"
+                f"TP : {p['tp']:,.0f}\n"
+                f"SL : {p['sl']:,.0f}\n"
+                f"{marker.get(p['status'], p['status'])}{avgdown_note}"
+            )
+    return header + "\n\n" + "\n\n".join(blocks)
+
+
+async def _bsjp_pyramid_send_new_message(text: str) -> int | None:
+    bot = _get_shared_bot()
+    if bot is None:
+        print(f"[NO TELEGRAM TOKEN] {text}")
+        return None
+    for attempt in range(2):
+        try:
+            sent = await bot.send_message(chat_id=core.TELEGRAM_CHAT_ID, text=text)
+            return sent.message_id
+        except Exception as e:
+            print(f"⚠️ Entry Sore pyramid: gagal kirim pesan awal (attempt {attempt + 1}): {e}")
+            if attempt == 0:
+                await asyncio.sleep(3)
+    return None
+
+
+async def _bsjp_pyramid_edit_message(state: dict):
+    if not state.get("message_id"):
+        return
+    bot = _get_shared_bot()
+    if bot is None:
+        return
+    try:
+        await bot.edit_message_text(
+            chat_id=state.get("chat_id", core.TELEGRAM_CHAT_ID), message_id=state["message_id"],
+            text=_render_bsjp_pyramid_message(list(state["positions"].values())),
+        )
+    except Exception as e:
+        print(f"⚠️ Entry Sore pyramid: gagal edit pesan: {e}")
+
+
+async def run_bsjp_pyramid_validation_once() -> dict:
+    """
+    Fire SEKALI/hari (guard `validation_fired_date`) di jendela 15:00-15:15
+    WIB: utk tiap ticker yg alerted hari ini (bsjp_shortlist_state.json,
+    BELUM faded) DAN py baseline entry Fase2 tercatat hari ini
+    (bsjp_pyramid_state.json), hitung delta trajektori & klasifikasi
+    TIER1/2/3 (rest TIDAK dialert). ARA-lock exclusion diterapkan SEBELUM
+    klasifikasi. Hasil disimpan sbg posisi AKTIF utk run_bsjp_pyramid_d1_
+    once besok.
+    """
+    summary = {"skipped_reason": None, "positions": 0}
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (BSJP_PYRAMID_DECISION_TIME <= now_wib.time() <= BSJP_PYRAMID_WINDOW_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+    if await asyncio.to_thread(core.is_idx_market_holiday_today):
+        summary["skipped_reason"] = "holiday"
+        return summary
+    if not is_scan_alert_enabled():
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+
+    today = _today_str()
+    pyramid_state = _load_bsjp_pyramid_state()
+    if pyramid_state.get("validation_fired_date") == today:
+        summary["skipped_reason"] = "already_fired_today"
+        return summary
+
+    bsjp_state = _load_bsjp_state()
+    if bsjp_state.get("trading_day_marker") != today:
+        summary["skipped_reason"] = "no_bsjp_today"
+        return summary
+    alerted = set(bsjp_state.get("alerted", [])) - set(bsjp_state.get("faded", []))
+    entries = pyramid_state.get("entries", {})
+    candidates = [t for t in alerted if entries.get(t, {}).get("date") == today]
+    if not candidates:
+        pyramid_state["validation_fired_date"] = today
+        _save_bsjp_pyramid_state(pyramid_state)
+        summary["skipped_reason"] = "no_candidates"
+        return summary
+
+    snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, candidates, timeout=150, default={})
+    positions = pyramid_state.setdefault("positions", {})
+    new_positions = []
+    for t in candidates:
+        snap = snapshot.get(t)
+        if not snap:
+            continue
+        if _bsjp_is_ara_locked(snap):
+            continue  # untradeable -- exclude sepenuhnya, TIDAK dialert
+        tier = _bsjp_pyramid_tier(entries[t], snap)
+        if tier is None:
+            continue  # 'rest' -- TIDAK dialert (gate FADING yg sudah ada tetap jadi safety net)
+        decision_price = snap["current_price"]
+        positions[t] = {
+            "ticker": t, "tier": tier, "decision_date": today, "decision_price": decision_price,
+            "avg_cost": decision_price, "filled_tier2": False, "filled_tier3": False,
+            "status": "OPEN",
+            "tp": (_bsjp_d1_tp_sl_for_tier1(decision_price)[0] if tier == "TIER1"
+                   else _bsjp_d1_tp_sl_for_tier23(decision_price, BSJP_D1_SESSION1_START)[0]),
+            "sl": (_bsjp_d1_tp_sl_for_tier1(decision_price)[1] if tier == "TIER1"
+                   else _bsjp_d1_tp_sl_for_tier23(decision_price, BSJP_D1_SESSION1_START)[1]),
+        }
+        new_positions.append(positions[t])
+
+    pyramid_state["validation_fired_date"] = today
+    if new_positions:
+        message_id = await _bsjp_pyramid_send_new_message(_render_bsjp_pyramid_message(new_positions))
+        pyramid_state["message_id"] = message_id
+        pyramid_state["chat_id"] = core.TELEGRAM_CHAT_ID
+    _save_bsjp_pyramid_state(pyramid_state)
+    summary["positions"] = len(new_positions)
+    print(f"✅ Entry Sore pyramid validation selesai: {len(candidates)} dicek, {len(new_positions)} posisi TIER1-3 dibuka.")
+    return summary
+
+
+async def run_bsjp_pyramid_d1_once() -> dict:
+    """
+    Monitor D+1 posisi TIER1-3 dari run_bsjp_pyramid_validation_once: cek
+    avg-down tier2(-2%)/tier3(-5%) dari decision_price (HANYA mulai D+1
+    09:00 -- BUKAN sore yg sama), lalu TP/SL sesuai tier (TIER1 statis,
+    TIER2/3 decay). Edit pesan HARI ALERT in-place selama masih hari yg
+    sama runtime-nya sesuai tanggal decision_date (pesan TERSIMPAN dari
+    hari alert -- TIDAK butuh pesan baru krn masih pesan yg sama dilanjut).
+    """
+    summary = {"skipped_reason": None, "updated": 0}
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (BSJP_D1_SESSION1_START <= now_wib.time() <= BSJP_D1_SESSION2_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+    if await asyncio.to_thread(core.is_idx_market_holiday_today):
+        summary["skipped_reason"] = "holiday"
+        return summary
+
+    pyramid_state = _load_bsjp_pyramid_state()
+    positions = pyramid_state.get("positions") or {}
+    today = _today_str()
+    open_positions = [
+        p for p in positions.values()
+        if p["status"] in ("OPEN", "SESSION2") and p["decision_date"] != today  # D+1 = HARUS beda hari dari decision
+    ]
+    if not open_positions:
+        summary["skipped_reason"] = "no_open_positions"
+        return summary
+
+    # BUGFIX (ditemukan sebelum deploy, 2026-09-06): _fetch_bsjp_universe_
+    # snapshot HANYA punya "high_so_far" (dari yf.download daily bar hari
+    # berjalan), TIDAK ADA low_so_far sama sekali -- tidak bisa dipakai
+    # deteksi avg-down/SL yg butuh LOW. Pakai _fetch_today_1m (bar 1m,
+    # SAMA pola dgn ENTRY PAGI) supaya dapat High/Low intrabar riil.
+    tickers = [p["ticker"] for p in open_positions]
+    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+    if data is None or (hasattr(data, "empty") and data.empty):
+        summary["skipped_reason"] = "no_intraday_data"
+        return summary
+
+    dirty = False
+    now_time = now_wib.time()
+    in_session2 = now_time >= BSJP_D1_SESSION2_START
+    force_exit = now_time >= BSJP_D1_SESSION2_END
+    for p in open_positions:
+        sym = p["ticker"] + ".JK"
+        try:
+            bars = data[sym].dropna(how="all").sort_index()
+        except Exception:
+            continue
+        if bars.empty:
+            continue
+        try:
+            day_high = float(bars["High"].astype(float).max())
+            day_low = float(bars["Low"].astype(float).min())
+            current_price = float(bars["Close"].astype(float).iloc[-1])
+        except Exception:
+            continue
+
+        tier2_price = p["decision_price"] * (1 + BSJP_D1_TIER2_DIP_PCT / 100.0)
+        tier3_price = p["decision_price"] * (1 + BSJP_D1_TIER3_DIP_PCT / 100.0)
+        t1, t2, t3 = BSJP_D1_SPLIT
+        if not p["filled_tier2"] and day_low is not None and day_low <= tier2_price:
+            p["filled_tier2"] = True
+            p["avg_cost"] = p["decision_price"] * t1 + tier2_price * t2
+            p["avg_cost"] /= (t1 + t2)
+            dirty = True
+        if p["filled_tier2"] and not p["filled_tier3"] and day_low is not None and day_low <= tier3_price:
+            p["filled_tier3"] = True
+            weighted = p["decision_price"] * t1 + tier2_price * t2 + tier3_price * t3
+            p["avg_cost"] = weighted / (t1 + t2 + t3)
+            dirty = True
+
+        if p["tier"] == "TIER1":
+            tp, sl = _bsjp_d1_tp_sl_for_tier1(p["avg_cost"])
+        else:
+            tp, sl = _bsjp_d1_tp_sl_for_tier23(p["avg_cost"], now_time)
+        if p["tp"] != tp or p["sl"] != sl:
+            p["tp"], p["sl"] = tp, sl
+            dirty = True
+
+        if p["status"] == "OPEN" and in_session2:
+            p["status"] = "SESSION2"
+            dirty = True
+
+        if day_high is not None and day_high >= p["tp"]:
+            p["status"] = "TP"
+            dirty = True
+        elif day_low is not None and day_low <= p["sl"]:
+            p["status"] = "SL"
+            dirty = True
+        elif force_exit:
+            p["status"] = "FORCE_EXIT"
+            dirty = True
+
+    if dirty:
+        summary["updated"] = sum(1 for p in open_positions if p["status"] not in ("OPEN",))
+        await _bsjp_pyramid_edit_message(pyramid_state)
+        _save_bsjp_pyramid_state(pyramid_state)
+    return summary
+
+
+def build_bsjp_pyramid_tp_message() -> str | None:
+    """
+    /bsjp tp (VERSI BARU, MBSS v2 2026-09-06 -- ENTRY SORE full redesign):
+    render dari bsjp_pyramid_state.json (posisi TIER1-3 hasil validasi
+    15:00), grouped by tier, avg-down/TP/SL LIVE (avg_cost-based, ikut
+    naik-turun sesuai fill avg-down & decay sesi -- BUKAN lagi static
+    historical-hit-rate dari closing spt build_bsjp_tp_plan_message lama).
+    Return None kalau BELUM ADA posisi pyramid sama sekali (belum pernah
+    lolos validasi 15:00) -- caller fallback ke pesan closing lama.
+    """
+    state = _load_bsjp_pyramid_state()
+    positions = list((state.get("positions") or {}).values())
+    if not positions:
+        return None
+
+    by_tier = {"TIER1": [], "TIER2": [], "TIER3": []}
+    done = []
+    for p in positions:
+        if p["status"] in ("TP", "SL", "FORCE_EXIT"):
+            done.append(p)
+        elif p["tier"] in by_tier:
+            by_tier[p["tier"]].append(p)
+
+    marker_done = {"TP": "✅ TP TERCAPAI", "SL": "✅ SL KENA", "FORCE_EXIT": "🔚 FORCE EXIT (closing D+1)"}
+    lines = ["ENTRY SORE — /bsjp tp (posisi live pasca-validasi 15:00)"]
+    any_open = False
+    for tier_name in ("TIER1", "TIER2", "TIER3"):
+        cands = by_tier[tier_name]
+        if not cands:
+            continue
+        any_open = True
+        lines.append(f"\n{tier_name}")
+        for p in cands:
+            avgdown_note = (
+                " (avg down tier2+tier3 TERISI)" if p.get("filled_tier3")
+                else " (avg down tier2 TERISI)" if p.get("filled_tier2") else ""
+            )
+            status_note = "🔄 Masuk Sesi 2" if p["status"] == "SESSION2" else "⏳ Menunggu"
+            lines.append(
+                f"  {p['ticker']} — keputusan {p['decision_price']:,.0f}, avg cost {p['avg_cost']:,.0f}{avgdown_note}\n"
+                f"    TP : {p['tp']:,.0f} | SL : {p['sl']:,.0f} | {status_note}"
+            )
+    if done:
+        lines.append("\n✅ SELESAI")
+        for p in done:
+            lines.append(f"  {p['ticker']} ({p['tier']}) — {marker_done.get(p['status'], p['status'])}, avg cost {p['avg_cost']:,.0f}")
+    if not any_open and not done:
+        return None
+    return "\n".join(lines)
 
 
 def build_bsjp_tp_plan_message() -> str:
@@ -3450,4 +3948,519 @@ async def run_conviction_sweep_once() -> dict:
     _save_conviction_state(state)
     print(f"✅ Conviction-sweep selesai: {summary['scanned']} ticker dicek, "
           f"{summary['tier_alerts_sent']} tier alert, {summary['pullback_exception_sent']} pullback-exception.")
+
+
+# ═══════════════════════════ ENTRY PAGI ═══════════════════════════
+# MBSS v2 (user request 2026-09-06, malam -- riset research/rsi_macd_filter_
+# backtest.py, section3_production_backtest): lane BARU, TERPISAH SEPENUHNYA
+# dari Alert A/B/gap/conviction-sweep/BSJP (state file sendiri, toggle
+# sendiri, try/except sendiri di tiap job) -- filosofi persis sama dgn
+# alasan run_scan_alert_job's docstring knp tiap job JobQueue butuh
+# try/except sendiri (exception di sini TIDAK lewat global_error_handler,
+# akan diam2 menghentikan job berulang tanpa pemberitahuan kalau tak
+# ditangkap).
+#
+# MEKANISME (dikunci setelah banyak ronde backtest, lihat memory
+# reference_bpjs_bsjp_external_strategy_doc.md utk riwayat lengkap):
+# 1) 09:00-09:05 WIB = jendela opening-range. Composite ranking top-10
+#    SELURUH universe (scan cache nightly) berdasar 3 fitur opening-range
+#    (entry_pos_in_or, dist_from_prior_high_pct, or_range_pct -- masing2
+#    di-rank lalu dijumlah, skor TERENDAH menang), dgn filter likuiditas
+#    (top-half by D-1 value_traded). TIDAK ada exclude band "safe-pool" --
+#    riset menemukan itu redundant dgn filter trend RSI/MACD di bawah.
+# 2) Dari top-10 itu, filter FINAL: RSI(Wilder,14)>=65 & MACD histogram
+#    (SMA, formula PRODUKSI/"Brights") >0, keduanya field `rsi`/`macd_hist`
+#    yg SUDAH dihitung nightly (compute_factor_scoring) -- REUSE, bukan
+#    pipeline indikator baru. Formula PRODUKSI dipilih drpd formula EMA/
+#    rolling-RSI yg dipakai riset asli krn performa SEBANDING (bahkan
+#    D1-win lebih besar) DAN reuse field existing -- lihat memory di atas
+#    utk perbandingan A/B lengkap.
+# 3) Entry LANGSUNG di harga alert (entry_ref = close bar terakhir jendela
+#    OR) -- BUKAN tunggu dip (temuan penting sesi ini: asumsi awal
+#    "tunggu dip" TERNYATA tidak match mekanisme riset asli yg justru
+#    entry immediate).
+# 4) Avg-down SEKALI di -3% dari entry (50/50 split) -- avg_cost jadi
+#    rata2 entry & avg_down_price kalau tersentuh.
+# 5) Exit Day-1: TP+6%/SL-6% dari avg_cost, force-carry ke D+2 kalau blm
+#    resolve sampai akhir jam bursa (15:45 WIB, toleransi sblm closing).
+# 6) Exit Day-2 (HANYA utk pick yg carry): trailing target mulai +5%,
+#    decay ke floor +2% (giveback 1% dari peak return tercapai), SL -6%
+#    ttp berlaku, force-exit di AKHIR SESI 1 D+1 (BUKAN lanjut sesi 2 --
+#    riset: subset lemah ini makin memburuk kalau ditahan lebih lama).
+#
+# Backtest (research/rsi_macd_filter_backtest.py section3, RSI>=65/MACD
+# produksi>0): n=39 (3.25/hari, 12 hari bursa), mean=3.34%, median=6.00%,
+# win=84.6%. D1-only: n=21, win=95.2%. D+2 (carryover): n=18, mean=0.91%,
+# median=2.00%, win=72.2%.
+ENTRY_PAGI_ENABLED = True  # feature-toggle terisolasi -- set False kalau perlu mematikan cepat TANPA menyentuh lane lain
+
+ENTRY_PAGI_OR_WINDOW_END = datetime.time(9, 5)  # jendela opening-range: buka s.d. 09:05 WIB
+ENTRY_PAGI_SCAN_WINDOW_START = datetime.time(9, 5)
+ENTRY_PAGI_SCAN_WINDOW_END = datetime.time(9, 20)  # toleransi kalau job pertama kali fire agak telat dari 09:05 persis
+ENTRY_PAGI_MONITOR_WINDOW_START = datetime.time(9, 5)
+ENTRY_PAGI_MONITOR_WINDOW_END = datetime.time(15, 50)
+ENTRY_PAGI_SESSION1_END = datetime.time(11, 59, 59)  # scan kandidat BARU cukup di sesi 1 (user request -- "biar gak noisy"), monitoring TP/SL tetap sepanjang hari
+ENTRY_PAGI_FORCE_EOD_TIME = datetime.time(15, 45)  # dekat closing -- kalau blm resolve, carry ke D+2 drpd ke-skip krn keburu market tutup
+
+ENTRY_PAGI_RSI_MIN = 65.0
+ENTRY_PAGI_MACD_MIN = 0.0
+ENTRY_PAGI_TOP_N = 10
+ENTRY_PAGI_AVGDOWN_PCT = -3.0
+ENTRY_PAGI_D1_TP_PCT = 6.0
+ENTRY_PAGI_D1_SL_PCT = 6.0
+
+ENTRY_PAGI_D2_WINDOW_START = datetime.time(9, 0)
+ENTRY_PAGI_D2_SESSION1_END = datetime.time(11, 59, 59)  # force-exit DI SINI, TIDAK lanjut sesi 2 (riset: lanjut sesi2 memperburuk subset lemah ini)
+ENTRY_PAGI_D2_TP_START_PCT = 5.0
+ENTRY_PAGI_D2_TP_FLOOR_PCT = 2.0
+ENTRY_PAGI_D2_GIVEBACK_PCT = 1.0  # giveback dari peak return tercapai sejak carry
+ENTRY_PAGI_D2_SL_PCT = 6.0
+
+STATE_FILE_ENTRY_PAGI = os.path.join(core.PROJECT_ROOT, "entry_pagi_state.json")
+
+
+def _load_entry_pagi_state() -> dict:
+    if not os.path.exists(STATE_FILE_ENTRY_PAGI):
+        return {}
+    try:
+        with open(STATE_FILE_ENTRY_PAGI) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_entry_pagi_state(state: dict):
+    with open(STATE_FILE_ENTRY_PAGI, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def load_entry_pagi_state_for_consensus() -> dict:
+    """
+    Public helper (MBSS v2, user request 2026-09-06 -- /consensus jadi
+    irisan Entry Pagi dgn HC/allsetup) -- return {"tickers": [...]} kalau
+    scan Entry Pagi SUDAH fire HARI INI (butuh data opening-range live,
+    cuma tersedia stlh 09:05 WIB), else {} (BUKAN error -- wajar kosong
+    kalau /consensus dipanggil sebelum sesi 1 buka atau sblm job 09:05
+    fire). TIDAK expose seluruh state internal (message_id/avg_cost/dst)
+    -- caller cuma butuh daftar ticker.
+    """
+    state = _load_entry_pagi_state()
+    if state.get("trading_day_marker") != _today_str():
+        return {}
+    return {"tickers": [p["ticker"] for p in (state.get("picks") or [])]}
+
+
+def _entry_pagi_opening_range_from_bars(data, tickers: list[str]) -> dict:
+    """
+    Dari DataFrame bar 1m (_fetch_today_1m), hitung or_high/or_low/entry_ref
+    (jendela buka s.d. ENTRY_PAGI_OR_WINDOW_END) per ticker. Ticker tanpa
+    bar di jendela (baru listing/suspend/data kosong) TIDAK masuk dict --
+    bukan exception, cukup dikecualikan dari ranking hari itu.
+    """
+    out = {}
+    if data is None or (hasattr(data, "empty") and data.empty):
+        return out
+    for t in tickers:
+        sym = t + ".JK"
+        try:
+            bars = data[sym].dropna(how="all").sort_index()
+        except Exception:
+            continue
+        if bars.empty:
+            continue
+        win = bars[bars.index.time <= ENTRY_PAGI_OR_WINDOW_END]
+        if win.empty:
+            continue
+        try:
+            or_high = float(win["High"].astype(float).max())
+            or_low = float(win["Low"].astype(float).min())
+            entry_ref = float(win["Close"].astype(float).iloc[-1])
+        except Exception:
+            continue
+        if or_high > 0 and or_low > 0 and entry_ref > 0:
+            out[t] = {"or_high": or_high, "or_low": or_low, "entry_ref": entry_ref}
+    return out
+
+
+def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
+    """
+    Composite ranking (reuse formula research/rsi_macd_filter_backtest.py
+    get_top10): entry_pos_in_or (posisi entry_ref dlm range OR -- makin
+    dekat OR_low makin baik, ini strategi pullback), dist_from_prior_
+    high_pct (makin jauh di bawah high D-1 makin baik), or_range_pct
+    (opening range makin lebar makin baik). Liquidity filter: top-half by
+    D-1 value_traded (proxy `day_vol_avg_prior` riset -- REUSE field yg
+    SUDAH dihitung nightly, TANPA fetch tambahan). Filter FINAL RSI/MACD
+    diterapkan di SINI (setelah top-10, BUKAN sebelum) -- match urutan
+    persis section3_production_backtest.
+    """
+    rows = []
+    for t, snap in or_data.items():
+        info = scored.get(t)
+        if not info:
+            continue
+        prior_high = info.get("intraday_high")  # D-1 day-high (dihitung nightly, dekat closing D-1)
+        value_traded = info.get("value_traded")
+        if not prior_high or prior_high <= 0 or not value_traded:
+            continue
+        or_high, or_low, entry_ref = snap["or_high"], snap["or_low"], snap["entry_ref"]
+        or_range_pct = (or_high - or_low) / or_low * 100 if or_low > 0 else None
+        entry_pos_in_or = (
+            (entry_ref - or_low) / (or_high - or_low) if (or_high - or_low) > 0 else None
+        )
+        if entry_pos_in_or is None or or_range_pct is None:
+            continue
+        dist_from_prior_high_pct = (entry_ref - prior_high) / prior_high * 100
+        rows.append({
+            "ticker": t, "entry_ref": entry_ref, "value_traded": value_traded,
+            "entry_pos_in_or": entry_pos_in_or, "dist_from_prior_high_pct": dist_from_prior_high_pct,
+            "or_range_pct": or_range_pct, "rsi": info.get("rsi"), "macd_hist": info.get("macd_hist"),
+        })
+    if len(rows) < ENTRY_PAGI_TOP_N:
+        return []
+
+    rows_by_vt = sorted(rows, key=lambda r: r["value_traded"])
+    median_vt = rows_by_vt[len(rows_by_vt) // 2]["value_traded"]
+    liquid = [r for r in rows if r["value_traded"] >= median_vt]
+    if len(liquid) < ENTRY_PAGI_TOP_N:
+        liquid = rows
+
+    def _rank_map(seq, key, reverse=False):
+        ordered = sorted(seq, key=key, reverse=reverse)
+        return {r["ticker"]: i for i, r in enumerate(ordered, start=1)}
+
+    r1 = _rank_map(liquid, lambda r: r["entry_pos_in_or"])
+    r2 = _rank_map(liquid, lambda r: r["dist_from_prior_high_pct"])
+    r3 = _rank_map(liquid, lambda r: r["or_range_pct"], reverse=True)
+    for r in liquid:
+        r["score"] = r1[r["ticker"]] + r2[r["ticker"]] + r3[r["ticker"]]
+    liquid.sort(key=lambda r: r["score"])
+    top10 = liquid[:ENTRY_PAGI_TOP_N]
+
+    return [
+        r for r in top10
+        if r["rsi"] is not None and r["macd_hist"] is not None
+        and r["rsi"] >= ENTRY_PAGI_RSI_MIN and r["macd_hist"] > ENTRY_PAGI_MACD_MIN
+    ]
+
+
+def _render_entry_pagi_message(picks: list[dict]) -> str:
+    """
+    Satu pesan yg SAMA di-edit-in-place sepanjang hari (BUKAN pesan baru
+    tiap ada perubahan status) -- render ULANG dari state, dipanggil tiap
+    kali ADA perubahan (avg-down terisi / TP / SL / carry D+2).
+    """
+    header = (
+        "ENTRY PAGI\n"
+        "Beli sekarang, avg down 1x\n"
+        "Jual hari ini di TP\n"
+        "Hold sampai besok jika tidak sampai TP"
+    )
+    marker = {
+        "WAITING": "⏳ Menunggu",
+        "TP": "✅ TP TERCAPAI",
+        "SL": "✅ SL KENA",
+        "CARRY_D2": "🔄 Lanjut D+2 (belum resolve)",
+    }
+    blocks = []
+    for i, p in enumerate(picks, start=1):
+        entry, avg_down = p["entry_price"], p["avg_down_price"]
+        lo, hi = sorted([avg_down, entry])
+        avgdown_note = " (avg down TERISI)" if p.get("filled_avgdown") else ""
+        blocks.append(
+            f"TICK {i}\n"
+            f"{p['ticker']} — {entry:,.0f} (harga alert)\n"
+            f"Entry Range : {lo:,.0f}-{hi:,.0f}\n"
+            f"TP : {p['tp']:,.0f}\n"
+            f"SL : {p['sl']:,.0f}\n"
+            f"{marker.get(p['status'], p['status'])}{avgdown_note}"
+        )
+    return header + "\n\n" + "\n\n".join(blocks)
+
+
+def _render_entry_pagi_d2_message(picks: list[dict]) -> str:
+    """D+1 carryover BUTUH pesan TERPISAH (hari baru) -- bukan edit pesan D1 kemarin."""
+    marker = {
+        "TP_D2": "✅ TP TERCAPAI (trailing)",
+        "SL_D2": "✅ SL KENA",
+        "FORCE_EXIT_D2": "🔚 FORCE EXIT (akhir sesi 1)",
+        "CARRY_D2": "⏳ Menunggu",
+    }
+    lines = ["ENTRY PAGI — Lanjutan D+2 (belum resolve kemarin)"]
+    for p in picks:
+        lines.append(f"{p['ticker']} — avg cost {p['avg_cost']:,.0f} | {marker.get(p['status'], p['status'])}")
+    return "\n".join(lines)
+
+
+async def _entry_pagi_send_new_message(text: str) -> int | None:
+    """Kirim pesan baru, return message_id (utk edit-in-place berikutnya) atau None kalau gagal/tanpa token.
+    Retry ringan (2x) -- ini pesan AWAL yg paling kritis (kandidat hari ini), lebih baik dicoba 2x drpd langsung menyerah."""
+    bot = _get_shared_bot()
+    if bot is None:
+        print(f"[NO TELEGRAM TOKEN] {text}")
+        return None
+    for attempt in range(2):
+        try:
+            sent = await bot.send_message(chat_id=core.TELEGRAM_CHAT_ID, text=text)
+            return sent.message_id
+        except Exception as e:
+            print(f"⚠️ Entry Pagi: gagal kirim pesan awal (attempt {attempt + 1}): {e}")
+            if attempt == 0:
+                await asyncio.sleep(3)
+    return None
+
+
+async def _entry_pagi_edit_message(state: dict):
+    if not state.get("message_id"):
+        return
+    bot = _get_shared_bot()
+    if bot is None:
+        return
+    text = _render_entry_pagi_message(state["picks"])
+    try:
+        await bot.edit_message_text(chat_id=state.get("chat_id", core.TELEGRAM_CHAT_ID), message_id=state["message_id"], text=text)
+    except Exception as e:
+        print(f"⚠️ Entry Pagi: gagal edit pesan: {e}")
+
+
+async def run_entry_pagi_scan_once() -> dict:
+    """
+    Fire SEKALI/hari (guard `fired` di state, BUKAN cron sekali-jalan --
+    aman didaftarkan JobQueue repeating spt lane lain, no-op murah di
+    siklus berikutnya) di jendela 09:05-09:20 WIB. Lihat catatan lengkap
+    mekanisme di atas blok ENTRY PAGI.
+    """
+    summary = {"skipped_reason": None, "picks": 0}
+    if not ENTRY_PAGI_ENABLED:
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (ENTRY_PAGI_SCAN_WINDOW_START <= now_wib.time() <= ENTRY_PAGI_SCAN_WINDOW_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+    if await asyncio.to_thread(core.is_idx_market_holiday_today):
+        summary["skipped_reason"] = "holiday"
+        return summary
+
+    today = _today_str()
+    state = _load_entry_pagi_state()
+    if state.get("trading_day_marker") == today and state.get("fired"):
+        summary["skipped_reason"] = "already_fired_today"
+        return summary
+
+    import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
+    scored = nightly_engine.load_daily_scan_cache()
+    if not scored:
+        summary["skipped_reason"] = "no_cache"
+        return summary
+
+    universe = sorted(scored.keys())
+    data = await _fetch_with_timeout(_fetch_today_1m, universe, default=pd.DataFrame())
+    if data is None or (hasattr(data, "empty") and data.empty):
+        summary["skipped_reason"] = "no_intraday_data"
+        return summary
+
+    or_data = _entry_pagi_opening_range_from_bars(data, universe)
+    picks_raw = _rank_entry_pagi_candidates(scored, or_data)
+
+    picks_state = []
+    for r in picks_raw:
+        entry_price = r["entry_ref"]
+        avg_down_price = entry_price * (1 + ENTRY_PAGI_AVGDOWN_PCT / 100.0)
+        picks_state.append({
+            "ticker": r["ticker"], "entry_price": entry_price, "avg_down_price": avg_down_price,
+            "avg_cost": entry_price, "filled_avgdown": False,
+            "tp": entry_price * (1 + ENTRY_PAGI_D1_TP_PCT / 100.0),
+            "sl": entry_price * (1 - ENTRY_PAGI_D1_SL_PCT / 100.0),
+            "status": "WAITING", "day": "D1", "peak_ret_d2": None,
+        })
+
+    new_state = {
+        "trading_day_marker": today, "fired": True, "message_id": None,
+        "chat_id": core.TELEGRAM_CHAT_ID, "picks": picks_state,
+    }
+    if picks_state:
+        new_state["message_id"] = await _entry_pagi_send_new_message(_render_entry_pagi_message(picks_state))
+    else:
+        print("ℹ️ Entry Pagi: tidak ada kandidat lolos filter RSI/MACD hari ini.")
+
+    _save_entry_pagi_state(new_state)
+    summary["picks"] = len(picks_state)
+    print(f"✅ Entry Pagi scan selesai: {len(universe)} ticker dicek, {len(picks_state)} lolos jadi TICK.")
+    return summary
+
+
+async def run_entry_pagi_monitor_once() -> dict:
+    """
+    Monitor D1 -- cek avg-down (-3%) & TP(+6%)/SL(-6%) dari avg_cost utk
+    pick yg masih WAITING, edit pesan in-place tiap ADA perubahan (bukan
+    kirim pesan baru). Force-carry ke D+2 kalau blm resolve mendekati
+    closing (ENTRY_PAGI_FORCE_EOD_TIME). State SAMA dgn run_entry_pagi_
+    scan_once -- TIDAK overlap krn scan_once cuma jalan sekali (guard
+    `fired`), monitor ini jalan berulang sepanjang jam bursa hari YG SAMA.
+    """
+    summary = {"skipped_reason": None, "updated": 0}
+    if not ENTRY_PAGI_ENABLED:
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (ENTRY_PAGI_MONITOR_WINDOW_START <= now_wib.time() <= ENTRY_PAGI_MONITOR_WINDOW_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+
+    today = _today_str()
+    state = _load_entry_pagi_state()
+    if state.get("trading_day_marker") != today or not state.get("picks"):
+        summary["skipped_reason"] = "no_active_picks"
+        return summary
+
+    open_picks = [p for p in state["picks"] if p["day"] == "D1" and p["status"] == "WAITING"]
+    if not open_picks:
+        summary["skipped_reason"] = "no_open_picks"
+        return summary
+
+    tickers = [p["ticker"] for p in open_picks]
+    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+    if data is None or (hasattr(data, "empty") and data.empty):
+        summary["skipped_reason"] = "no_intraday_data"
+        return summary
+
+    dirty = False
+    force_eod = now_wib.time() >= ENTRY_PAGI_FORCE_EOD_TIME
+    for p in open_picks:
+        sym = p["ticker"] + ".JK"
+        try:
+            bars = data[sym].dropna(how="all").sort_index()
+        except Exception:
+            continue
+        if bars.empty:
+            continue
+        try:
+            day_high = float(bars["High"].astype(float).max())
+            day_low = float(bars["Low"].astype(float).min())
+        except Exception:
+            continue
+
+        # BUGFIX (ditemukan saat unit-test sebelum deploy, 2026-09-06): cek
+        # day_high/day_low (SELURUH bar hari ini sejauh ini), BUKAN cuma
+        # Close bar TERAKHIR -- polling cuma tiap 3 menit, kalau harga
+        # sempat menyentuh avg_down_price/TP/SL lalu bergerak lagi SEBELUM
+        # siklus berikutnya, versi "cuma cek Close terakhir" akan MELEWATKAN
+        # sentuhan itu sama sekali (order limit riil tetap kena di harga
+        # itu, terlepas harga sekarang sudah kemana).
+        if not p["filled_avgdown"] and day_low <= p["avg_down_price"]:
+            p["avg_cost"] = (p["entry_price"] + p["avg_down_price"]) / 2.0
+            p["filled_avgdown"] = True
+            p["tp"] = p["avg_cost"] * (1 + ENTRY_PAGI_D1_TP_PCT / 100.0)
+            p["sl"] = p["avg_cost"] * (1 - ENTRY_PAGI_D1_SL_PCT / 100.0)
+            dirty = True
+
+        if day_high >= p["tp"]:
+            p["status"] = "TP"
+            dirty = True
+        elif day_low <= p["sl"]:
+            p["status"] = "SL"
+            dirty = True
+        elif force_eod:
+            p["status"] = "CARRY_D2"
+            p["day"] = "D2"
+            p["peak_ret_d2"] = 0.0
+            dirty = True
+
+    if dirty:
+        summary["updated"] = sum(1 for p in open_picks if p["status"] != "WAITING")
+        await _entry_pagi_edit_message(state)
+        _save_entry_pagi_state(state)
+    return summary
+
+
+async def run_entry_pagi_d2_once() -> dict:
+    """
+    D+2 -- HANYA utk pick berstatus CARRY_D2 dari hari sebelumnya. Trailing
+    target mulai +5%, decay ke floor +2% (giveback 1% dari peak return
+    tercapai sejak carry), SL -6% ttp berlaku, force-exit di AKHIR SESI 1
+    (BUKAN lanjut sesi 2 -- riset: subset lemah ini makin memburuk kalau
+    ditahan lebih lama). Update dikirim sbg pesan TERPISAH (hari baru),
+    BUKAN edit pesan D1 kemarin.
+    """
+    summary = {"skipped_reason": None, "resolved": 0}
+    if not ENTRY_PAGI_ENABLED:
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (ENTRY_PAGI_D2_WINDOW_START <= now_wib.time() <= ENTRY_PAGI_D2_SESSION1_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+
+    state = _load_entry_pagi_state()
+    picks = state.get("picks") or []
+    open_picks = [p for p in picks if p["day"] == "D2" and p["status"] == "CARRY_D2"]
+    if not open_picks:
+        summary["skipped_reason"] = "no_open_picks"
+        return summary
+
+    tickers = [p["ticker"] for p in open_picks]
+    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+    if data is None or (hasattr(data, "empty") and data.empty):
+        summary["skipped_reason"] = "no_intraday_data"
+        return summary
+
+    dirty = False
+    force_exit = now_wib.time() >= ENTRY_PAGI_D2_SESSION1_END
+    for p in open_picks:
+        sym = p["ticker"] + ".JK"
+        try:
+            bars = data[sym].dropna(how="all").sort_index()
+        except Exception:
+            continue
+        if bars.empty:
+            continue
+        try:
+            day_high = float(bars["High"].astype(float).max())
+            day_low = float(bars["Low"].astype(float).min())
+            current = float(bars["Close"].astype(float).iloc[-1])
+        except Exception:
+            continue
+
+        # Peak dari HIGH sejauh ini (intrabar, bukan cuma Close -- sama alasan
+        # bugfix di run_entry_pagi_monitor_once), tapi keputusan EXIT pakai
+        # harga SEKARANG (current) -- exit riil terjadi di harga saat dicek,
+        # bukan retroaktif di titik low/high yang sudah lewat.
+        peak_ret_from_high = (day_high - p["avg_cost"]) / p["avg_cost"] * 100.0
+        current_ret = (current - p["avg_cost"]) / p["avg_cost"] * 100.0
+        p["peak_ret_d2"] = max(p.get("peak_ret_d2") or 0.0, peak_ret_from_high)
+        trailing_floor = max(ENTRY_PAGI_D2_TP_FLOOR_PCT, p["peak_ret_d2"] - ENTRY_PAGI_D2_GIVEBACK_PCT)
+        sl_price = p["avg_cost"] * (1 - ENTRY_PAGI_D2_SL_PCT / 100.0)
+
+        if day_low <= sl_price:
+            p["status"] = "SL_D2"
+            dirty = True
+        elif p["peak_ret_d2"] >= ENTRY_PAGI_D2_TP_START_PCT and current_ret <= trailing_floor:
+            p["status"] = "TP_D2"
+            dirty = True
+        elif force_exit:
+            p["status"] = "FORCE_EXIT_D2"
+            dirty = True
+
+    if dirty:
+        summary["resolved"] = sum(1 for p in open_picks if p["status"] != "CARRY_D2")
+        bot = _get_shared_bot()
+        if bot is not None:
+            try:
+                await core.safe_reply(bot, _render_entry_pagi_d2_message(open_picks), chat_id=core.TELEGRAM_CHAT_ID)
+            except Exception as e:
+                print(f"⚠️ Entry Pagi D+2: gagal kirim update: {e}")
+        else:
+            print(f"[NO TELEGRAM TOKEN] {_render_entry_pagi_d2_message(open_picks)}")
+        _save_entry_pagi_state(state)
+    return summary
     return summary
