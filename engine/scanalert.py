@@ -1645,7 +1645,7 @@ async def run_bsjp_recheck_once() -> dict:
 # Fase2 (dicatat _record_bsjp_pyramid_entry, dipanggil dari KEDUA titik
 # alert-fire di atas) & posisi aktif SEMUA hidup di file terpisah ini.
 BSJP_PYRAMID_DECISION_TIME = datetime.time(15, 0)
-BSJP_PYRAMID_WINDOW_END = datetime.time(15, 15)  # toleransi kalau job telat fire dari 15:00 persis
+BSJP_PYRAMID_WINDOW_END = datetime.time(15, 30)  # MBSS v2 (user request 2026-09-07): dilebarkan dari 15:15 -- job re-run tiap siklus 3 menit dlm jendela ini, kandidat yg blm resolve terus dicek ulang sampai window tutup
 BSJP_ARA_TOLERANCE_PCT = 0.5  # ret_1d dlm 0.5pp dari ceiling ARA dianggap "kena ARA"
 BSJP_ARA_NEAR_HIGH_PCT = 0.5  # current_price dlm 0.5% dari high_so_far hari itu
 
@@ -1871,15 +1871,26 @@ async def _bsjp_pyramid_edit_message(state: dict):
         print(f"⚠️ Entry Sore pyramid: gagal edit pesan: {e}")
 
 
+BSJP_PYRAMID_FINAL_CALL_BUFFER_MIN = 4  # siklus dlm N menit terakhir jendela dianggap "kesempatan terakhir" -> kirim ringkasan final rest
+
+
 async def run_bsjp_pyramid_validation_once() -> dict:
     """
-    Fire SEKALI/hari (guard `validation_fired_date`) di jendela 15:00-15:15
-    WIB: utk tiap ticker yg alerted hari ini (bsjp_shortlist_state.json,
-    BELUM faded) DAN py baseline entry Fase2 tercatat hari ini
-    (bsjp_pyramid_state.json), hitung delta trajektori & klasifikasi
-    TIER1/2/3 (rest TIDAK dialert). ARA-lock exclusion diterapkan SEBELUM
-    klasifikasi. Hasil disimpan sbg posisi AKTIF utk run_bsjp_pyramid_d1_
-    once besok.
+    MBSS v2 (redesign 2026-09-07, user request -- jendela dilebarkan 15:00-
+    15:15 -> 15:00-15:30 DAN dijalankan BERULANG tiap siklus [bukan sekali
+    lalu kunci total] supaya status pyramid ikut ter-update kalau ada
+    ticker yg tadinya 'rest' lalu momentumnya balik naik dlm jendela itu.
+
+    Per SIKLUS (job ini dipanggil tiap 180s oleh JobQueue, no-op murah di
+    luar jendela): HANYA proses ticker yg BELUM resolve hari ini (belum py
+    posisi Tier1-3 aktif) -- yg sudah resolve TIDAK dicek ulang (posisi
+    sudah dikunci di decision_price saat itu, re-cek ulang akan salah
+    kaprah menimpa decision_price). Begitu ADA yg baru resolve ke Tier1-3,
+    pesan TICK di-update SEKARANG JUGA (bukan nunggu window tutup). Ringkasan
+    "masih rest" utk sisa yg TAK KUNJUNG resolve HANYA dikirim SEKALI, di
+    kesempatan terakhir jendela (BSJP_PYRAMID_FINAL_CALL_BUFFER_MIN menit
+    sblm window tutup) -- supaya TIDAK spam pesan serupa tiap 3 menit
+    selama 30 menit penuh.
     """
     summary = {"skipped_reason": None, "positions": 0}
     now_wib = datetime.datetime.now(core.WIB)
@@ -1898,9 +1909,14 @@ async def run_bsjp_pyramid_validation_once() -> dict:
 
     today = _today_str()
     pyramid_state = _load_bsjp_pyramid_state()
-    if pyramid_state.get("validation_fired_date") == today:
-        summary["skipped_reason"] = "already_fired_today"
-        return summary
+    if pyramid_state.get("validation_date") != today:
+        # Hari baru -- reset tracking siklus (posisi Tier1-3 LAMA di
+        # "positions" dibiarkan apa adanya, itu urusan run_bsjp_pyramid_d1_
+        # once, BUKAN dihapus di sini).
+        pyramid_state["validation_date"] = today
+        pyramid_state["message_id"] = None
+        pyramid_state["chat_id"] = None
+        pyramid_state["final_summary_sent"] = False
 
     bsjp_state = _load_bsjp_state()
     if bsjp_state.get("trading_day_marker") != today:
@@ -1908,28 +1924,40 @@ async def run_bsjp_pyramid_validation_once() -> dict:
         return summary
     alerted = set(bsjp_state.get("alerted", [])) - set(bsjp_state.get("faded", []))
     entries = pyramid_state.get("entries", {})
-    candidates = [t for t in alerted if entries.get(t, {}).get("date") == today]
-    if not candidates:
-        pyramid_state["validation_fired_date"] = today
-        _save_bsjp_pyramid_state(pyramid_state)
+    positions = pyramid_state.setdefault("positions", {})
+    already_resolved_today = {t for t, p in positions.items() if p.get("decision_date") == today}
+    all_candidates_today = [t for t in alerted if entries.get(t, {}).get("date") == today]
+    pending = [t for t in all_candidates_today if t not in already_resolved_today]
+
+    is_final_call = now_wib.time() >= (
+        datetime.datetime.combine(datetime.date.today(), BSJP_PYRAMID_WINDOW_END)
+        - datetime.timedelta(minutes=BSJP_PYRAMID_FINAL_CALL_BUFFER_MIN)
+    ).time()
+
+    if not all_candidates_today:
         summary["skipped_reason"] = "no_candidates"
+        _save_bsjp_pyramid_state(pyramid_state)
+        return summary
+    if not pending:
+        summary["skipped_reason"] = "all_resolved"
+        _save_bsjp_pyramid_state(pyramid_state)
         return summary
 
-    snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, candidates, timeout=150, default={})
-    positions = pyramid_state.setdefault("positions", {})
+    snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, pending, timeout=150, default={})
     new_positions = []
-    excluded = []  # BUGFIX (user report 2026-09-07): dulu dibuang diam2, sekarang dilaporkan
-    for t in candidates:
+    still_pending = []
+    excluded_final = []  # HANYA diisi kalau is_final_call (utk ringkasan penutup)
+    for t in pending:
         snap = snapshot.get(t)
         if not snap:
-            excluded.append((t, "data tidak tersedia"))
+            still_pending.append((t, "data tidak tersedia"))
             continue
         if _bsjp_is_ara_locked(snap):
-            excluded.append((t, "ARA-lock (untradeable)"))
-            continue
+            excluded_final.append((t, "ARA-lock (untradeable)"))
+            continue  # ARA-lock TIDAK akan berubah -> keluarkan dari pending seterusnya
         tier = _bsjp_pyramid_tier(entries[t], snap)
         if tier is None:
-            excluded.append((t, "melandai sejak alert Fase2 (rest)"))
+            still_pending.append((t, "melandai sejak alert Fase2 (rest)"))
             continue
         decision_price = snap["current_price"]
         positions[t] = {
@@ -1943,33 +1971,47 @@ async def run_bsjp_pyramid_validation_once() -> dict:
         }
         new_positions.append(positions[t])
 
-    pyramid_state["validation_fired_date"] = today
-    # BUGFIX (user report 2026-09-07, "mana belum ada validasi tier piramida
-    # sampai sekarang?" -- ICON/HALO alert Fase2 fire, TAPI keduanya rest di
-    # validasi 15:00, function ini DIAM TOTAL, user tidak tahu pengecekan
-    # sudah terjadi. Sekarang SELALU kirim status kalau ada candidates yg
-    # dicek, sama filosofi dgn fix /consensus "0 kandidat" pagi ini): kirim
-    # pesan status walau new_positions kosong, selama ada candidates.
+    # Pesan TICK di-update SEGERA begitu ada yg baru resolve (bukan nunggu
+    # window tutup). PENTING: scope ke posisi HARI INI SAJA (decision_date
+    # == today) -- BUKAN pakai _bsjp_pyramid_edit_message (itu render SEMUA
+    # isi state["positions"], termasuk carryover D+1 dari hari SEBELUMNYA
+    # yg msh OPEN & py message_id TERPISAH milik run_bsjp_pyramid_d1_once
+    # sendiri; kalau dicampur di sini pesan validasi hari ini jadi salah
+    # isi posisi lama).
     if new_positions:
-        message_id = await _bsjp_pyramid_send_new_message(_render_bsjp_pyramid_message(new_positions))
-        pyramid_state["message_id"] = message_id
-        pyramid_state["chat_id"] = core.TELEGRAM_CHAT_ID
-    elif candidates:
-        lines = [f"ENTRY SORE — Validasi 15:00: {len(candidates)} kandidat dicek, 0 lolos ke TIER1-3."]
-        for t, reason in excluded:
-            lines.append(f"  {t} — {reason}")
+        positions_today = [p for t, p in positions.items() if p.get("decision_date") == today]
+        text = _render_bsjp_pyramid_message(positions_today)
         bot = _get_shared_bot()
-        status_msg = "\n".join(lines)
-        if bot is not None:
+        if pyramid_state.get("message_id") and bot is not None:
             try:
-                await core.safe_reply(bot, status_msg, chat_id=core.TELEGRAM_CHAT_ID)
+                await bot.edit_message_text(chat_id=pyramid_state["chat_id"], message_id=pyramid_state["message_id"], text=text)
             except Exception as e:
-                print(f"⚠️ Entry Sore pyramid: gagal kirim status 0-kandidat: {e}")
+                print(f"⚠️ Entry Sore pyramid: gagal edit pesan validasi: {e}")
         else:
-            print(f"[NO TELEGRAM TOKEN] {status_msg}")
+            pyramid_state["message_id"] = await _bsjp_pyramid_send_new_message(text)
+            pyramid_state["chat_id"] = core.TELEGRAM_CHAT_ID
+
+    # Ringkasan "masih rest" -- HANYA sekali, di kesempatan terakhir jendela.
+    if is_final_call and not pyramid_state.get("final_summary_sent"):
+        never_resolved = still_pending + excluded_final
+        if never_resolved:
+            lines = [f"ENTRY SORE — Validasi 15:00-15:30 selesai: {len(never_resolved)} kandidat TIDAK PERNAH lolos ke TIER1-3."]
+            for t, reason in never_resolved:
+                lines.append(f"  {t} — {reason}")
+            bot = _get_shared_bot()
+            status_msg = "\n".join(lines)
+            if bot is not None:
+                try:
+                    await core.safe_reply(bot, status_msg, chat_id=core.TELEGRAM_CHAT_ID)
+                except Exception as e:
+                    print(f"⚠️ Entry Sore pyramid: gagal kirim ringkasan final: {e}")
+            else:
+                print(f"[NO TELEGRAM TOKEN] {status_msg}")
+        pyramid_state["final_summary_sent"] = True
+
     _save_bsjp_pyramid_state(pyramid_state)
     summary["positions"] = len(new_positions)
-    print(f"✅ Entry Sore pyramid validation selesai: {len(candidates)} dicek, {len(new_positions)} posisi TIER1-3 dibuka.")
+    print(f"✅ Entry Sore pyramid validation (siklus): {len(pending)} pending dicek, {len(new_positions)} baru resolve ke TIER1-3.")
     return summary
 
 
