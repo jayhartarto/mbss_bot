@@ -7777,22 +7777,27 @@ def build_app():
     # perilaku job manapun (guard hari-bursa/jam-bursa/cache tetap sama),
     # cuma jam MULAI pertama & rhythm periodiknya.
     if app.job_queue is not None:
-        app.job_queue.run_repeating(run_scanalert_job, interval=180, first=10)
-        # MBSS v2 (user request 2026-08-27 -- Alert REBOUND, engine/
-        # scanalert.py run_gap_rebound_scan_once): job TERPISAH, interval
-        # jauh lebih rapat (60s) krn median waktu fire = menit ke-0 sejak
-        # open (riset backtest 1m). Aman rapat sepanjang hari -- fungsinya
-        # sendiri no-op murah di luar jendela 09:00-09:10 WIB. TANPA job
-        # ini, REBOUND TIDAK PERNAH jalan otomatis (ditemukan dari log
-        # produksi: scan-alert utama JALAN via JobQueue in-process ini,
-        # BUKAN cron eksternal spt sempat diasumsikan saat REBOUND dibangun
-        # dgn CLI --scanalert-rebound).
-        app.job_queue.run_repeating(run_gap_rebound_scan_job, interval=60, first=25)
-        # MBSS v2 (user request 2026-08-27 -- conviction sweep, engine/
-        # scanalert.py run_conviction_sweep_once): interval=900s (15 menit,
-        # sesuai speks) -- job ini sendiri no-op murah di luar jendela
-        # 10:00-15:55 WIB, aman didaftarkan 24/7 spt job lain di atas.
-        app.job_queue.run_repeating(run_conviction_sweep_job, interval=900, first=100)
+        # MBSS v2 (user request 2026-09-07 -- "matikan lane lama sekalian
+        # sesuai rencana awal", live case: DAY TRADE gap-rebound alert PDES/
+        # GOLF masih fire padahal fetch 1m sempat timeout & sudah lewat
+        # golden window; ditemukan saat itu jugarencana lama "kaji nonaktifkan
+        # lane lama" [2026-09-06] BELUM PERNAH benar2 dieksekusi): TIGA job
+        # lane LAMA di-NONAKTIFKAN dgn cara PALING reversibel -- registrasi
+        # run_repeating() dikomentari (BUKAN hapus fungsi/logic-nya), supaya
+        # gampang diaktifkan lagi kalau perlu (uncomment 3 baris di bawah).
+        # SENGAJA TIDAK pakai toggle is_scan_alert_enabled() (/scanalert)
+        # krn toggle itu SAMA jg dipakai guard run_bsjp_shortlist_scan_auto
+        # DAN run_entry_pagi_scan_once -- mematikannya lewat situ ikut
+        # mematikan ENTRY PAGI/ENTRY SORE yg justru mau TETAP jalan.
+        # Dimatikan: run_scanalert_job (Alert A/B), run_gap_rebound_scan_job
+        # (DAY TRADE gap-rebound -- ini yg baru bermasalah), run_conviction_
+        # sweep_job (FCM/PRE-CONTINUATION tier alert). TIDAK disentuh:
+        # run_bsjp_recheck_job/run_bsjp_shortlist_scan_job (itu ENTRY SORE,
+        # bukan "lane lama" yg dimaksud) & ketiga job ENTRY PAGI/dua job
+        # pyramid ENTRY SORE di bawah.
+        # app.job_queue.run_repeating(run_scanalert_job, interval=180, first=10)
+        # app.job_queue.run_repeating(run_gap_rebound_scan_job, interval=60, first=25)
+        # app.job_queue.run_repeating(run_conviction_sweep_job, interval=900, first=100)
         # MBSS v2 (user request 2026-08-29 -- unified BSJP "Beli Sore Jual
         # Pagi" Fase 2, engine/scanalert.py run_bsjp_recheck_once): interval=
         # BSJP_RECHECK_INTERVAL_SEC -- job ini sendiri no-op murah di luar
