@@ -2908,6 +2908,25 @@ def _explosive_score(r: dict, pool: list) -> tuple[float, bool, str]:
     return score, False, ""
 
 
+def _top_whitelist_brokers(broksum_rows: list, n: int = 3) -> list[str]:
+    """
+    Top-N kode broker whitelist (SMART_MONEY_BROKER_WHITELIST) by net value
+    (buy-sell) utk satu ticker -- dipakai SMART-MONEY WATCH (MBSS v2, user
+    request 2026-09-07, ganti trailer "status: pantau" jadi baris kedua
+    "Top 3 whitelist: AK, BK, ZP"). broker.py's compute_whitelist_
+    accumulation_signal TIDAK expose breakdown per-broker (cuma agregat),
+    jadi dihitung sendiri di sini dari broksum_rows mentah yg SAMA.
+    """
+    net_by_broker: dict[str, float] = {}
+    for r in broksum_rows:
+        code = r.get("code")
+        if code not in broker_engine.SMART_MONEY_BROKER_WHITELIST:
+            continue
+        net_by_broker[code] = net_by_broker.get(code, 0) + (r.get("buy_value") or 0) - (r.get("sell_value") or 0)
+    ranked = sorted(net_by_broker.items(), key=lambda kv: kv[1], reverse=True)
+    return [code for code, _ in ranked[:n]]
+
+
 def _consensus_smartmoney_qualifying(pool: list) -> set:
     """
     Set LENGKAP ticker yg lolos threshold smart-money (net-buy whitelist
@@ -3299,21 +3318,21 @@ async def consensus_command(update, context):
     # MBSS v2 (user request 2026-09-07): cap dinaikkan 3->15. REUSE
     # smartmoney_qualifying (dihitung early, SAMA dgn tag ke-4 CONSENSUS
     # PRIME) drpd re-derive filter net_pct/broker sendiri di sini.
-    watch_only = []
-    for r in pool:
-        if r["ticker"] not in smartmoney_qualifying:
-            continue
-        if r["ticker"] in prime_tickers or r["ticker"] in {rr["ticker"] for _, rr in explosive_picks}:
-            continue
-        signal = broker_engine.compute_whitelist_accumulation_signal(r["ticker"], broksum_data.get(r["ticker"], []))
-        net_value = signal.get("net_value") if signal else None
-        watch_only.append((net_value if net_value is not None else 0, r))
-    watch_only.sort(key=lambda pair: pair[0], reverse=True)
-    watch_only = [r for _, r in watch_only[:15]]
+    # MBSS v2 (user request 2026-09-07, REVISI dari net-value ke net_pct):
+    # urutan BALIK ke net_pct (bukan lagi net value IDR) -- keputusan
+    # eksplisit user, prioritaskan kekuatan sinyal relatif drpd besaran
+    # uang absolut.
+    watch_only = [r for r in pool if r["ticker"] in smartmoney_qualifying
+                  and r["ticker"] not in prime_tickers and r["ticker"] not in {rr["ticker"] for _, rr in explosive_picks}]
+    watch_only.sort(key=lambda r: r["whitelist_accumulation_net_pct"], reverse=True)
+    watch_only = watch_only[:15]
     if watch_only:
         lines.append(f"\n💰 SMART-MONEY WATCH — {len(watch_only)} saham (akumulasi kuat, belum terkonfirmasi teknikal)")
         for r in watch_only:
-            lines.append(f"• {r['ticker']} — net-buy whitelist {r['whitelist_accumulation_net_pct']:+.0f}% ({r.get('whitelist_num_brokers')} broker) — status: pantau, bukan entry call")
+            top_brokers = _top_whitelist_brokers(broksum_data.get(r["ticker"], []))
+            lines.append(f"• {r['ticker']} — net-buy WL {r['whitelist_accumulation_net_pct']:+.0f}% ({r.get('whitelist_num_brokers')} broker)")
+            if top_brokers:
+                lines.append(f"  Top 3 whitelist: {', '.join(top_brokers)}")
 
     # === LONG-HORIZON WATCH (multibagger, horizon terpisah) ===
     multibagger_candidates = (nightly_engine.load_rapidapi_market_intelligence().get("multibagger") or {}).get("candidates", [])
