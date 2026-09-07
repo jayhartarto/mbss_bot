@@ -2944,24 +2944,28 @@ def _consensus_smartmoney_qualifying(pool: list) -> set:
 
 def _compute_consensus_prime_candidates(
     pool_by_ticker: dict, sdt_selected: set, hc_selected: set,
-    entry_pagi_tickers: set, smartmoney_tickers: set,
+    entry_pagi_tickers: set, smartmoney_tickers: set, rebound_top5_tickers: set,
 ) -> tuple[list, dict]:
     """
     CONSENSUS PRIME (MBSS v2, REDESIGN 2026-09-07, user request eksplisit):
-    ticker lolos kalau muncul di MINIMAL 2 dari 4 tag -- SDT, HC, ENTRY
-    PAGI, SMART-MONEY. GANTI TOTAL definisi lama (irisan KETAT Backbone
-    Top-8 ∩ SDT ∩ HC, 3-arah AND + dibatasi ke Top-8 saja) -- lama
-    terlalu sempit (seringkali cuma nyisa 0-1 nama). Universe kandidat:
-    SELURUH pool (Danger Gate survivor), BUKAN lagi dibatasi Top-8.
+    ticker lolos kalau muncul di MINIMAL 2 dari N tag -- SDT, HC, ENTRY
+    PAGI, SMART-MONEY, REBOUND (5 tag sejak 2026-09-07 malam, sebelumnya
+    4). GANTI TOTAL definisi lama (irisan KETAT Backbone Top-8 ∩ SDT ∩ HC,
+    3-arah AND + dibatasi ke Top-8 saja) -- lama terlalu sempit
+    (seringkali cuma nyisa 0-1 nama). Universe kandidat: SELURUH pool
+    (Danger Gate survivor), BUKAN lagi dibatasi Top-8.
 
     Shared PERSIS antara /consensus (EOD) & /consensus live (redesign yg
     sama, biar definisi Prime tidak menyimpang antar dua command) --
-    caller wajib pass entry_pagi_tickers/smartmoney_tickers yg SAMA drpd
-    re-derive beda tempat.
+    caller wajib pass entry_pagi_tickers/smartmoney_tickers/rebound_top5_
+    tickers yg SAMA drpd re-derive beda tempat.
 
     Returns (list ticker lolos, {ticker: [tag,...]}).
     """
-    tag_sets = {"SDT": sdt_selected, "HC": hc_selected, "ENTRY PAGI": entry_pagi_tickers, "SMART-MONEY": smartmoney_tickers}
+    tag_sets = {
+        "SDT": sdt_selected, "HC": hc_selected, "ENTRY PAGI": entry_pagi_tickers,
+        "SMART-MONEY": smartmoney_tickers, "REBOUND": rebound_top5_tickers,
+    }
     candidates = []
     tags_by_ticker = {}
     for t in pool_by_ticker:
@@ -3175,8 +3179,8 @@ async def consensus_command(update, context):
     dengan struktur backbone-first sesuai dokumen §6-7:
 
     - CONSENSUS PRIME (REDESIGN 2026-09-07, user request eksplisit): ticker
-      lolos kalau muncul di MINIMAL 2 dari 4 tag -- SDT, HC, ENTRY PAGI,
-      SMART-MONEY (lihat _compute_consensus_prime_candidates). GANTI TOTAL
+      lolos kalau muncul di MINIMAL 2 dari 5 tag -- SDT, HC, ENTRY PAGI,
+      SMART-MONEY, REBOUND (lihat _compute_consensus_prime_candidates). GANTI TOTAL
       definisi lama (irisan KETAT Backbone Top-8 ∩ SDT ∩ HC, 3-arah AND +
       dibatasi Top-8 -- terlalu sempit, seringkali 0-1 nama). Section
       "BACKBONE TOP-3" yg dulu terpisah DIHAPUS -- Prime yg diperluas ini
@@ -3234,25 +3238,27 @@ async def consensus_command(update, context):
     # (lihat _compute_consensus_prime_candidates) jadi tidak butuh section
     # terpisah lagi.
 
-    # entry_pagi_tickers & smartmoney_qualifying dihitung EARLY -- dipakai
-    # CONSENSUS PRIME (tag ke-3/ke-4) DAN section2 lain di bawah (REUSE,
-    # hindari fetch/filter dua kali).
+    # entry_pagi_tickers/smartmoney_qualifying/rebound_top5 dihitung EARLY --
+    # dipakai CONSENSUS PRIME (tag ke-3/4/5) DAN section2 lain di bawah
+    # (REUSE, hindari fetch/filter dua kali).
     entry_pagi_state = scanalert_engine.load_entry_pagi_state_for_consensus()
     entry_pagi_tickers = set(entry_pagi_state.get("tickers") or [])
     smartmoney_qualifying = _consensus_smartmoney_qualifying(pool)
+    rebound_top5 = set(scanalert_engine.rank_rebound_top5_candidates(scored))
 
-    # === CONSENSUS PRIME (REDESIGN 2026-09-07 -- minimal 2 dari 4 tag:
-    # SDT/HC/ENTRY PAGI/SMART-MONEY, GANTI irisan ketat Backbone Top-8 ∩
-    # SDT ∩ HC. State-aware NEW/ACTIVE/COOLDOWN, doc §16-17, TIDAK berubah)
-    # Resolve tracked positions dulu (TP/SL/time-exit) terhadap harga
-    # PENUTUPAN TERBARU (scored, bukan cuma pool yang sudah difilter gate —
-    # ticker yang sudah dipegang tetap perlu dicek walau malam ini tidak
-    # lolos gate lagi), BARU klasifikasi kandidat Prime hari ini.
+    # === CONSENSUS PRIME (REDESIGN 2026-09-07 -- minimal 2 dari 5 tag:
+    # SDT/HC/ENTRY PAGI/SMART-MONEY/REBOUND, GANTI irisan ketat Backbone
+    # Top-8 ∩ SDT ∩ HC. State-aware NEW/ACTIVE/COOLDOWN, doc §16-17, TIDAK
+    # berubah). Resolve tracked positions dulu (TP/SL/time-exit) terhadap
+    # harga PENUTUPAN TERBARU (scored, bukan cuma pool yang sudah
+    # difilter gate — ticker yang sudah dipegang tetap perlu dicek walau
+    # malam ini tidak lolos gate lagi), BARU klasifikasi kandidat Prime
+    # hari ini.
     position_state = backbone_engine.load_consensus_position_state()
     backbone_engine.resolve_consensus_positions(position_state, scored)
 
     prime_tickers_today, prime_tags_today = _compute_consensus_prime_candidates(
-        pool_by_ticker, sdt_selected, hc_selected, entry_pagi_tickers, smartmoney_qualifying
+        pool_by_ticker, sdt_selected, hc_selected, entry_pagi_tickers, smartmoney_qualifying, rebound_top5
     )
     prime_display = []  # (ticker, status) buat ditampilkan sebagai entry beneran
     cooldown_blocked = []
@@ -3265,7 +3271,7 @@ async def consensus_command(update, context):
     backbone_engine.save_consensus_position_state(position_state)
     prime_tickers = [t for t, _ in prime_display]  # dipakai section SMART-MONEY WATCH/LONG-HORIZON di bawah, exclude cooldown-blocked
 
-    lines.append(f"🏆 CONSENSUS PRIME — {len(prime_display)} saham (minimal 2 dari 4 tag: SDT/HC/ENTRY PAGI/SMART-MONEY)")
+    lines.append(f"🏆 CONSENSUS PRIME — {len(prime_display)} saham (minimal 2 dari 5 tag: SDT/HC/ENTRY PAGI/SMART-MONEY/REBOUND)")
     if not prime_display:
         lines.append("Tidak ada ticker dengan minimal 2 irisan tag hari ini. Kualitas terbatas, bukan dipaksakan.")
     for i, (t, status) in enumerate(prime_display, 1):
@@ -3381,6 +3387,21 @@ async def consensus_command(update, context):
             else:
                 lines.append("Tidak ada irisan hari ini.")
 
+    # === REBOUND TOP-5 (MBSS v2, user request 2026-09-07) ===
+    # Kandidat EOD murni D-1 (RSI>=65 & MACD>0 & vol_ratio>=1.07, ranking
+    # komposit) -- lihat engine/scanalert.py rank_rebound_top5_candidates
+    # utk backtest lengkap (win 85.7%/mean +3.25% di 17 hari bursa). INI
+    # HANYA daftar kandidat gate D-1 -- entry riil TETAP butuh konfirmasi
+    # rebound intraday (0.5% dari rolling-low 15 menit, kapan saja
+    # sepanjang hari) yg BELUM diimplementasi sbg job otomatis terpisah.
+    lines.append(f"\n🔄 REBOUND TOP-5 — {len(rebound_top5)} saham (kandidat D-1, TUNGGU konfirmasi rebound intraday sblm entry)")
+    if rebound_top5:
+        for t in sorted(rebound_top5):
+            r = pool_by_ticker.get(t) or scored.get(t, {})
+            lines.append(f"• {t} — RSI {r.get('rsi', '-')} | MACD {r.get('macd_hist', '-')} | vol {r.get('vol_ratio', '-')}x")
+    else:
+        lines.append("Tidak ada kandidat lolos gate hari ini.")
+
     lines.append("\nDetail lengkap & konfirmasi live: /check TICKER")
     if staleness_note:
         lines.insert(0, staleness_note)
@@ -3433,15 +3454,16 @@ async def consensus_live_command(update, context):
     sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool, market_regime)
 
     # MBSS v2 (redesign 2026-09-07): REUSE PERSIS _compute_consensus_prime_
-    # candidates yg sama dgn /consensus EOD (minimal 2 dari 4 tag SDT/HC/
-    # ENTRY PAGI/SMART-MONEY), biar definisi Prime TIDAK menyimpang antar
-    # dua command. Backbone Top-3 (dulu ikut di-live-check di sini) DIHAPUS
+    # candidates yg sama dgn /consensus EOD (minimal 2 dari 5 tag SDT/HC/
+    # ENTRY PAGI/SMART-MONEY/REBOUND), biar definisi Prime TIDAK menyimpang
+    # antar dua command. Backbone Top-3 (dulu ikut di-live-check di sini) DIHAPUS
     # bareng dgn dihapusnya section itu dari /consensus EOD.
     entry_pagi_state = scanalert_engine.load_entry_pagi_state_for_consensus()
     entry_pagi_tickers = set(entry_pagi_state.get("tickers") or [])
     smartmoney_qualifying = _consensus_smartmoney_qualifying(pool)
+    rebound_top5 = set(scanalert_engine.rank_rebound_top5_candidates(scored))
     prime_tickers, _prime_tags = _compute_consensus_prime_candidates(
-        pool_by_ticker, sdt_selected, hc_selected, entry_pagi_tickers, smartmoney_qualifying
+        pool_by_ticker, sdt_selected, hc_selected, entry_pagi_tickers, smartmoney_qualifying, rebound_top5
     )
 
     # MBSS v2 (user request — Explosive Lane diganti sistem baru, dipakai

@@ -4544,4 +4544,57 @@ async def run_entry_pagi_d2_once() -> dict:
             print(f"[NO TELEGRAM TOKEN] {_render_entry_pagi_d2_message(open_picks)}")
         _save_entry_pagi_state(state)
     return summary
-    return summary
+
+
+# ═══════════════════ REBOUND TOP-5 (EOD, /consensus tag) ═══════════════════
+# MBSS v2 (user request 2026-09-07, riset intraday-rebound-tanpa-gap):
+# candidate list PURE EOD (D-1 close, TANPA komponen intraday) utk dipakai
+# sbg tag /consensus -- BEDA dari lane live "REBOUND" penuh (validasi
+# intraday: rebound 0.5% dari rolling-low 15 menit kapan saja sepanjang
+# hari, TP2+6%/SL-2.5%/max hold 20 menit) yg BELUM diimplementasi sbg job
+# terpisah, lihat memory research utk detail lengkap mekanisme penuh.
+# Bagian INI cuma bagian gate D-1 + ranking komposit -- Top-5/hari.
+#
+# Backtest (18-19 hari bursa, research/mbss_1m_20260905.sqlite): filter
+# RSI(Wilder)>=65 & MACD histogram(SMA prod)>0 & vol_ratio(D-1 vs
+# avg20)>=1.07, ranking komposit (RSI+MACD+Volume, masing2 di-rank lalu
+# dijumlah, skor TERENDAH menang) -- Top-5/hari: n=82 dari 85 slot
+# (17 hari x 5, realisasi 96.5%), win=85.7%, mean=+3.25%, SL rate=4.8%.
+# Reuse field `rsi`/`macd_hist`/`vol_ratio` yg SUDAH dihitung nightly
+# (compute_factor_scoring) -- TANPA pipeline indikator baru, PERSIS
+# filosofi ENTRY PAGI.
+REBOUND_TOP5_RSI_MIN = 65.0
+REBOUND_TOP5_VOL_RATIO_MIN = 1.07  # median sampel backtest 2026-09-07 -- KALIBRASI ULANG kalau nanti data lebih banyak terkumpul, bukan konstanta universal yg final
+REBOUND_TOP5_N = 5
+
+
+def rank_rebound_top5_candidates(scored: dict) -> list[str]:
+    """
+    Return list ticker (maks REBOUND_TOP5_N) yg lolos gate RSI>=65 & MACD>0
+    & vol_ratio>=1.07 (D-1, formula produksi), diurutkan komposit
+    (RSI+MACD+Volume, masing2 di-rank lalu dijumlah, skor terendah
+    menang). List kosong kalau tidak ada yg lolos gate -- BUKAN error.
+    """
+    pool = []
+    for t, info in scored.items():
+        rsi = info.get("rsi")
+        macd_hist = info.get("macd_hist")
+        vol_ratio = info.get("vol_ratio")
+        if rsi is None or macd_hist is None or vol_ratio is None:
+            continue
+        if rsi >= REBOUND_TOP5_RSI_MIN and macd_hist > 0 and vol_ratio >= REBOUND_TOP5_VOL_RATIO_MIN:
+            pool.append({"ticker": t, "rsi": rsi, "macd_hist": macd_hist, "vol_ratio": vol_ratio})
+    if not pool:
+        return []
+
+    def rank_map(seq, key):
+        ordered = sorted(seq, key=key, reverse=True)
+        return {r["ticker"]: i for i, r in enumerate(ordered, start=1)}
+
+    r1 = rank_map(pool, lambda r: r["rsi"])
+    r2 = rank_map(pool, lambda r: r["macd_hist"])
+    r3 = rank_map(pool, lambda r: r["vol_ratio"])
+    for r in pool:
+        r["score"] = r1[r["ticker"]] + r2[r["ticker"]] + r3[r["ticker"]]
+    pool.sort(key=lambda r: r["score"])
+    return [r["ticker"] for r in pool[:REBOUND_TOP5_N]]
