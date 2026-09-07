@@ -2908,53 +2908,49 @@ def _explosive_score(r: dict, pool: list) -> tuple[float, bool, str]:
     return score, False, ""
 
 
-def _compute_backbone_top3(pool: list, sdt_selected: set, hc_selected: set, backbone_result: dict) -> list:
+def _consensus_smartmoney_qualifying(pool: list) -> set:
     """
-    Shared antara /consensus (EOD) dan /consensus live (MBSS v2, user
-    request — "consensus live kok tidak tracking top3 entry backbone" —
-    extracted supaya kedua tempat pakai definisi universe yang SAMA
-    PERSIS, bukan dua salinan yang bisa diam-diam menyimpang seiring waktu).
-
-    Universe: seluruh pool (Danger Gate survivor) yang kena tag SDT (lane
-    bagus) atau HC, DIPERLUAS dengan lane SDT "EXTENDED / CHASE WATCH"
-    (WR 74% real, n=23) dan streak kemunculan berturut-turut lintas-source
-    >=3 hari (breakdown /winrate "Streak 3x", WR terbaik). Diurutkan ke
-    probability_score tertinggi, dipangkas ke 3.
-
-    Returns [(r, tags), ...] — tags = list string ("SDT"/"HC"/"EXTENDED-WR
-    74%"/"STREAK Nx") buat ditampilkan pemanggil.
+    Set LENGKAP ticker yg lolos threshold smart-money (net-buy whitelist
+    >=15% & >=2 broker) -- dipakai DUA tempat (CONSENSUS PRIME's tag
+    keempat & SMART-MONEY WATCH's display list), REUSE drpd re-derive
+    filter yg sama dua kali (MBSS v2, redesign 2026-09-07).
     """
-    history = core.load_daytrade_picks_history()
-    today_marker = core.get_current_trading_day_close_marker()
-    universe = []
-    for r in pool:
-        t = r["ticker"]
-        tags = []
-        if t in sdt_selected: tags.append("SDT")
-        if t in hc_selected: tags.append("HC")
-        try:
-            lane = core.compute_screendaytrade_positive_bias(r).get("lane")
-        except Exception:
-            lane = None
-        if lane == "EXTENDED / CHASE WATCH" and "SDT" not in tags:
-            tags.append("EXTENDED-WR 74%")
-        streak = core.compute_consecutive_appearance_streak_any_source(t, today_marker, history)
-        if streak >= 3:
-            tags.append(f"STREAK {streak}x")
-        # NOTE: fast_candidate SENGAJA cuma anotasi tambahan pada ticker yang
-        # SUDAH qualify lewat tag lain di atas -- BUKAN kriteria qualifying
-        # sendiri (masih tag-and-track, belum filter/gate, sesuai kesepakatan
-        # user: validasi forward dulu sebelum dipakai menyaring apa pun).
-        if tags and core.compute_fast_candidate_tag(r).get("is_fast_candidate"):
-            tags.append("🚀 FAST")
-        if tags:
-            universe.append((r, tags))
+    return {
+        r["ticker"] for r in pool
+        if isinstance(r.get("whitelist_accumulation_net_pct"), (int, float))
+        and r["whitelist_accumulation_net_pct"] >= 15
+        and (r.get("whitelist_num_brokers") or 0) >= 2
+    }
 
-    def _probscore(r):
-        return (backbone_result.get("all_scored", {}).get(r["ticker"], {}) or {}).get("probability_score", 0)
 
-    universe.sort(key=lambda pair: _probscore(pair[0]), reverse=True)
-    return universe[:3]
+def _compute_consensus_prime_candidates(
+    pool_by_ticker: dict, sdt_selected: set, hc_selected: set,
+    entry_pagi_tickers: set, smartmoney_tickers: set,
+) -> tuple[list, dict]:
+    """
+    CONSENSUS PRIME (MBSS v2, REDESIGN 2026-09-07, user request eksplisit):
+    ticker lolos kalau muncul di MINIMAL 2 dari 4 tag -- SDT, HC, ENTRY
+    PAGI, SMART-MONEY. GANTI TOTAL definisi lama (irisan KETAT Backbone
+    Top-8 ∩ SDT ∩ HC, 3-arah AND + dibatasi ke Top-8 saja) -- lama
+    terlalu sempit (seringkali cuma nyisa 0-1 nama). Universe kandidat:
+    SELURUH pool (Danger Gate survivor), BUKAN lagi dibatasi Top-8.
+
+    Shared PERSIS antara /consensus (EOD) & /consensus live (redesign yg
+    sama, biar definisi Prime tidak menyimpang antar dua command) --
+    caller wajib pass entry_pagi_tickers/smartmoney_tickers yg SAMA drpd
+    re-derive beda tempat.
+
+    Returns (list ticker lolos, {ticker: [tag,...]}).
+    """
+    tag_sets = {"SDT": sdt_selected, "HC": hc_selected, "ENTRY PAGI": entry_pagi_tickers, "SMART-MONEY": smartmoney_tickers}
+    candidates = []
+    tags_by_ticker = {}
+    for t in pool_by_ticker:
+        matched = [name for name, s in tag_sets.items() if t in s]
+        if len(matched) >= 2:
+            candidates.append(t)
+            tags_by_ticker[t] = matched
+    return candidates, tags_by_ticker
 
 
 def _load_fast_candidates() -> tuple[list, dict, str | None]:
@@ -3159,19 +3155,24 @@ async def consensus_command(update, context):
     source of truth). Menggantikan sistem tagging ">=2 dari 5 tool" lama
     dengan struktur backbone-first sesuai dokumen §6-7:
 
-    - CONSENSUS PRIME: irisan PERSIS Backbone Top-8 ∩ SDT-lane-positif ∩
-      HC-high-conviction pada hari yang sama. Tidak dilonggarkan biar
-      dipaksa ada output — bisa 0. STATE-AWARE (doc §16-17, disederhanakan
-      dari NEW/ACTIVE/UPGRADED jadi NEW/ACTIVE — lihat catatan di
-      engine/backbone.py soal UPGRADED yang belum dikerjakan): ticker yang
-      SUDAH punya posisi aktif tertandai tidak dianggap sinyal beli baru
-      lagi (cukup "konfirmasi ulang"), dan ticker yang BARU kena SL masuk
-      cooldown 3 hari bursa sebelum bisa direkomendasikan ulang.
+    - CONSENSUS PRIME (REDESIGN 2026-09-07, user request eksplisit): ticker
+      lolos kalau muncul di MINIMAL 2 dari 4 tag -- SDT, HC, ENTRY PAGI,
+      SMART-MONEY (lihat _compute_consensus_prime_candidates). GANTI TOTAL
+      definisi lama (irisan KETAT Backbone Top-8 ∩ SDT ∩ HC, 3-arah AND +
+      dibatasi Top-8 -- terlalu sempit, seringkali 0-1 nama). Section
+      "BACKBONE TOP-3" yg dulu terpisah DIHAPUS -- Prime yg diperluas ini
+      sekarang satu2nya ranking utama. STATE-AWARE (doc §16-17,
+      disederhanakan dari NEW/ACTIVE/UPGRADED jadi NEW/ACTIVE -- lihat
+      catatan di engine/backbone.py soal UPGRADED yang belum dikerjakan):
+      ticker yang SUDAH punya posisi aktif tertandai tidak dianggap sinyal
+      beli baru lagi (cukup "konfirmasi ulang"), dan ticker yang BARU kena
+      SL masuk cooldown 3 hari bursa sebelum bisa direkomendasikan ulang.
     - EXPLOSIVE LANE: 1-3 nama dari kandidat lolos Danger Gate (boleh di
       luar Consensus Prime), formula §15.4, gate keras + ambang minimum
       per regime.
-    - SMART-MONEY OVERLAY: bonus tag dari whitelist_accumulation_net_pct
-      (sudah dihitung gratis saat /eodscan) — netral kalau data kosong.
+    - SMART-MONEY WATCH: top 15 (dinaikkan dari 3, user request 2026-09-07)
+      ticker whitelist_accumulation_net_pct>=15%/>=2 broker yg BELUM masuk
+      Consensus Prime -- netral kalau data kosong.
     - LONG-HORIZON WATCH: multibagger RapidAPI, horizon terpisah, tidak
       dicampur ke skor Day 1-5.
 
@@ -3198,7 +3199,6 @@ async def consensus_command(update, context):
     broksum_data = nightly_engine.load_broksum_250()  # dibaca sekali di sini, cache read-only, dipakai buat sort net value SMART-MONEY WATCH di bawah
     pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
     pool_by_ticker = {r["ticker"]: r for r in pool}
-    top8_tickers = [r["ticker"] for r in backbone_result.get("top8", [])]
     market_regime = backbone_result.get("market_regime", "R0_UNKNOWN")
     sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool, market_regime)
 
@@ -3208,31 +3208,23 @@ async def consensus_command(update, context):
         "",
     ]
 
-    # === BACKBONE TOP-3 (user revisi lanjutan — bukan lagi dibatasi ke
-    # Backbone Top-8, itu terlalu sempit: irisan Top-8 (cuma 8 nama) ∩
-    # SDT/HC seringkali cuma nyisa 1 nama). Universe SEKARANG: seluruh pool
-    # (semua Danger Gate survivor) yang kena tag SDT (lane bagus) ATAU HC,
-    # DIPERLUAS lagi dengan 2 tag tambahan yang PUNYA bukti /winrate real
-    # (bukan definisi baru dari nol -- REUSE sinyal yang sudah tervalidasi):
-    # - lane SDT "EXTENDED / CHASE WATCH" (74% win real, n=23) -- sebelumnya
-    #   TIDAK masuk GOOD_SDT_LANES (cuma PRIORITY FRESH/CONT), padahal WR-nya
-    #   nyata lebih baik dari beberapa lane yang sudah masuk.
-    # - streak kemunculan berturut-turut lintas-source >=3 hari (breakdown
-    #   /winrate "Streak 3x" -- WR terbaik di antara panjang streak lain).
-    # Baru diurutkan ke probability_score (Entry Rank) tertinggi, ambil 3.
-    top3 = _compute_backbone_top3(pool, sdt_selected, hc_selected, backbone_result)
-    lines.append(f"🧱 BACKBONE TOP-3 (universe SDT/HC/WR-tag, {len(top3)} saham)")
-    if not top3:
-        lines.append("Tidak ada kandidat SDT/HC/WR-tag malam ini.")
-    for r, tags in top3:
-        info = backbone_result.get("all_scored", {}).get(r["ticker"], {}) or {}
-        lines.append(
-            f"{r['ticker']} — Entry Rank #{info.get('entry_rank', '-')}/{info.get('entry_rank_total', '-')} "
-            f"(prob {info.get('probability_score', '-')}, danger {info.get('predicted_danger', '-')}) | Tag: {', '.join(tags)}"
-        )
-    lines.append("⚠️ Ranking murni, BUKAN sinyal entry siap pakai — cek /check sebelum ambil keputusan.")
+    # NOTE (MBSS v2, redesign 2026-09-07, user request): section "BACKBONE
+    # TOP-3" DIHAPUS dari /consensus (dulu pakai _compute_backbone_top3,
+    # SUDAH DIHAPUS jg dari file ini) -- CONSENSUS PRIME di bawah sekarang
+    # jadi satu2nya ranking utama, universe-nya sendiri sudah diperluas
+    # (lihat _compute_consensus_prime_candidates) jadi tidak butuh section
+    # terpisah lagi.
 
-    # === CONSENSUS PRIME (state-aware NEW/ACTIVE/COOLDOWN — doc §16-17) ===
+    # entry_pagi_tickers & smartmoney_qualifying dihitung EARLY -- dipakai
+    # CONSENSUS PRIME (tag ke-3/ke-4) DAN section2 lain di bawah (REUSE,
+    # hindari fetch/filter dua kali).
+    entry_pagi_state = scanalert_engine.load_entry_pagi_state_for_consensus()
+    entry_pagi_tickers = set(entry_pagi_state.get("tickers") or [])
+    smartmoney_qualifying = _consensus_smartmoney_qualifying(pool)
+
+    # === CONSENSUS PRIME (REDESIGN 2026-09-07 -- minimal 2 dari 4 tag:
+    # SDT/HC/ENTRY PAGI/SMART-MONEY, GANTI irisan ketat Backbone Top-8 ∩
+    # SDT ∩ HC. State-aware NEW/ACTIVE/COOLDOWN, doc §16-17, TIDAK berubah)
     # Resolve tracked positions dulu (TP/SL/time-exit) terhadap harga
     # PENUTUPAN TERBARU (scored, bukan cuma pool yang sudah difilter gate —
     # ticker yang sudah dipegang tetap perlu dicek walau malam ini tidak
@@ -3240,7 +3232,9 @@ async def consensus_command(update, context):
     position_state = backbone_engine.load_consensus_position_state()
     backbone_engine.resolve_consensus_positions(position_state, scored)
 
-    prime_tickers_today = [t for t in top8_tickers if t in sdt_selected and t in hc_selected]
+    prime_tickers_today, prime_tags_today = _compute_consensus_prime_candidates(
+        pool_by_ticker, sdt_selected, hc_selected, entry_pagi_tickers, smartmoney_qualifying
+    )
     prime_display = []  # (ticker, status) buat ditampilkan sebagai entry beneran
     cooldown_blocked = []
     for t in prime_tickers_today:
@@ -3250,22 +3244,19 @@ async def consensus_command(update, context):
         else:
             prime_display.append((t, status))
     backbone_engine.save_consensus_position_state(position_state)
-    prime_tickers = [t for t, _ in prime_display]  # dipakai section EXPLOSIVE/tombol di bawah, exclude cooldown-blocked
+    prime_tickers = [t for t, _ in prime_display]  # dipakai section SMART-MONEY WATCH/LONG-HORIZON di bawah, exclude cooldown-blocked
 
-    lines.append(f"🏆 CONSENSUS PRIME — {len(prime_display)} saham")
+    lines.append(f"🏆 CONSENSUS PRIME — {len(prime_display)} saham (minimal 2 dari 4 tag: SDT/HC/ENTRY PAGI/SMART-MONEY)")
     if not prime_display:
-        lines.append("Tidak ada irisan Backbone Top-8 ∩ SDT ∩ HC hari ini. Kualitas terbatas, bukan dipaksakan.")
+        lines.append("Tidak ada ticker dengan minimal 2 irisan tag hari ini. Kualitas terbatas, bukan dipaksakan.")
     for i, (t, status) in enumerate(prime_display, 1):
         r = pool_by_ticker[t]
         info = backbone_result["all_scored"].get(t, {})
         hc = r.get("high_conviction", {})
         sm_pct = r.get("whitelist_accumulation_net_pct")
-        sm_tag = ""
-        if isinstance(sm_pct, (int, float)):
-            if sm_pct >= 15 and (r.get("whitelist_num_brokers") or 0) >= 2:
-                sm_tag = f"  |  💎 TRIPLE CONFIRMATION (smart money net-buy {sm_pct:+.0f}%, {r.get('whitelist_num_brokers')} broker)"
-            elif sm_pct <= SMART_MONEY_NET_SELL_THRESHOLD:
-                sm_tag = f"  |  ⚠️ SMART-MONEY DIVERGENCE (net-sell {sm_pct:+.0f}%)"
+        divergence_tag = ""
+        if isinstance(sm_pct, (int, float)) and sm_pct <= SMART_MONEY_NET_SELL_THRESHOLD:
+            divergence_tag = f"  |  ⚠️ SMART-MONEY DIVERGENCE (net-sell {sm_pct:+.0f}%)"
         st_info = position_state.get(t, {})
         if status == "NEW":
             status_line = "🆕 NEW CONSENSUS — sinyal baru"
@@ -3273,13 +3264,14 @@ async def consensus_command(update, context):
             status_line = f"📌 ACTIVE CONSENSUS — sudah dipegang sejak {st_info.get('entry_date', '?')}, ini KONFIRMASI ULANG bukan sinyal beli baru"
         lines.append(
             f"{i}. {t} — {status_line}\n"
+            f"   Tag: {', '.join(prime_tags_today.get(t, []))}\n"
             f"   Entry Rank #{info.get('entry_rank', '-')}/{info.get('entry_rank_total', '-')} (prob {info.get('probability_score', '-')}, danger {info.get('predicted_danger', '-')})\n"
-            f"   HC: {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)}{sm_tag}"
+            f"   HC: {hc.get('criteria_met', 0)}/{hc.get('criteria_checkable', 0)}{divergence_tag}"
             f"{core.format_fast_candidate_tag(r)}"
         )
     if cooldown_blocked:
         lines.append(
-            f"🕐 {len(cooldown_blocked)} ticker lolos Backbone∩SDT∩HC TAPI baru kena SL beberapa hari lalu, "
+            f"🕐 {len(cooldown_blocked)} ticker lolos minimal 2 tag TAPI baru kena SL beberapa hari lalu, "
             f"masih cooldown ({', '.join(cooldown_blocked)}) — tidak direkomendasikan ulang, kecuali /check konfirmasi reclaim genuine."
         )
 
@@ -3304,18 +3296,20 @@ async def consensus_command(update, context):
     # tajam"/price momentum -- itu justru bertentangan sama tujuan lane
     # ini ("belum terkonfirmasi teknikal"), kalau harga sudah menguat tajam
     # harusnya sudah lolos SDT/HC dan tidak nyampe ke sini.
+    # MBSS v2 (user request 2026-09-07): cap dinaikkan 3->15. REUSE
+    # smartmoney_qualifying (dihitung early, SAMA dgn tag ke-4 CONSENSUS
+    # PRIME) drpd re-derive filter net_pct/broker sendiri di sini.
     watch_only = []
     for r in pool:
-        if r["ticker"] in prime_tickers or r["ticker"] in {rr["ticker"] for _, rr in explosive_picks}:
+        if r["ticker"] not in smartmoney_qualifying:
             continue
-        net_pct = r.get("whitelist_accumulation_net_pct")
-        if not isinstance(net_pct, (int, float)) or net_pct < 15 or (r.get("whitelist_num_brokers") or 0) < 2:
+        if r["ticker"] in prime_tickers or r["ticker"] in {rr["ticker"] for _, rr in explosive_picks}:
             continue
         signal = broker_engine.compute_whitelist_accumulation_signal(r["ticker"], broksum_data.get(r["ticker"], []))
         net_value = signal.get("net_value") if signal else None
         watch_only.append((net_value if net_value is not None else 0, r))
     watch_only.sort(key=lambda pair: pair[0], reverse=True)
-    watch_only = [r for _, r in watch_only[:3]]
+    watch_only = [r for _, r in watch_only[:15]]
     if watch_only:
         lines.append(f"\n💰 SMART-MONEY WATCH — {len(watch_only)} saham (akumulasi kuat, belum terkonfirmasi teknikal)")
         for r in watch_only:
@@ -3349,11 +3343,11 @@ async def consensus_command(update, context):
     # fire, 0 kandidat lolos filter"). SEKARANG selalu tampil, spt section
     # lain (CONSENSUS PRIME tetap muncul dgn "0 saham") -- 3 state beda
     # ditampilkan eksplisit.
-    entry_pagi_state = scanalert_engine.load_entry_pagi_state_for_consensus()
+    # entry_pagi_state/entry_pagi_tickers REUSE dari yg sudah dihitung early
+    # (utk CONSENSUS PRIME) -- TIDAK fetch ulang.
     if not entry_pagi_state.get("fired_today"):
         lines.append("\n🌅 ENTRY PAGI ∩ HC/allsetup — belum fire hari ini (scan 09:05-09:20 WIB belum jalan, atau /consensus dipanggil sebelum itu)")
     else:
-        entry_pagi_tickers = set(entry_pagi_state.get("tickers") or [])
         if not entry_pagi_tickers:
             lines.append("\n🌅 ENTRY PAGI ∩ HC/allsetup — 0 saham (Entry Pagi sudah scan hari ini, tapi 0 kandidat lolos filter RSI/MACD -- wajar, bukan error)")
         else:
@@ -3416,11 +3410,20 @@ async def consensus_live_command(update, context):
 
     pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
     pool_by_ticker = {r["ticker"]: r for r in pool}
-    top8_tickers = [r["ticker"] for r in backbone_result.get("top8", [])]
     market_regime = backbone_result.get("market_regime", "R0_UNKNOWN")
     sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool, market_regime)
 
-    prime_tickers = [t for t in top8_tickers if t in sdt_selected and t in hc_selected]
+    # MBSS v2 (redesign 2026-09-07): REUSE PERSIS _compute_consensus_prime_
+    # candidates yg sama dgn /consensus EOD (minimal 2 dari 4 tag SDT/HC/
+    # ENTRY PAGI/SMART-MONEY), biar definisi Prime TIDAK menyimpang antar
+    # dua command. Backbone Top-3 (dulu ikut di-live-check di sini) DIHAPUS
+    # bareng dgn dihapusnya section itu dari /consensus EOD.
+    entry_pagi_state = scanalert_engine.load_entry_pagi_state_for_consensus()
+    entry_pagi_tickers = set(entry_pagi_state.get("tickers") or [])
+    smartmoney_qualifying = _consensus_smartmoney_qualifying(pool)
+    prime_tickers, _prime_tags = _compute_consensus_prime_candidates(
+        pool_by_ticker, sdt_selected, hc_selected, entry_pagi_tickers, smartmoney_qualifying
+    )
 
     # MBSS v2 (user request — Explosive Lane diganti sistem baru, dipakai
     # KONSISTEN dengan SDT: lane FAST_RECOVERY/EARLY_RECOVERY, macd_approach_
@@ -3431,13 +3434,7 @@ async def consensus_live_command(update, context):
         if r["ticker"] not in prime_tickers and r.get("macd_approach_tier") in ("FAST_RECOVERY", "EARLY_RECOVERY")
     ][:EXPLOSIVE_MAX_NAMES]
 
-    # MBSS v2 (user request — "consensus live kok tidak tracking top3 entry
-    # backbone"): Backbone Top-3 ikut dicek live juga sekarang, reuse
-    # PERSIS _compute_backbone_top3 yang sama dipakai /consensus EOD, biar
-    # definisi universe-nya tidak menyimpang antar dua command.
-    backbone_top3_tickers = [r["ticker"] for r, _tags in _compute_backbone_top3(pool, sdt_selected, hc_selected, backbone_result)]
-
-    watchlist = list(dict.fromkeys(prime_tickers + explosive_tickers + backbone_top3_tickers))  # dedup, preserve order
+    watchlist = list(dict.fromkeys(prime_tickers + explosive_tickers))  # dedup, preserve order
 
     await core.safe_reply(update.message, f"🔄 Cek tactical live untuk {len(watchlist)} pilihan EOD Consensus, mohon tunggu...")
 
@@ -3451,9 +3448,9 @@ async def consensus_live_command(update, context):
     }
 
     lines = [f"🎯 CONSENSUS LIVE — {market_regime}", ""]
-    lines.append(f"📌 STATUS LIVE — {len(watchlist)} pilihan EOD (Prime+Explosive+Backbone Top-3)")
+    lines.append(f"📌 STATUS LIVE — {len(watchlist)} pilihan EOD (Prime+Explosive)")
     if not watchlist:
-        lines.append("Tidak ada Consensus Prime/Explosive/Backbone Top-3 malam ini untuk dicek live.")
+        lines.append("Tidak ada Consensus Prime/Explosive malam ini untuk dicek live.")
 
     for t in watchlist:
         base = pool_by_ticker[t]
@@ -3484,7 +3481,6 @@ async def consensus_live_command(update, context):
             tag_bits = []
             if t in prime_tickers: tag_bits.append("Prime")
             if t in explosive_tickers: tag_bits.append("Explosive")
-            if t in backbone_top3_tickers: tag_bits.append("Backbone Top-3")
             tag = f" [{', '.join(tag_bits)}]" if tag_bits else ""
             held_tag = " 💼" if is_held else ""
 
