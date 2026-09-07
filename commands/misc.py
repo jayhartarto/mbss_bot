@@ -75,6 +75,47 @@ Lonjakan Volume: volume 3x+ normal — bisa jadi berita besar atau likuiditas ti
 Ketik /check, /myportfolio, atau /testbrief untuk melihat istilah-istilah ini dalam analisis nyata."""
 
 
+# MBSS v2 (user request 2026-09-07 -- "rangkumkan trade strategy untuk
+# entry pagi, rebound dan entry sore", lalu "masukkan ke bot, command
+# /rules"): teks statis, sengaja TIDAK baca cache/state apa pun -- murni
+# rangkuman aturan entry/TP/SL yang SUDAH dikunci malam ini (lihat memory
+# project_entry_pagi_entry_sore_implementation_2026_09_07.md &
+# project_daytrade_rebound_revised_formula_2026_09_07.md utk sumber
+# lengkap/backtest). Kalau salah satu formula direvisi lagi nanti, teks
+# ini WAJIB diupdate manual -- tidak otomatis sinkron dengan konstanta di
+# engine/scanalert.py.
+TRADE_RULES_TEXT = """📐 TRADE STRATEGY — ENTRY PAGI / REBOUND / ENTRY SORE
+
+━━━ ENTRY PAGI ━━━
+Screening: top-10 ranking opening-range (posisi entry di jendela 09:00-09:05, jarak dari high kemarin, lebar range) + filter RSI(Wilder,14)>=65 & MACD histogram(SMA produksi)>0 dari closing kemarin (D-1).
+Entry: langsung di closing jendela opening-range (09:05), TANPA tunggu dip.
+Avg-down: sekali, di -3% dari entry (split modal 50/50).
+TP: +6% dari avg cost, hari yang sama (D1).
+SL: -6% dari avg cost, hari yang sama (D1).
+Kalau belum resolve s.d closing: lanjut D+1 -- trailing target mulai +5%, turun bertahap ke floor +2% (giveback 1% dari peak), SL tetap -6%, force-exit akhir sesi 1 D+1.
+
+━━━ DAY TRADE REBOUND ━━━
+Screening: gate RSI>=65 & MACD>0 & volume D-1 >=1,07x rata-rata 20 hari (dari closing kemarin), ranking komposit (RSI+MACD+Volume), ambil Top-5/hari.
+Entry: kapan saja sepanjang hari (09:00-15:50) begitu harga rebound +0,5% dari titik terendah 15 menit terakhir (rolling-low) -- entry = rolling-low x 1,005.
+TP: +6% dari entry.
+SL: -2,5% dari entry.
+Batas waktu: force-exit di harga saat itu kalau 20 menit sejak entry belum kena TP/SL (timeout).
+Aturan tambahan: 1 sinyal per ticker per hari (first-touch saja, TIDAK re-entry ticker yang sama meski rebound lagi di hari yang sama).
+
+━━━ ENTRY SORE ━━━
+Fase 1 (mulai 11:00): ret_1d>12%, volume>3x kemarin & >3x MA200, clean_close<1,15 -> shortlist.
+Fase 2 (real-time, lebih ketat: volume>4x, clean_close<1,025) -> alert beli sore ini.
+Validasi 15:00-15:30: klasifikasi trajektori sejak alert Fase2 -- TIER1 (ret_1d & volume dua-duanya masih naik), TIER2 (cuma ret_1d naik), TIER3 (cuma volume naik); yang melandai di kedua sisi TIDAK dialert lanjut.
+Entry: harga saat keputusan tier (15:00-15:30).
+Avg-down D+1: dua tahap -- tier2 di -2%, tier3 di -5% dari harga keputusan (split 40/30/30).
+TP/SL D+1:
+  TIER1: TP+12%/SL-6% statis sepanjang hari.
+  TIER2/3: TP turun bertahap 12%->6%->2% (flat sesi1, decay sesi2), SL turun bertahap 8%->2%.
+Force-exit: closing D+1 kalau belum resolve juga.
+
+⚠️ Ketiganya reuse gate RSI/MACD D-1 sebagai fondasi filter kualitas, bedanya di mekanisme entry (jendela pagi tetap vs rebound kapan saja vs alert sore) dan horizon hold (same-day vs carry D+1). Aturan ini bisa berubah kalau ada revisi formula -- cek /consensus atau /hc untuk kandidat live hari ini."""
+
+
 STARTUP_DISCLAIMER = (
     "⚠️ CATATAN PENTING (ditampilkan sekali saat bot aktif):\n"
     "Semua analisis dari bot ini HANYA berdasarkan data harga, volume, dan rasio "
@@ -164,6 +205,10 @@ async def show_version(update, context):
 
 async def show_glossary(update, context):
     await core.safe_reply(update.message, GLOSSARY_TEXT)
+
+
+async def show_trade_rules(update, context):
+    await core.safe_reply(update.message, TRADE_RULES_TEXT)
 
 
 async def show_whitelist_status(update, context):

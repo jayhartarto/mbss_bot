@@ -7698,6 +7698,7 @@ def build_app():
     app.add_handler(CommandHandler("version", commands_misc.show_version))
     app.add_handler(CommandHandler("whitelist", commands_misc.show_whitelist_status))
     app.add_handler(CommandHandler(["glossary", "istilah"], commands_misc.show_glossary))
+    app.add_handler(CommandHandler("rules", commands_misc.show_trade_rules))
     app.add_handler(CommandHandler("rebuildwhitelist", commands_misc.rebuild_whitelist_command))
     app.add_handler(CommandHandler("scanalert", commands_misc.scanalert_toggle_command))
     app.add_handler(CommandHandler(["check", "cek"], commands_check.check_stock))
