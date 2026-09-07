@@ -4598,3 +4598,260 @@ def rank_rebound_top5_candidates(scored: dict) -> list[str]:
         r["score"] = r1[r["ticker"]] + r2[r["ticker"]] + r3[r["ticker"]]
     pool.sort(key=lambda r: r["score"])
     return [r["ticker"] for r in pool[:REBOUND_TOP5_N]]
+
+
+# ═══════════════════ REBOUND LIVE (intraday monitoring job) ═══════════════════
+# MBSS v2 (user request 2026-09-07, implementasi penuh setelah format
+# pesan dikunci): job TUNGGAL (scan + monitor digabung, SATU cadence,
+# user request eksplisit "job-nya disamakan saja waktunya dengan scan
+# rebound + estimasi waktu exit dari alert yang ada") -- BEDA dari ENTRY
+# PAGI/ENTRY SORE yg punya job scan & job monitor terpisah, di sini
+# digabung krn siklusnya SUDAH pendek (5 menit, sama persis CHECK_EVERY
+# backtest) & window exit per-posisi cuma 20 menit, jadi TIDAK butuh
+# cadence beda utk "cari kandidat baru" vs "cek yg sudah OPEN".
+#
+# Mekanisme (PERSIS backtest, lihat rank_rebound_top5_candidates &
+# memory project_daytrade_rebound_revised_formula_2026_09_07.md):
+# 1) Top-5/hari (komposit RSI+MACD+vol_ratio D-1) DIKUNCI SEKALI di awal
+#    hari (fire pertama job ini) -- TIDAK dihitung ulang tiap siklus
+#    (ranking berbasis D-1, tidak berubah intraday, re-hitung cuma buang
+#    waktu).
+# 2) Tiap siklus (300s/5menit): utk tiap Top-5 yg BELUM fire hari ini,
+#    scan bar 1m hari ini dari menit ke-15, cek rolling-low 15 menit tiap
+#    checkpoint 5-menitan, begitu High >= rolling_low*1.005 -> FIRE
+#    (entry = rolling_low*1.005, exit_deadline = waktu_fire + 20menit).
+#    First-touch SEKALI/ticker/hari, PERSIS backtest.
+# 3) Utk posisi OPEN: cek bar SEJAK entry -- Low<=SL_price -> CLOSED/SL,
+#    High>=TP_price -> CLOSED/TP, kalau belum & now>=exit_deadline ->
+#    CLOSED/TIMEOUT (resolve di closing price bar terakhir tersedia).
+# 4) Pesan SATU per hari, edit-in-place -- blok baru di-append tiap fire,
+#    blok existing di-update statusnya (OPEN -> CLOSED) tanpa hapus blok
+#    lain. Format terkunci user (2026-09-07):
+#      DAY TRADE REBOUND
+#      🔄 TICKER — rebound +0,5% dari low intraday, entry {harga}
+#      Gate D-1: RSI {x} | MACD {x} | Vol {x}x kemarin
+#      TP {harga} (+6%) | SL {harga} (-2,5%)
+#      Max EXIT time {HH:MM} - OPEN
+#      -- atau setelah resolve --
+#      Max EXIT time {HH:MM} - CLOSED - RESOLVE at {harga} ({+/-x%})
+REBOUND_LIVE_ENABLED = True  # feature-toggle terisolasi -- set False kalau perlu mematikan cepat TANPA menyentuh lane lain
+REBOUND_LOOKBACK_MIN = 15
+REBOUND_TIER_PCT = 0.5
+REBOUND_MAX_HOLD_MIN = 20
+REBOUND_TP2_PCT = 6.0
+REBOUND_SL_PCT = -2.5
+REBOUND_SCAN_WINDOW_START = datetime.time(9, 0)
+REBOUND_SCAN_WINDOW_END = datetime.time(15, 50)
+REBOUND_S1_START, REBOUND_S1_END = datetime.time(9, 0), datetime.time(12, 0)
+REBOUND_S2_START, REBOUND_S2_END = datetime.time(13, 30), datetime.time(15, 50)
+
+STATE_FILE_REBOUND = os.path.join(core.PROJECT_ROOT, "rebound_state.json")
+
+
+def _load_rebound_state() -> dict:
+    if not os.path.exists(STATE_FILE_REBOUND):
+        return {}
+    try:
+        with open(STATE_FILE_REBOUND) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_rebound_state(state: dict):
+    with open(STATE_FILE_REBOUND, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def _rebound_session_mask(t: datetime.time) -> bool:
+    return (REBOUND_S1_START <= t <= REBOUND_S1_END) or (REBOUND_S2_START <= t <= REBOUND_S2_END)
+
+
+def _render_rebound_message(picks: list[dict]) -> str:
+    header = "DAY TRADE REBOUND"
+    blocks = []
+    for p in picks:
+        if p["status"] == "OPEN":
+            status_line = f"Max EXIT time {p['exit_deadline']} - OPEN"
+        else:
+            reason_tag = {"TP": "TP", "SL": "SL", "TIMEOUT": "TIMEOUT"}.get(p.get("resolve_reason"), p.get("resolve_reason", ""))
+            status_line = (
+                f"Max EXIT time {p['exit_deadline']} - CLOSED ({reason_tag}) - "
+                f"RESOLVE at {p['resolve_price']:,.0f} ({p['resolve_ret_pct']:+.1f}%)"
+            )
+        blocks.append(
+            f"🔄 {p['ticker']} — rebound +{REBOUND_TIER_PCT:.1f}% dari low intraday, entry {p['entry_price']:,.0f}\n"
+            f"Gate D-1: RSI {p['rsi']:.0f} | MACD {p['macd_hist']:+.2f} | Vol {p['vol_ratio']:.1f}x kemarin\n"
+            f"TP {p['tp_price']:,.0f} (+{REBOUND_TP2_PCT:.0f}%) | SL {p['sl_price']:,.0f} ({REBOUND_SL_PCT:+.1f}%)\n"
+            f"{status_line}"
+        )
+    return header + "\n\n" + "\n\n".join(blocks)
+
+
+async def _rebound_send_new_message(text: str) -> int | None:
+    bot = _get_shared_bot()
+    if bot is None:
+        print(f"[NO TELEGRAM TOKEN] {text}")
+        return None
+    for attempt in range(2):
+        try:
+            sent = await bot.send_message(chat_id=core.TELEGRAM_CHAT_ID, text=text)
+            return sent.message_id
+        except Exception as e:
+            print(f"⚠️ Rebound: gagal kirim pesan awal (attempt {attempt + 1}): {e}")
+            if attempt == 0:
+                await asyncio.sleep(3)
+    return None
+
+
+async def run_rebound_live_once() -> dict:
+    """
+    Job TUNGGAL (scan kandidat baru + monitor posisi OPEN, satu cadence
+    5 menit) -- lihat catatan panjang di atas blok REBOUND LIVE utk
+    mekanisme lengkap.
+    """
+    summary = {"skipped_reason": None, "new_fires": 0, "resolved": 0}
+    if not REBOUND_LIVE_ENABLED:
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (REBOUND_SCAN_WINDOW_START <= now_wib.time() <= REBOUND_SCAN_WINDOW_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+    if await asyncio.to_thread(core.is_idx_market_holiday_today):
+        summary["skipped_reason"] = "holiday"
+        return summary
+    if not is_scan_alert_enabled():
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+
+    today = _today_str()
+    state = _load_rebound_state()
+    if state.get("trading_day_marker") != today:
+        state = {"trading_day_marker": today, "message_id": None, "chat_id": None, "top5": None, "picks": {}}
+
+    # Top-5 DIKUNCI SEKALI/hari (D-1 based, tidak berubah intraday).
+    if state.get("top5") is None:
+        import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
+        scored = nightly_engine.load_daily_scan_cache()
+        if not scored:
+            summary["skipped_reason"] = "no_cache"
+            return summary
+        top5 = rank_rebound_top5_candidates(scored)
+        state["top5"] = top5
+        state["top5_info"] = {
+            t: {"rsi": scored[t].get("rsi"), "macd_hist": scored[t].get("macd_hist"), "vol_ratio": scored[t].get("vol_ratio")}
+            for t in top5
+        }
+        _save_rebound_state(state)
+
+    top5 = state.get("top5") or []
+    if not top5:
+        summary["skipped_reason"] = "no_candidates"
+        _save_rebound_state(state)
+        return summary
+
+    picks = state.setdefault("picks", {})
+    pending = [t for t in top5 if t not in picks]
+    open_positions = [t for t, p in picks.items() if p["status"] == "OPEN"]
+
+    dirty = False
+    now_time = now_wib.time()
+
+    # --- (1) scan kandidat yg BELUM fire hari ini ---
+    if pending:
+        data = await _fetch_with_timeout(_fetch_today_1m, pending, default=pd.DataFrame())
+        if data is not None and not (hasattr(data, "empty") and data.empty):
+            for t in pending:
+                sym = t + ".JK"
+                try:
+                    bars = data[sym].dropna(how="all").sort_index()
+                except Exception:
+                    continue
+                if bars.empty:
+                    continue
+                bars = bars[[_rebound_session_mask(ts.time()) for ts in bars.index]]
+                if len(bars) < REBOUND_LOOKBACK_MIN + 5:
+                    continue
+                highs, lows = bars["High"].astype(float).values, bars["Low"].astype(float).values
+                times = [ts.time() for ts in bars.index]
+                n = len(bars)
+                for i in range(REBOUND_LOOKBACK_MIN, n):
+                    lookback_low = lows[max(0, i - REBOUND_LOOKBACK_MIN):i].min()
+                    if lookback_low <= 0:
+                        continue
+                    rebound_pct = (highs[i] - lookback_low) / lookback_low * 100
+                    if rebound_pct < REBOUND_TIER_PCT:
+                        continue
+                    entry_price = lookback_low * (1 + REBOUND_TIER_PCT / 100.0)
+                    entry_time = times[i]
+                    exit_dt = (datetime.datetime.combine(datetime.date.today(), entry_time) + datetime.timedelta(minutes=REBOUND_MAX_HOLD_MIN)).time()
+                    info = state["top5_info"].get(t, {})
+                    picks[t] = {
+                        "ticker": t, "entry_price": entry_price, "entry_time": entry_time.strftime("%H:%M"),
+                        "exit_deadline": exit_dt.strftime("%H:%M"),
+                        "tp_price": entry_price * (1 + REBOUND_TP2_PCT / 100.0),
+                        "sl_price": entry_price * (1 + REBOUND_SL_PCT / 100.0),
+                        "status": "OPEN", "resolve_price": None, "resolve_ret_pct": None, "resolve_reason": None,
+                        "rsi": info.get("rsi"), "macd_hist": info.get("macd_hist"), "vol_ratio": info.get("vol_ratio"),
+                    }
+                    dirty = True
+                    summary["new_fires"] += 1
+                    break  # first-touch SEKALI/hari
+
+    # --- (2) monitor posisi OPEN ---
+    open_positions = [t for t, p in picks.items() if p["status"] == "OPEN"]
+    if open_positions:
+        data2 = await _fetch_with_timeout(_fetch_today_1m, open_positions, default=pd.DataFrame())
+        if data2 is not None and not (hasattr(data2, "empty") and data2.empty):
+            for t in open_positions:
+                p = picks[t]
+                sym = t + ".JK"
+                try:
+                    bars = data2[sym].dropna(how="all").sort_index()
+                except Exception:
+                    continue
+                if bars.empty:
+                    continue
+                entry_time_of_day = datetime.datetime.strptime(p["entry_time"], "%H:%M").time()
+                bars_since_entry = bars[[ts.time() >= entry_time_of_day for ts in bars.index]]
+                if bars_since_entry.empty:
+                    continue
+                day_high = float(bars_since_entry["High"].astype(float).max())
+                day_low = float(bars_since_entry["Low"].astype(float).min())
+                last_close = float(bars_since_entry["Close"].astype(float).iloc[-1])
+                exit_deadline_time = datetime.datetime.strptime(p["exit_deadline"], "%H:%M").time()
+
+                if day_low <= p["sl_price"]:
+                    p["status"], p["resolve_reason"] = "CLOSED", "SL"
+                    p["resolve_price"] = p["sl_price"]
+                elif day_high >= p["tp_price"]:
+                    p["status"], p["resolve_reason"] = "CLOSED", "TP"
+                    p["resolve_price"] = p["tp_price"]
+                elif now_time >= exit_deadline_time:
+                    p["status"], p["resolve_reason"] = "CLOSED", "TIMEOUT"
+                    p["resolve_price"] = last_close
+                else:
+                    continue  # masih OPEN, tidak ada perubahan
+                p["resolve_ret_pct"] = (p["resolve_price"] - p["entry_price"]) / p["entry_price"] * 100
+                dirty = True
+                summary["resolved"] += 1
+
+    if dirty:
+        text = _render_rebound_message(list(picks.values()))
+        bot = _get_shared_bot()
+        if state.get("message_id") and bot is not None:
+            try:
+                await bot.edit_message_text(chat_id=state["chat_id"], message_id=state["message_id"], text=text)
+            except Exception as e:
+                print(f"⚠️ Rebound: gagal edit pesan: {e}")
+        else:
+            state["message_id"] = await _rebound_send_new_message(text)
+            state["chat_id"] = core.TELEGRAM_CHAT_ID
+        _save_rebound_state(state)
+    else:
+        _save_rebound_state(state)
+    return summary

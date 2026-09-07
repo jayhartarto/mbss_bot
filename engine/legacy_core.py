@@ -7654,6 +7654,19 @@ async def run_bsjp_pyramid_d1_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ Entry Sore pyramid D+1 job gagal: {e}")
 
 
+async def run_rebound_live_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH -- DAY TRADE REBOUND live (scan Top-5 D-1 +
+    monitor posisi OPEN, satu job gabungan sesuai user request 2026-09-07
+    "job-nya disamakan saja waktunya dengan scan rebound + estimasi waktu
+    exit dari alert yang ada"), engine/scanalert.py run_rebound_live_once.
+    """
+    try:
+        await scanalert_engine.run_rebound_live_once()
+    except Exception as e:
+        print(f"⚠️ Rebound live job gagal: {e}")
+
+
 async def send_startup_notice(app: Application):
     """Sent once automatically when the bot process starts — the person's cue that
     it's alive, and the one place the disclaimer appears instead of every message."""
@@ -7858,6 +7871,19 @@ def build_app():
         # job lain di atas.
         app.job_queue.run_repeating(run_bsjp_pyramid_validation_job, interval=180, first=140)
         app.job_queue.run_repeating(run_bsjp_pyramid_d1_job, interval=180, first=160)
+        # MBSS v2 (user request 2026-09-07 -- DAY TRADE REBOUND live, lihat
+        # blok "REBOUND LIVE" di engine/scanalert.py): SATU job gabungan
+        # (scan kandidat baru + monitor posisi OPEN), interval=300s (5
+        # menit) -- SENGAJA disamakan dgn cadence checkpoint backtest
+        # (CHECK_EVERY=5 di riset), user request eksplisit "job-nya
+        # disamakan saja waktunya dengan scan rebound". first=200 beda dari
+        # job lain di atas -- gcd(300,180)=60, 200 mod 60=20, tidak collide
+        # dgn first manapun di atas (semua first= di atas <180 & interval
+        # 180s, siklus tabrakan cuma terjadi kalau (first_A-first_B) mod
+        # gcd(180,300)=60 == 0 -- 200-70=130,200-95=105,200-115=85,
+        # 200-140=60(!). 60 mod 60 = 0 -- TABRAKAN dgn validation_job tiap
+        # 900s (kelipatan 180 & 300). Geser first ke 205 utk hindari itu.
+        app.job_queue.run_repeating(run_rebound_live_job, interval=300, first=205)
     else:
         print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
               "scan-alert intraday TIDAK akan jalan otomatis. Install dgn: "
