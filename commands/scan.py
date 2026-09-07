@@ -3343,19 +3343,30 @@ async def consensus_command(update, context):
     # entry_pagi_state.json HANYA terisi kalau job 09:05 sudah fire hari
     # ini (butuh data opening-range live) -- kosong/none kalau /consensus
     # dipanggil malam hari sebelum sesi 1 besok, itu WAJAR bukan error.
+    # BUGFIX (user report 2026-09-07 -- "consensus belum di update kah?"):
+    # SEBELUMNYA section ini diam TOTAL kalau entry_pagi_tickers kosong,
+    # jadi ambigu (tidak bisa dibedakan "belum fire hari ini" vs "sudah
+    # fire, 0 kandidat lolos filter"). SEKARANG selalu tampil, spt section
+    # lain (CONSENSUS PRIME tetap muncul dgn "0 saham") -- 3 state beda
+    # ditampilkan eksplisit.
     entry_pagi_state = scanalert_engine.load_entry_pagi_state_for_consensus()
-    entry_pagi_tickers = set(entry_pagi_state.get("tickers") or [])
-    if entry_pagi_tickers:
-        entry_pagi_cross = sorted(entry_pagi_tickers & (hc_selected | sdt_selected))
-        lines.append(f"\n🌅 ENTRY PAGI ∩ HC/allsetup — {len(entry_pagi_cross)} saham (dari {len(entry_pagi_tickers)} kandidat Entry Pagi hari ini)")
-        if entry_pagi_cross:
-            for t in entry_pagi_cross:
-                tags = []
-                if t in hc_selected: tags.append("HC")
-                if t in sdt_selected: tags.append("SDT/allsetup")
-                lines.append(f"• {t} — juga lolos: {', '.join(tags)}")
+    if not entry_pagi_state.get("fired_today"):
+        lines.append("\n🌅 ENTRY PAGI ∩ HC/allsetup — belum fire hari ini (scan 09:05-09:20 WIB belum jalan, atau /consensus dipanggil sebelum itu)")
+    else:
+        entry_pagi_tickers = set(entry_pagi_state.get("tickers") or [])
+        if not entry_pagi_tickers:
+            lines.append("\n🌅 ENTRY PAGI ∩ HC/allsetup — 0 saham (Entry Pagi sudah scan hari ini, tapi 0 kandidat lolos filter RSI/MACD -- wajar, bukan error)")
         else:
-            lines.append("Tidak ada irisan hari ini.")
+            entry_pagi_cross = sorted(entry_pagi_tickers & (hc_selected | sdt_selected))
+            lines.append(f"\n🌅 ENTRY PAGI ∩ HC/allsetup — {len(entry_pagi_cross)} saham (dari {len(entry_pagi_tickers)} kandidat Entry Pagi hari ini)")
+            if entry_pagi_cross:
+                for t in entry_pagi_cross:
+                    tags = []
+                    if t in hc_selected: tags.append("HC")
+                    if t in sdt_selected: tags.append("SDT/allsetup")
+                    lines.append(f"• {t} — juga lolos: {', '.join(tags)}")
+            else:
+                lines.append("Tidak ada irisan hari ini.")
 
     lines.append("\nDetail lengkap & konfirmasi live: /check TICKER")
     if staleness_note:

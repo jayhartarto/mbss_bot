@@ -4037,17 +4037,22 @@ def _save_entry_pagi_state(state: dict):
 def load_entry_pagi_state_for_consensus() -> dict:
     """
     Public helper (MBSS v2, user request 2026-09-06 -- /consensus jadi
-    irisan Entry Pagi dgn HC/allsetup) -- return {"tickers": [...]} kalau
-    scan Entry Pagi SUDAH fire HARI INI (butuh data opening-range live,
-    cuma tersedia stlh 09:05 WIB), else {} (BUKAN error -- wajar kosong
-    kalau /consensus dipanggil sebelum sesi 1 buka atau sblm job 09:05
-    fire). TIDAK expose seluruh state internal (message_id/avg_cost/dst)
-    -- caller cuma butuh daftar ticker.
+    irisan Entry Pagi dgn HC/allsetup) -- return {"fired_today": bool,
+    "tickers": [...]}. fired_today=False (tickers=[]) kalau scan Entry
+    Pagi BELUM fire hari ini (butuh data opening-range live, cuma
+    tersedia stlh 09:05 WIB) -- BUKAN error, wajar kalau /consensus
+    dipanggil sebelum sesi 1 buka. fired_today=True dgn tickers=[] artinya
+    SUDAH scan tapi genuinely 0 kandidat lolos filter (BUGFIX 2026-09-07,
+    user report "consensus belum di update kah?" -- state INI beda dari
+    "belum fire" & caller wajib bisa membedakan, jangan digabung diam2
+    jadi satu kondisi "kosong"). TIDAK expose seluruh state internal
+    (message_id/avg_cost/dst) -- caller cuma butuh status + daftar ticker.
     """
     state = _load_entry_pagi_state()
-    if state.get("trading_day_marker") != _today_str():
-        return {}
-    return {"tickers": [p["ticker"] for p in (state.get("picks") or [])]}
+    fired_today = state.get("trading_day_marker") == _today_str() and bool(state.get("fired"))
+    if not fired_today:
+        return {"fired_today": False, "tickers": []}
+    return {"fired_today": True, "tickers": [p["ticker"] for p in (state.get("picks") or [])]}
 
 
 def _entry_pagi_opening_range_from_bars(data, tickers: list[str]) -> dict:
