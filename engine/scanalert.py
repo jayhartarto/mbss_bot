@@ -1918,15 +1918,19 @@ async def run_bsjp_pyramid_validation_once() -> dict:
     snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, candidates, timeout=150, default={})
     positions = pyramid_state.setdefault("positions", {})
     new_positions = []
+    excluded = []  # BUGFIX (user report 2026-09-07): dulu dibuang diam2, sekarang dilaporkan
     for t in candidates:
         snap = snapshot.get(t)
         if not snap:
+            excluded.append((t, "data tidak tersedia"))
             continue
         if _bsjp_is_ara_locked(snap):
-            continue  # untradeable -- exclude sepenuhnya, TIDAK dialert
+            excluded.append((t, "ARA-lock (untradeable)"))
+            continue
         tier = _bsjp_pyramid_tier(entries[t], snap)
         if tier is None:
-            continue  # 'rest' -- TIDAK dialert (gate FADING yg sudah ada tetap jadi safety net)
+            excluded.append((t, "melandai sejak alert Fase2 (rest)"))
+            continue
         decision_price = snap["current_price"]
         positions[t] = {
             "ticker": t, "tier": tier, "decision_date": today, "decision_price": decision_price,
@@ -1940,10 +1944,29 @@ async def run_bsjp_pyramid_validation_once() -> dict:
         new_positions.append(positions[t])
 
     pyramid_state["validation_fired_date"] = today
+    # BUGFIX (user report 2026-09-07, "mana belum ada validasi tier piramida
+    # sampai sekarang?" -- ICON/HALO alert Fase2 fire, TAPI keduanya rest di
+    # validasi 15:00, function ini DIAM TOTAL, user tidak tahu pengecekan
+    # sudah terjadi. Sekarang SELALU kirim status kalau ada candidates yg
+    # dicek, sama filosofi dgn fix /consensus "0 kandidat" pagi ini): kirim
+    # pesan status walau new_positions kosong, selama ada candidates.
     if new_positions:
         message_id = await _bsjp_pyramid_send_new_message(_render_bsjp_pyramid_message(new_positions))
         pyramid_state["message_id"] = message_id
         pyramid_state["chat_id"] = core.TELEGRAM_CHAT_ID
+    elif candidates:
+        lines = [f"ENTRY SORE — Validasi 15:00: {len(candidates)} kandidat dicek, 0 lolos ke TIER1-3."]
+        for t, reason in excluded:
+            lines.append(f"  {t} — {reason}")
+        bot = _get_shared_bot()
+        status_msg = "\n".join(lines)
+        if bot is not None:
+            try:
+                await core.safe_reply(bot, status_msg, chat_id=core.TELEGRAM_CHAT_ID)
+            except Exception as e:
+                print(f"⚠️ Entry Sore pyramid: gagal kirim status 0-kandidat: {e}")
+        else:
+            print(f"[NO TELEGRAM TOKEN] {status_msg}")
     _save_bsjp_pyramid_state(pyramid_state)
     summary["positions"] = len(new_positions)
     print(f"✅ Entry Sore pyramid validation selesai: {len(candidates)} dicek, {len(new_positions)} posisi TIER1-3 dibuka.")
