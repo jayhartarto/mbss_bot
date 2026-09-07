@@ -1809,6 +1809,7 @@ async def high_conviction_command(update, context):
     backbone_result, backbone_staleness = nightly_engine.load_backbone_daily_allow_stale()
     if backbone_staleness:
         staleness_note = f"{staleness_note}\n{backbone_staleness}" if staleness_note else backbone_staleness
+    full_scored = scored  # simpan referensi SEBELUM di-narrow ke gate survivor -- REBOUND TOP-5 di bawah pakai universe PENUH, sama persis metodologi backtest/consensus (BUKAN dibatasi Danger Gate)
     pool = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
     scored = {r["ticker"]: r for r in pool}
 
@@ -1957,6 +1958,25 @@ async def high_conviction_command(update, context):
                 f"net-buy whitelist {r['whitelist_accumulation_net_pct']:+.0f}% ({r.get('whitelist_num_brokers', 0)} broker)"
             )
         lines.append("⚠️ Belum ada konfirmasi harga — risiko timing lebih tinggi dari kandidat HC di atas.")
+
+    # MBSS v2 (user request 2026-09-07 -- "rebound kayanya bisa masukkan
+    # saja as part of HC"): section INDEPENDEN lain, sama pola dgn
+    # AKUMULASI di atas (RapidAPI/whitelist section = 1 sinyal berdiri
+    # sendiri, section ini beda lagi = sinyal RSI/MACD/volume D-1 murni,
+    # TIDAK saling gantung). Reuse persis rank_rebound_top5_candidates
+    # yg dipakai /consensus (engine/scanalert.py) -- backtest 17 hari
+    # bursa win=85.7%/mean+3.25% (Top-5 komposit RSI+MACD+volume D-1).
+    # Pakai full_scored (universe PENUH, BUKAN gate-survivor-only) --
+    # SAMA metodologi persis dgn backtest & /consensus, supaya angka WR
+    # di atas tetap representatif (backtest tidak pernah disaring Danger
+    # Gate dulu).
+    rebound_top5 = scanalert_engine.rank_rebound_top5_candidates(full_scored)
+    if rebound_top5:
+        lines.append(f"\n🔄 REBOUND TOP-5 — {len(rebound_top5)} kandidat (RSI/MACD/volume D-1 kuat, TUNGGU konfirmasi rebound intraday sblm entry)\n")
+        for t in rebound_top5:
+            r = full_scored.get(t, {})
+            lines.append(f"• {t} — RSI {r.get('rsi', '-')} | MACD {r.get('macd_hist', '-')} | vol {r.get('vol_ratio', '-')}x")
+        lines.append("⚠️ Ini gate D-1 saja -- entry riil BUTUH konfirmasi rebound 0,5% dari rolling-low 15 menit intraday (belum ada alert otomatis, pantau manual).")
 
     # MBSS v2 (user request — "rapihkan HC, banyak section": section SQUEEZE
     # / PRA-BREAKOUT lama DIHAPUS -- REDUNDAN sejak SDT punya macd_approach_
