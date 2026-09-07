@@ -2488,6 +2488,61 @@ async def bsjp_screening_command(update, context):
     buttons = core.build_check_buttons([r["ticker"] for r in passed])
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
+
+async def entry_pagi_manual_command(update, context):
+    """
+    /entrypagi -- trigger MANUAL run_entry_pagi_scan_once(force=True) (MBSS
+    v2, user request 2026-09-07, live case: fetch bar 1m sempat gagal/
+    timeout di jendela otomatis 09:05-09:20 WIB, alert BUKAN sesuatu yg bisa
+    ditunggu sampai besok). force=True melewati guard jendela waktu &
+    "sudah fire hari ini" -- guard weekday/holiday/toggle/cache/data TETAP
+    berlaku (genuine blocker, bukan kebijakan).
+
+    PERINGATAN yg WAJIB ditampilkan: kalau scan pagi tadi SUDAH sukses
+    (ada TICK aktif sedang dipantau), menjalankan ini LAGI akan menimpa
+    state & mengirim pesan TICK BARU -- pesan lama jadi tidak lagi
+    di-update (monitor ikut pesan BARU). Aman dipakai kalau scan pagi tadi
+    genuinely gagal (no_intraday_data dkk, 0 TICK terkirim).
+    """
+    entry_pagi_state = scanalert_engine._load_entry_pagi_state()
+    already_active = (
+        entry_pagi_state.get("trading_day_marker") == scanalert_engine._today_str()
+        and entry_pagi_state.get("fired") and entry_pagi_state.get("picks")
+    )
+    if already_active and not (context.args and context.args[0].lower() == "force"):
+        await core.safe_reply(
+            update.message,
+            f"⚠️ ENTRY PAGI hari ini SUDAH ada {len(entry_pagi_state['picks'])} TICK aktif sedang dipantau. "
+            "Menjalankan ulang akan MENIMPA state itu & kirim TICK baru (pesan lama berhenti di-update). "
+            "Kalau yakin (mis. scan pagi tadi genuinely gagal), ketik /entrypagi force."
+        )
+        return
+
+    await core.safe_reply(update.message, "🌅 Menjalankan ulang scan ENTRY PAGI manual (opening-range tetap dari bar 09:00-09:05 asli hari ini)...")
+    try:
+        result = await scanalert_engine.run_entry_pagi_scan_once(force=True)
+    except Exception as e:
+        await core.safe_reply(update.message, f"⚠️ Scan ENTRY PAGI manual gagal: {e}")
+        return
+
+    if result.get("skipped_reason"):
+        reason_id = {
+            "toggled_off": "lane ENTRY PAGI sedang dimatikan (ENTRY_PAGI_ENABLED=False)",
+            "weekend": "hari ini weekend",
+            "holiday": "hari ini libur bursa",
+            "no_cache": "cache /eodscan belum ada/basi -- jalankan /eodscan dulu",
+            "no_intraday_data": "fetch bar 1m gagal/kosong (kemungkinan Yahoo rate-limit) -- coba lagi sebentar",
+        }.get(result["skipped_reason"], result["skipped_reason"])
+        await core.safe_reply(update.message, f"⚠️ Scan dibatalkan: {reason_id}")
+        return
+
+    picks = result.get("picks", 0)
+    if picks:
+        await core.safe_reply(update.message, f"✅ Selesai -- {picks} kandidat lolos, TICK baru sudah dikirim di atas.")
+    else:
+        await core.safe_reply(update.message, "✅ Selesai -- 0 kandidat lolos filter RSI>=65 & MACD>0 hari ini (wajar, bukan error).")
+
+
 async def strong_buy_command(update, context):
     """
     /strongbuy — SEMUA saham dengan action_id STRONG_BUY dari cache /eodscan,

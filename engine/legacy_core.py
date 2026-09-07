@@ -7723,6 +7723,7 @@ def build_app():
     app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
     app.add_handler(CommandHandler("brokerdiscovery", commands_scan.broker_discovery_command))
     app.add_handler(CommandHandler("bsjp", commands_scan.bsjp_screening_command))
+    app.add_handler(CommandHandler("entrypagi", commands_scan.entry_pagi_manual_command))
     app.add_handler(CommandHandler(["eodscan", "nightlyscan"], commands_scan.eodscan_command))
     app.add_handler(CallbackQueryHandler(commands_scan.gptpick_callback, pattern="^gptpick:(3|5)$"))
     app.add_handler(CommandHandler("brokersum", commands_check.brokersum_upload_command))

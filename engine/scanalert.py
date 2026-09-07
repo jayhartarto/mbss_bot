@@ -4223,12 +4223,23 @@ async def _entry_pagi_edit_message(state: dict):
         print(f"⚠️ Entry Pagi: gagal edit pesan: {e}")
 
 
-async def run_entry_pagi_scan_once() -> dict:
+async def run_entry_pagi_scan_once(force: bool = False) -> dict:
     """
     Fire SEKALI/hari (guard `fired` di state, BUKAN cron sekali-jalan --
     aman didaftarkan JobQueue repeating spt lane lain, no-op murah di
     siklus berikutnya) di jendela 09:05-09:20 WIB. Lihat catatan lengkap
     mekanisme di atas blok ENTRY PAGI.
+
+    force=True (MBSS v2, user request 2026-09-07 -- live case: fetch bar
+    1m sempat gagal/timeout pagi hari, /entrypagi dipakai manual ulangi
+    scan): lewati guard jendela 09:05-09:20 & guard `already_fired_today`
+    (dipanggil via command /entrypagi, BUKAN JobQueue) -- guard weekday/
+    holiday/toggle/no_cache/no_intraday_data TETAP berlaku (bukan
+    kebijakan yg bisa dilewati, tapi blocker genuine). Opening-range
+    TETAP dihitung dari bar jam 09:00-09:05 SAJA (_entry_pagi_opening_
+    range_from_bars filter waktu internal, TIDAK berubah) -- kalau
+    dipanggil siang, entry_price yg dihasilkan tetaplah harga jam 09:05
+    asli (dari histori bar hari itu), BUKAN harga saat command dijalankan.
     """
     summary = {"skipped_reason": None, "picks": 0}
     if not ENTRY_PAGI_ENABLED:
@@ -4238,7 +4249,7 @@ async def run_entry_pagi_scan_once() -> dict:
     if now_wib.weekday() >= 5:
         summary["skipped_reason"] = "weekend"
         return summary
-    if not (ENTRY_PAGI_SCAN_WINDOW_START <= now_wib.time() <= ENTRY_PAGI_SCAN_WINDOW_END):
+    if not force and not (ENTRY_PAGI_SCAN_WINDOW_START <= now_wib.time() <= ENTRY_PAGI_SCAN_WINDOW_END):
         summary["skipped_reason"] = "outside_window"
         return summary
     if await asyncio.to_thread(core.is_idx_market_holiday_today):
@@ -4247,7 +4258,7 @@ async def run_entry_pagi_scan_once() -> dict:
 
     today = _today_str()
     state = _load_entry_pagi_state()
-    if state.get("trading_day_marker") == today and state.get("fired"):
+    if not force and state.get("trading_day_marker") == today and state.get("fired"):
         summary["skipped_reason"] = "already_fired_today"
         return summary
 
