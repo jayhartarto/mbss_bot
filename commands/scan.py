@@ -368,7 +368,8 @@ async def all_setup_candidates_command(update, context):
         lines.append("  (kosong)")
     else:
         for r in entry_pagi_top20:
-            lines.append(f"  {r['ticker']} | RSI {r['rsi']:.0f} | MACD {r['macd_hist']:.2f}")
+            sm_tag = scanalert_engine._smart_money_tag(r.get("whitelist_accumulation_net_pct"), r.get("whitelist_num_brokers"))
+            lines.append(f"  {r['ticker']} | RSI {r['rsi']:.0f} | MACD {r['macd_hist']:.2f}{sm_tag}")
         lines.append(
             "  ⚠️ Ini kandidat PRE-filter (D-1 close), BELUM lewat ranking opening-range 09:00-09:05 "
             "-- fallback manual kalau scan otomatis ENTRY PAGI 09:05 gagal, bukan pengganti alert asli."
@@ -1975,7 +1976,8 @@ async def high_conviction_command(update, context):
         lines.append(f"\n🔄 REBOUND TOP-{scanalert_engine.REBOUND_TOP5_N} — {len(rebound_top5)} kandidat (RSI/MACD/volume D-1 kuat, TUNGGU konfirmasi rebound intraday sblm entry)\n")
         for t in rebound_top5:
             r = full_scored.get(t, {})
-            lines.append(f"• {t} — RSI {r.get('rsi', '-')} | MACD {r.get('macd_hist', '-')} | vol {r.get('vol_ratio', '-')}x")
+            sm_tag = scanalert_engine._smart_money_tag(r.get("whitelist_accumulation_net_pct"), r.get("whitelist_num_brokers"))
+            lines.append(f"• {t} — RSI {r.get('rsi', '-')} | MACD {r.get('macd_hist', '-')} | vol {r.get('vol_ratio', '-')}x{sm_tag}")
         lines.append("⚠️ Ini gate D-1 saja -- entry riil BUTUH konfirmasi rebound 0,5% dari rolling-low 15 menit intraday (belum ada alert otomatis, pantau manual).")
 
     # MBSS v2 (user request — "rapihkan HC, banyak section": section SQUEEZE
@@ -3418,7 +3420,8 @@ async def consensus_command(update, context):
     if rebound_top5:
         for t in sorted(rebound_top5):
             r = pool_by_ticker.get(t) or scored.get(t, {})
-            lines.append(f"• {t} — RSI {r.get('rsi', '-')} | MACD {r.get('macd_hist', '-')} | vol {r.get('vol_ratio', '-')}x")
+            sm_tag = scanalert_engine._smart_money_tag(r.get("whitelist_accumulation_net_pct"), r.get("whitelist_num_brokers"))
+            lines.append(f"• {t} — RSI {r.get('rsi', '-')} | MACD {r.get('macd_hist', '-')} | vol {r.get('vol_ratio', '-')}x{sm_tag}")
     else:
         lines.append("Tidak ada kandidat lolos gate hari ini.")
 

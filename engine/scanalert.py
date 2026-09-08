@@ -4209,6 +4209,8 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
             "ticker": t, "entry_ref": entry_ref, "value_traded": value_traded,
             "entry_pos_in_or": entry_pos_in_or, "dist_from_prior_high_pct": dist_from_prior_high_pct,
             "or_range_pct": or_range_pct, "rsi": info.get("rsi"), "macd_hist": info.get("macd_hist"),
+            "whitelist_accumulation_net_pct": info.get("whitelist_accumulation_net_pct"),
+            "whitelist_num_brokers": info.get("whitelist_num_brokers"),
         })
     if len(rows) < ENTRY_PAGI_TOP_N:
         return []
@@ -4238,6 +4240,22 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
     ]
 
 
+def _smart_money_tag(net_pct, num_brokers) -> str:
+    """
+    Label singkat "💰 Smart Money +X% (Nbroker)" kalau whitelist net-buy
+    memenuhi threshold "meaningful" yg sudah dipakai konsisten di seluruh
+    codebase (>=15% net, >=2 broker whitelist -- lihat commands/scan.py
+    accumulation_candidates/watch_only). String kosong kalau tidak
+    memenuhi ATAU datanya None (missing = neutral, JANGAN dianggap
+    negatif -- sesuai konvensi RapidAPI project ini).
+    """
+    if net_pct is None or not isinstance(net_pct, (int, float)):
+        return ""
+    if net_pct >= 15 and (num_brokers or 0) >= 2:
+        return f" 💰 Smart Money +{net_pct:.0f}% ({num_brokers}broker)"
+    return ""
+
+
 def _render_entry_pagi_message(picks: list[dict]) -> str:
     """
     Satu pesan yg SAMA di-edit-in-place sepanjang hari (BUKAN pesan baru
@@ -4261,9 +4279,10 @@ def _render_entry_pagi_message(picks: list[dict]) -> str:
         entry, avg_down = p["entry_price"], p["avg_down_price"]
         lo, hi = sorted([avg_down, entry])
         avgdown_note = " (avg down TERISI)" if p.get("filled_avgdown") else ""
+        sm_tag = _smart_money_tag(p.get("whitelist_accumulation_net_pct"), p.get("whitelist_num_brokers"))
         blocks.append(
             f"TICK {i}\n"
-            f"{p['ticker']} — {entry:,.0f} (harga alert)\n"
+            f"{p['ticker']} — {entry:,.0f} (harga alert){sm_tag}\n"
             f"Entry Range : {lo:,.0f}-{hi:,.0f}\n"
             f"TP : {p['tp']:,.0f}\n"
             f"SL : {p['sl']:,.0f}\n"
@@ -4398,6 +4417,8 @@ async def run_entry_pagi_scan_once(force: bool = False) -> dict:
             "tp": entry_price * (1 + ENTRY_PAGI_D1_TP_PCT / 100.0),
             "sl": entry_price * (1 - ENTRY_PAGI_D1_SL_PCT / 100.0),
             "status": "WAITING", "day": "D1", "peak_ret_d2": None,
+            "whitelist_accumulation_net_pct": r.get("whitelist_accumulation_net_pct"),
+            "whitelist_num_brokers": r.get("whitelist_num_brokers"),
         })
 
     new_state = {
@@ -4731,8 +4752,9 @@ def _render_rebound_message(picks: list[dict]) -> str:
                 f"Max EXIT time {p['exit_deadline']} - CLOSED ({reason_tag}) - "
                 f"RESOLVE at {p['resolve_price']:,.0f} ({p['resolve_ret_pct']:+.1f}%)"
             )
+        sm_tag = _smart_money_tag(p.get("whitelist_accumulation_net_pct"), p.get("whitelist_num_brokers"))
         blocks.append(
-            f"🔄 {p['ticker']} — rebound +{REBOUND_TIER_PCT:.1f}% dari low intraday, entry {p['entry_price']:,.0f}\n"
+            f"🔄 {p['ticker']} — rebound +{REBOUND_TIER_PCT:.1f}% dari low intraday, entry {p['entry_price']:,.0f}{sm_tag}\n"
             f"Gate D-1: RSI {p['rsi']:.0f} | MACD {p['macd_hist']:+.2f} | Vol {p['vol_ratio']:.1f}x kemarin\n"
             f"TP {p['tp_price']:,.0f} (+{REBOUND_TP2_PCT:.0f}%) | SL {p['sl_price']:,.0f} ({REBOUND_SL_PCT:+.1f}%)\n"
             f"{status_line}"
@@ -4795,7 +4817,9 @@ async def run_rebound_live_once() -> dict:
         top5 = rank_rebound_top5_candidates(scored)
         state["top5"] = top5
         state["top5_info"] = {
-            t: {"rsi": scored[t].get("rsi"), "macd_hist": scored[t].get("macd_hist"), "vol_ratio": scored[t].get("vol_ratio")}
+            t: {"rsi": scored[t].get("rsi"), "macd_hist": scored[t].get("macd_hist"), "vol_ratio": scored[t].get("vol_ratio"),
+                "whitelist_accumulation_net_pct": scored[t].get("whitelist_accumulation_net_pct"),
+                "whitelist_num_brokers": scored[t].get("whitelist_num_brokers")}
             for t in top5
         }
         _save_rebound_state(state)
@@ -4849,6 +4873,8 @@ async def run_rebound_live_once() -> dict:
                         "sl_price": entry_price * (1 + REBOUND_SL_PCT / 100.0),
                         "status": "OPEN", "resolve_price": None, "resolve_ret_pct": None, "resolve_reason": None,
                         "rsi": info.get("rsi"), "macd_hist": info.get("macd_hist"), "vol_ratio": info.get("vol_ratio"),
+                        "whitelist_accumulation_net_pct": info.get("whitelist_accumulation_net_pct"),
+                        "whitelist_num_brokers": info.get("whitelist_num_brokers"),
                     }
                     dirty = True
                     summary["new_fires"] += 1
