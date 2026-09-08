@@ -4606,7 +4606,18 @@ async def run_entry_pagi_d2_once() -> dict:
 # filosofi ENTRY PAGI.
 REBOUND_TOP5_RSI_MIN = 65.0
 REBOUND_TOP5_VOL_RATIO_MIN = 1.07  # median sampel backtest 2026-09-07 -- KALIBRASI ULANG kalau nanti data lebih banyak terkumpul, bukan konstanta universal yg final
-REBOUND_TOP5_N = 5
+# MBSS v2 (user request 2026-09-08, live case: hari dgn Top-5 kandidat
+# super-overbought yg tidak pernah pull-back -- nihil sinyal sepanjang
+# hari). Diperlebar 5->7 (research/rebound_topn_sweep.py, 19 hari 1m):
+# N=7 -> n=93 trade (5.9/hari), win=82.8%, mean=+2.92% -- degradasi tipis
+# drpd N=5 (win 85.7%/mean +3.31%) tapi trade lebih banyak. CATATAN: hari
+# dgn >=1 sinyal TETAP 16/19 di N manapun (5 s.d. 10) -- memperlebar N
+# TIDAK menjamin hari yg genuinely sepi (seluruh pool D-1 gate tidak
+# pernah pull-back) jadi ada sinyal, cuma menambah slot/frekuensi di hari
+# yg SUDAH ada aktivitas. Nama konstanta tetap REBOUND_TOP5_* (bukan
+# TOP7) drpd rename massal di semua caller/pesan/memory yg sudah pakai
+# nama ini -- nilai N adalah satu2nya yg berubah.
+REBOUND_TOP5_N = 7
 
 
 def rank_rebound_top5_candidates(scored: dict) -> list[str]:

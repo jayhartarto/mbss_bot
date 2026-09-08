@@ -1972,7 +1972,7 @@ async def high_conviction_command(update, context):
     # Gate dulu).
     rebound_top5 = scanalert_engine.rank_rebound_top5_candidates(full_scored)
     if rebound_top5:
-        lines.append(f"\n🔄 REBOUND TOP-5 — {len(rebound_top5)} kandidat (RSI/MACD/volume D-1 kuat, TUNGGU konfirmasi rebound intraday sblm entry)\n")
+        lines.append(f"\n🔄 REBOUND TOP-{scanalert_engine.REBOUND_TOP5_N} — {len(rebound_top5)} kandidat (RSI/MACD/volume D-1 kuat, TUNGGU konfirmasi rebound intraday sblm entry)\n")
         for t in rebound_top5:
             r = full_scored.get(t, {})
             lines.append(f"• {t} — RSI {r.get('rsi', '-')} | MACD {r.get('macd_hist', '-')} | vol {r.get('vol_ratio', '-')}x")
@@ -3414,7 +3414,7 @@ async def consensus_command(update, context):
     # HANYA daftar kandidat gate D-1 -- entry riil TETAP butuh konfirmasi
     # rebound intraday (0.5% dari rolling-low 15 menit, kapan saja
     # sepanjang hari) yg BELUM diimplementasi sbg job otomatis terpisah.
-    lines.append(f"\n🔄 REBOUND TOP-5 — {len(rebound_top5)} saham (kandidat D-1, TUNGGU konfirmasi rebound intraday sblm entry)")
+    lines.append(f"\n🔄 REBOUND TOP-{scanalert_engine.REBOUND_TOP5_N} — {len(rebound_top5)} saham (kandidat D-1, TUNGGU konfirmasi rebound intraday sblm entry)")
     if rebound_top5:
         for t in sorted(rebound_top5):
             r = pool_by_ticker.get(t) or scored.get(t, {})
