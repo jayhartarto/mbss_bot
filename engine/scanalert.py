@@ -4061,7 +4061,23 @@ ENTRY_PAGI_ENABLED = True  # feature-toggle terisolasi -- set False kalau perlu 
 
 ENTRY_PAGI_OR_WINDOW_END = datetime.time(9, 5)  # jendela opening-range: buka s.d. 09:05 WIB
 ENTRY_PAGI_SCAN_WINDOW_START = datetime.time(9, 5)
-ENTRY_PAGI_SCAN_WINDOW_END = datetime.time(9, 20)  # toleransi kalau job pertama kali fire agak telat dari 09:05 persis
+# MBSS v2 (user request 2026-09-08, live case: Yahoo block ~09:04-09:10
+# WIB bikin fetch bar 1m kosong total berkali-kali di jam buka, /entrypagi
+# manual baru berhasil jam 09:10) -- diperlebar 09:20->09:30 (dari 3
+# kesempatan retry siklus 180s jadi ~8), didukung backtest OR-window-ikut-
+# mundur sampai 09:30 (research/entry_pagi_delay_test.py, n=38-48/titik,
+# win 68.8-83.3%, mean +1.35% s/d +3.07% -- TIDAK ada tanda kolaps/negatif
+# di rentang ini, jadi aman dipakai sbg batas fallback).
+ENTRY_PAGI_SCAN_WINDOW_END = datetime.time(9, 30)
+# Kalau scan BELUM sukses sampai jam ini, OR window dianggap genuinely
+# delayed (bukan cuma jitter penjadwalan job yg wajar +-1-2menit) --
+# beralih ke OR "ikut mundur" (pakai bar s.d. WAKTU SEKARANG, bukan fixed
+# 09:05) supaya entry_ref yg ditampilkan di alert tetap harga yg
+# achievable saat itu, bukan harga basi 09:05 yg sudah lewat >5menit.
+# Backtest konfirmasi performa OR-ikut-mundur SEBANDING (bukan lebih
+# jelek) dgn OR-fixed+entry-delayed di titik yg sama -- lihat memory
+# project_entry_pagi_yahoo_block_fallback_2026_09_08.md.
+ENTRY_PAGI_OR_DELAY_FALLBACK_AFTER = datetime.time(9, 10)
 ENTRY_PAGI_MONITOR_WINDOW_START = datetime.time(9, 5)
 ENTRY_PAGI_MONITOR_WINDOW_END = datetime.time(15, 50)
 ENTRY_PAGI_SESSION1_END = datetime.time(11, 59, 59)  # scan kandidat BARU cukup di sesi 1 (user request -- "biar gak noisy"), monitoring TP/SL tetap sepanjang hari
@@ -4120,16 +4136,24 @@ def load_entry_pagi_state_for_consensus() -> dict:
     return {"fired_today": True, "tickers": [p["ticker"] for p in (state.get("picks") or [])]}
 
 
-def _entry_pagi_opening_range_from_bars(data, tickers: list[str]) -> dict:
+def _entry_pagi_opening_range_from_bars(data, tickers: list[str], or_window_end: datetime.time = None) -> dict:
     """
     Dari DataFrame bar 1m (_fetch_today_1m), hitung or_high/or_low/entry_ref
-    (jendela buka s.d. ENTRY_PAGI_OR_WINDOW_END) per ticker. Ticker tanpa
-    bar di jendela (baru listing/suspend/data kosong) TIDAK masuk dict --
-    bukan exception, cukup dikecualikan dari ranking hari itu.
+    (jendela buka s.d. or_window_end, default ENTRY_PAGI_OR_WINDOW_END/09:05)
+    per ticker. Ticker tanpa bar di jendela (baru listing/suspend/data
+    kosong) TIDAK masuk dict -- bukan exception, cukup dikecualikan dari
+    ranking hari itu.
+
+    or_window_end dibuat overridable (MBSS v2, user request 2026-09-08) --
+    fallback "OR ikut mundur" dipakai run_entry_pagi_scan_once kalau fetch
+    normal 09:05 genuinely gagal berkali2 (lihat ENTRY_PAGI_OR_DELAY_
+    FALLBACK_AFTER), BUKAN dipakai di jalur normal (yg tetap fixed 09:05
+    persis formula yg sudah divalidasi).
     """
     out = {}
     if data is None or (hasattr(data, "empty") and data.empty):
         return out
+    cutoff = or_window_end or ENTRY_PAGI_OR_WINDOW_END
     for t in tickers:
         sym = t + ".JK"
         try:
@@ -4138,7 +4162,7 @@ def _entry_pagi_opening_range_from_bars(data, tickers: list[str]) -> dict:
             continue
         if bars.empty:
             continue
-        win = bars[bars.index.time <= ENTRY_PAGI_OR_WINDOW_END]
+        win = bars[bars.index.time <= cutoff]
         if win.empty:
             continue
         try:
@@ -4344,7 +4368,24 @@ async def run_entry_pagi_scan_once(force: bool = False) -> dict:
         summary["skipped_reason"] = "no_intraday_data"
         return summary
 
-    or_data = _entry_pagi_opening_range_from_bars(data, universe)
+    # MBSS v2 (user request 2026-09-08, live case Yahoo block ~09:04-09:10):
+    # kalau baru berhasil fetch SETELAH ENTRY_PAGI_OR_DELAY_FALLBACK_AFTER
+    # (bukan force manual -- /entrypagi via force=True SENGAJA tetap pakai
+    # OR asli 09:05 per docstring di atas, "harga jam 09:05 asli", supaya
+    # command manual re-run tetap konsisten dgn histori bar hari itu),
+    # anggap ini genuinely delayed (bukan cuma jitter -+1-2menit) --
+    # OR window ikut mundur ke WAKTU SEKARANG (bukan fixed 09:05) supaya
+    # entry_ref yg dialert tetap harga achievable, bukan harga basi.
+    # Backtest konfirmasi performa sebanding sampai 09:30 (lihat memory
+    # project_entry_pagi_yahoo_block_fallback_2026_09_08.md) -- TIDAK
+    # dipakai kalau force=True krn re-run manual siang hari harus tetap
+    # merujuk histori 09:05 asli, bukan "sekarang".
+    or_window_end = ENTRY_PAGI_OR_WINDOW_END
+    if not force and now_wib.time() > ENTRY_PAGI_OR_DELAY_FALLBACK_AFTER:
+        or_window_end = min(now_wib.time(), ENTRY_PAGI_SCAN_WINDOW_END)
+        print(f"⚠️ Entry Pagi: fetch baru sukses jam {now_wib.strftime('%H:%M')} (lewat batas normal 09:10) -- OR window ikut mundur ke {or_window_end.strftime('%H:%M')} drpd skip hari ini.")
+
+    or_data = _entry_pagi_opening_range_from_bars(data, universe, or_window_end=or_window_end)
     picks_raw = _rank_entry_pagi_candidates(scored, or_data)
 
     picks_state = []
