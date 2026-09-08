@@ -4626,19 +4626,21 @@ async def run_entry_pagi_d2_once() -> dict:
 # (compute_factor_scoring) -- TANPA pipeline indikator baru, PERSIS
 # filosofi ENTRY PAGI.
 REBOUND_TOP5_RSI_MIN = 65.0
-REBOUND_TOP5_VOL_RATIO_MIN = 1.07  # median sampel backtest 2026-09-07 -- KALIBRASI ULANG kalau nanti data lebih banyak terkumpul, bukan konstanta universal yg final
-# MBSS v2 (user request 2026-09-08, live case: hari dgn Top-5 kandidat
-# super-overbought yg tidak pernah pull-back -- nihil sinyal sepanjang
-# hari). Diperlebar 5->7 (research/rebound_topn_sweep.py, 19 hari 1m):
-# N=7 -> n=93 trade (5.9/hari), win=82.8%, mean=+2.92% -- degradasi tipis
-# drpd N=5 (win 85.7%/mean +3.31%) tapi trade lebih banyak. CATATAN: hari
-# dgn >=1 sinyal TETAP 16/19 di N manapun (5 s.d. 10) -- memperlebar N
-# TIDAK menjamin hari yg genuinely sepi (seluruh pool D-1 gate tidak
-# pernah pull-back) jadi ada sinyal, cuma menambah slot/frekuensi di hari
-# yg SUDAH ada aktivitas. Nama konstanta tetap REBOUND_TOP5_* (bukan
-# TOP7) drpd rename massal di semua caller/pesan/memory yg sudah pakai
-# nama ini -- nilai N adalah satu2nya yg berubah.
-REBOUND_TOP5_N = 7
+# MBSS v2 (user request 2026-09-08, riset delay-aware/limit-order rework --
+# lihat memory project_rebound_delay_aware_bug_and_verdict_2026_09_08.md
+# utk riwayat lengkap termasuk bug kritis yg ditemukan & diperbaiki di
+# eksekusi live). Threshold gate di-resweep dgn mekanisme eksekusi yg
+# SUDAH benar (research/rebound_gate_threshold_sweep.py): vol_ratio>=1.5
+# (naik dari 1.07) -> win 67.4%/mean+2.11% vs vol_ratio>=1.07 -> win
+# 65.9%/mean+1.70% (n=41-43, Top-5). RSI tetap 65 -- terbukti kombinasi
+# RSI>=65+vol>=1.5 MENGALAHKAN RSI>=60+vol>=1.5 (dua threshold tidak
+# aditif, jangan asumsikan sweep tunggal langsung bisa digabung).
+REBOUND_TOP5_VOL_RATIO_MIN = 1.5
+# Dikembalikan ke 5 (dari 7 yg sempat dicoba 2026-09-08 pagi) -- riset
+# fee-adjusted (research/rebound_final_fee_sensitivity.py) tunjukkan
+# Top-5 net-of-fee mean +1.26% vs Top-7 net +0.90% -- kualitas per-trade
+# lebih penting drpd frekuensi utk config yg sudah solid ini.
+REBOUND_TOP5_N = 5
 
 
 def rank_rebound_top5_candidates(scored: dict) -> list[str]:
@@ -4674,51 +4676,104 @@ def rank_rebound_top5_candidates(scored: dict) -> list[str]:
 
 
 # ═══════════════════ REBOUND LIVE (intraday monitoring job) ═══════════════════
-# MBSS v2 (user request 2026-09-07, implementasi penuh setelah format
-# pesan dikunci): job TUNGGAL (scan + monitor digabung, SATU cadence,
-# user request eksplisit "job-nya disamakan saja waktunya dengan scan
-# rebound + estimasi waktu exit dari alert yang ada") -- BEDA dari ENTRY
-# PAGI/ENTRY SORE yg punya job scan & job monitor terpisah, di sini
-# digabung krn siklusnya SUDAH pendek (5 menit, sama persis CHECK_EVERY
-# backtest) & window exit per-posisi cuma 20 menit, jadi TIDAK butuh
-# cadence beda utk "cari kandidat baru" vs "cek yg sudah OPEN".
+# MBSS v2 REWORK 2026-09-08 -- diganti total dari mekanisme "rolling-low
+# 15menit + TP/SL tetap" lama (yg terbukti PUNYA BUG FATAL: entry_price
+# teoritis lookback_low*1.005 TIDAK achievable -- 98.9% kasus harga
+# closing bar trigger SUDAH lebih tinggi dari harga teoritis saat bar itu
+# closing, bahkan TANPA delay tambahan apapun. Lihat memory
+# project_rebound_delay_aware_bug_and_verdict_2026_09_08.md utk riwayat
+# investigasi lengkap: bug ditemukan, diperbaiki, lalu di-tuning ulang
+# sampai config final yg genuinely tervalidasi realistis).
 #
-# Mekanisme (PERSIS backtest, lihat rank_rebound_top5_candidates &
-# memory project_daytrade_rebound_revised_formula_2026_09_07.md):
-# 1) Top-5/hari (komposit RSI+MACD+vol_ratio D-1) DIKUNCI SEKALI di awal
-#    hari (fire pertama job ini) -- TIDAK dihitung ulang tiap siklus
-#    (ranking berbasis D-1, tidak berubah intraday, re-hitung cuma buang
-#    waktu).
-# 2) Tiap siklus (300s/5menit): utk tiap Top-5 yg BELUM fire hari ini,
-#    scan bar 1m hari ini dari menit ke-15, cek rolling-low 15 menit tiap
-#    checkpoint 5-menitan, begitu High >= rolling_low*1.005 -> FIRE
-#    (entry = rolling_low*1.005, exit_deadline = waktu_fire + 20menit).
-#    First-touch SEKALI/ticker/hari, PERSIS backtest.
-# 3) Utk posisi OPEN: cek bar SEJAK entry -- Low<=SL_price -> CLOSED/SL,
-#    High>=TP_price -> CLOSED/TP, kalau belum & now>=exit_deadline ->
-#    CLOSED/TIMEOUT (resolve di closing price bar terakhir tersedia).
-# 4) Pesan SATU per hari, edit-in-place -- blok baru di-append tiap fire,
-#    blok existing di-update statusnya (OPEN -> CLOSED) tanpa hapus blok
-#    lain. Format terkunci user (2026-09-07):
-#      DAY TRADE REBOUND
-#      🔄 TICKER — rebound +0,5% dari low intraday, entry {harga}
-#      Gate D-1: RSI {x} | MACD {x} | Vol {x}x kemarin
-#      TP {harga} (+6%) | SL {harga} (-2,5%)
-#      Max EXIT time {HH:MM} - OPEN
-#      -- atau setelah resolve --
-#      Max EXIT time {HH:MM} - CLOSED - RESOLVE at {harga} ({+/-x%})
+# AKAR MASALAH lama: yfinance/Yahoo Finance quote IDX ada delay ~10-15
+# menit (Yahoo label resmi "Jakarta - Delayed Quote", dikonfirmasi juga
+# via GitHub issue yfinance#1050 & kasus live SOHO 2026-09-08 dgn selisih
+# ~10-14 menit). Assume entry PERSIS di harga trigger real-time itu
+# fiksi -- baik krn delay data MAUPUN krn dalam satu bar 1menit sendiri
+# harga sering sudah lewat titik itu sebelum bar closing.
+#
+# MEKANISME BARU (delay-aware, gaya LIMIT ORDER):
+# 1) Top-5/hari (komposit RSI+MACD+vol_ratio D-1, REBOUND_TOP5_VOL_RATIO_
+#    MIN=1.5) DIKUNCI SEKALI di awal hari, sama seperti sebelumnya.
+# 2) Tiap siklus (300s/5menit): fetch bar 1m HARI INI SEJAUH YG TERSEDIA
+#    (yfinance otomatis reflect delay Yahoo yg sesungguhnya -- TIDAK perlu
+#    simulasi delay manual, itu cuma dipakai backtest utk meniru kondisi
+#    live). Hitung rolling_low KUMULATIF dari open s.d. bar terakhir yg
+#    ada (bukan window sempit 15menit -- riset 2026-09-08 tunjukkan
+#    kumulatif/window lebar >=7menit lebih baik dari window sempit).
+#    trigger_price = rolling_low * 1.005 (SAMA konsepnya spt lama, tapi
+#    sekarang DIPERLAKUKAN spt limit order, bukan asumsi fill instan).
+# 3) ENTRY terjadi HANYA kalau harga real-time SAAT INI (close bar
+#    terakhir) masih <= trigger_price (order genuinely menunggu turun ke
+#    situ), ATAU sudah lewat tapi overshoot-nya <= REBOUND_TOLERANCE_PCT
+#    (1%) -- dlm kasus itu entry di HARGA REAL saat ini (bukan harga
+#    trigger teoritis yg sudah tidak achievable). Kalau overshoot > 1%,
+#    SKIP siklus ini (bukan entry, genuinely kelewatan) -- siklus
+#    berikutnya hitung ulang trigger_price baru (biasanya turun/sama,
+#    krn rolling_low kumulatif cuma bisa turun/tetap seiring waktu).
+#    TERBUKTI di backtest: toleransi >1% (atau entry instan tanpa syarat)
+#    justru MEMPERBURUK hasil (chasing) -- JANGAN dilonggarkan.
+# 4) Avg-down SEKALI di -1% dari entry ASLI (bukan avg cost) kalau
+#    tersentuh sebelum SL/tier manapun. SL KERAS -3% dari entry ASLI,
+#    TIDAK PERNAH berubah oleh averaging (avg-down cuma utk memperbaiki
+#    cost basis & memperkecil % rugi/mempercepat % untung, BUKAN
+#    melonggarkan risk tolerance).
+# 5) Tiered trailing exit (dari avg_cost SAAT ITU, bukan entry asli):
+#    peak return >=3% -> floor terkunci +1%; >=5% -> floor +3%; >=8% ->
+#    floor +5%; >=10% -> ambil PENUH langsung (jangan tunggu floor).
+#    Floor CUMA NAIK, tidak pernah turun. Exit terjadi begitu harga turun
+#    ke floor yg sedang aktif, ATAU capai target 10% (ambil instan).
+# 6) Force-exit di akhir sesi (closing) kalau belum resolve -- pakai
+#    harga closing sbg resolve price (TIMEOUT), floating apa adanya.
+# 7) Pesan SATU per hari, edit-in-place, SEMUA Top-5 dlm SATU pesan (blok
+#    per ticker) -- bukan pesan terpisah. Ticker yg BELUM entry cuma
+#    disebut namanya (hindari tampilkan harga estimasi yg terus berubah
+#    tiap siklus, supaya user TIDAK reflexively chasing angka yg
+#    berubah-ubah). Ticker yg sudah CLOSED tetap tampil (bukan dihapus)
+#    sampai akhir hari -- user eksplisit minta ini "biar tidak chasing"
+#    (bisa lihat histori penuh hari itu tanpa perlu ingat-ingat).
+#
+# VALIDASI (research/rebound_final_validation.py, 2026-09-08, Top-5,
+# n=43 dari 80 kandidat-hari, ~19-20 hari 1m): GROSS win=67.4%/mean=
+# +2.11%. NET-of-fee (0.44% round-trip broker+levy): win=62.8%/mean=
+# +1.67% (delay=15m asumsi utama). Robust di seluruh rentang delay
+# 10-20menit (NET mean tetap +1.15% s/d +1.72%). CATATAN: n masih
+# moderate (~19-20 hari data 1m), bukan skala besar -- pantau live utk
+# konfirmasi lanjutan, jangan anggap ini final mutlak.
 REBOUND_LIVE_ENABLED = True  # feature-toggle terisolasi -- set False kalau perlu mematikan cepat TANPA menyentuh lane lain
-REBOUND_LOOKBACK_MIN = 15
-REBOUND_TIER_PCT = 0.5
-REBOUND_MAX_HOLD_MIN = 20
-REBOUND_TP2_PCT = 6.0
-REBOUND_SL_PCT = -2.5
+REBOUND_TIER_PCT = 0.5  # +0.5% dari rolling_low = trigger_price (SAMA spt formula asli)
+REBOUND_TOLERANCE_PCT = 1.0  # toleransi overshoot entry -- JANGAN dilonggarkan, terbukti memperburuk
+REBOUND_AVGDOWN_PCT = 1.0  # avg-down sekali di -1% dari entry ASLI
+REBOUND_SL_PCT = 3.0  # SL KERAS -3% dari entry ASLI, absolut, tidak berubah oleh avg-down
+REBOUND_TIERS = [(3.0, 1.0), (5.0, 3.0), (8.0, 5.0), (10.0, None)]  # (peak_threshold%, floor_terkunci%); None = ambil target penuh
+REBOUND_MIN_BARS_FOR_TRIGGER = 5  # minimal bar tersedia sblm mulai hitung rolling_low (hindari noise bar pertama2 sesi)
 REBOUND_SCAN_WINDOW_START = datetime.time(9, 0)
 REBOUND_SCAN_WINDOW_END = datetime.time(15, 50)
 REBOUND_S1_START, REBOUND_S1_END = datetime.time(9, 0), datetime.time(12, 0)
 REBOUND_S2_START, REBOUND_S2_END = datetime.time(13, 30), datetime.time(15, 50)
 
 STATE_FILE_REBOUND = os.path.join(core.PROJECT_ROOT, "rebound_state.json")
+
+
+def _idx_round_tick(price: float) -> float:
+    """
+    Bulatkan ke fraksi harga (tick size) IDX TERDEKAT -- ditentukan oleh
+    rentang harga ITU SENDIRI (bukan rentang harga acuan lain spt entry),
+    krn tick BISA BERUBAH kalau harga hasil hitungan (mis. target TP)
+    melewati batas band. Tabel fraksi harga IDX (regulasi berlaku):
+      <200: 1 | 200-<500: 2 | 500-<2000: 5 | 2000-<5000: 10 | >=5000: 25
+    """
+    if price < 200:
+        tick = 1
+    elif price < 500:
+        tick = 2
+    elif price < 2000:
+        tick = 5
+    elif price < 5000:
+        tick = 10
+    else:
+        tick = 25
+    return round(price / tick) * tick
 
 
 def _load_rebound_state() -> dict:
@@ -4740,25 +4795,51 @@ def _rebound_session_mask(t: datetime.time) -> bool:
     return (REBOUND_S1_START <= t <= REBOUND_S1_END) or (REBOUND_S2_START <= t <= REBOUND_S2_END)
 
 
-def _render_rebound_message(picks: list[dict]) -> str:
+def _render_rebound_message(top5: list[str], top5_info: dict, picks: dict) -> str:
+    """
+    Satu pesan/hari, SEMUA Top-5 dlm satu body (bukan pesan terpisah).
+    Belum trigger -> nama saja (hindari harga estimasi yg terus berubah,
+    supaya user tidak chasing). Sudah OPEN -> entry + avg-down + SL + TP
+    bertingkat (tertinggi->terendah) semua sudah dibulatkan ke tick IDX.
+    Sudah CLOSED -> tetap tampil (tidak dihapus) sampai akhir hari.
+    """
     header = "DAY TRADE REBOUND"
     blocks = []
-    for p in picks:
+    for t in top5:
+        info = top5_info.get(t, {})
+        sm_tag = _smart_money_tag(info.get("whitelist_accumulation_net_pct"), info.get("whitelist_num_brokers"))
+        p = picks.get(t)
+        if p is None:
+            blocks.append(f"⏳ {t} — belum trigger rebound{sm_tag}")
+            continue
+        entry_price = _idx_round_tick(p["entry_price"])
         if p["status"] == "OPEN":
-            status_line = f"Max EXIT time {p['exit_deadline']} - OPEN"
-        else:
-            reason_tag = {"TP": "TP", "SL": "SL", "TIMEOUT": "TIMEOUT"}.get(p.get("resolve_reason"), p.get("resolve_reason", ""))
-            status_line = (
-                f"Max EXIT time {p['exit_deadline']} - CLOSED ({reason_tag}) - "
-                f"RESOLVE at {p['resolve_price']:,.0f} ({p['resolve_ret_pct']:+.1f}%)"
+            avgdown_price = _idx_round_tick(p["avgdown_price"])
+            sl_price = _idx_round_tick(p["sl_price"])
+            avg_cost = p["avg_cost"]
+            tp_lines = " | ".join(
+                f"{_idx_round_tick(avg_cost * (1 + th / 100.0)):,.0f} (+{th:.0f}%)"
+                for th, _ in reversed(REBOUND_TIERS)
             )
-        sm_tag = _smart_money_tag(p.get("whitelist_accumulation_net_pct"), p.get("whitelist_num_brokers"))
-        blocks.append(
-            f"🔄 {p['ticker']} — rebound +{REBOUND_TIER_PCT:.1f}% dari low intraday, entry {p['entry_price']:,.0f}{sm_tag}\n"
-            f"Gate D-1: RSI {p['rsi']:.0f} | MACD {p['macd_hist']:+.2f} | Vol {p['vol_ratio']:.1f}x kemarin\n"
-            f"TP {p['tp_price']:,.0f} (+{REBOUND_TP2_PCT:.0f}%) | SL {p['sl_price']:,.0f} ({REBOUND_SL_PCT:+.1f}%)\n"
-            f"{status_line}"
-        )
+            avgdown_line = (
+                f"Sudah avg-down @ {avgdown_price:,.0f}" if p["did_avgdown"]
+                else f"Avg-down jika turun ke {avgdown_price:,.0f} (-{REBOUND_AVGDOWN_PCT:.0f}%)"
+            )
+            floor_line = f"Floor terkunci: +{p['floor_pct']:.0f}%" if p["floor_pct"] is not None else "Floor: belum ada (SL aktif)"
+            blocks.append(
+                f"🔄 {t} — entry {entry_price:,.0f}{sm_tag}\n"
+                f"{avgdown_line}\n"
+                f"SL {sl_price:,.0f} (-{REBOUND_SL_PCT:.0f}%)\n"
+                f"TP bertingkat (tertinggi→terendah): {tp_lines}\n"
+                f"{floor_line} — OPEN"
+            )
+        else:
+            reason_tag = p.get("resolve_reason", "")
+            resolve_price = _idx_round_tick(p["resolve_price"])
+            blocks.append(
+                f"🔄 {t} — entry {entry_price:,.0f}{sm_tag}\n"
+                f"CLOSED ({reason_tag}) — resolve at {resolve_price:,.0f} ({p['resolve_ret_pct']:+.1f}%)"
+            )
     return header + "\n\n" + "\n\n".join(blocks)
 
 
@@ -4837,7 +4918,7 @@ async def run_rebound_live_once() -> dict:
     dirty = False
     now_time = now_wib.time()
 
-    # --- (1) scan kandidat yg BELUM fire hari ini ---
+    # --- (1) cek entry (gaya limit order) utk kandidat yg BELUM fire hari ini ---
     if pending:
         data = await _fetch_with_timeout(_fetch_today_1m, pending, default=pd.DataFrame())
         if data is not None and not (hasattr(data, "empty") and data.empty):
@@ -4850,37 +4931,48 @@ async def run_rebound_live_once() -> dict:
                 if bars.empty:
                     continue
                 bars = bars[[_rebound_session_mask(ts.time()) for ts in bars.index]]
-                if len(bars) < REBOUND_LOOKBACK_MIN + 5:
+                if len(bars) < REBOUND_MIN_BARS_FOR_TRIGGER:
                     continue
-                highs, lows = bars["High"].astype(float).values, bars["Low"].astype(float).values
-                times = [ts.time() for ts in bars.index]
-                n = len(bars)
-                for i in range(REBOUND_LOOKBACK_MIN, n):
-                    lookback_low = lows[max(0, i - REBOUND_LOOKBACK_MIN):i].min()
-                    if lookback_low <= 0:
-                        continue
-                    rebound_pct = (highs[i] - lookback_low) / lookback_low * 100
-                    if rebound_pct < REBOUND_TIER_PCT:
-                        continue
-                    entry_price = lookback_low * (1 + REBOUND_TIER_PCT / 100.0)
-                    entry_time = times[i]
-                    exit_dt = (datetime.datetime.combine(datetime.date.today(), entry_time) + datetime.timedelta(minutes=REBOUND_MAX_HOLD_MIN)).time()
-                    info = state["top5_info"].get(t, {})
-                    picks[t] = {
-                        "ticker": t, "entry_price": entry_price, "entry_time": entry_time.strftime("%H:%M"),
-                        "exit_deadline": exit_dt.strftime("%H:%M"),
-                        "tp_price": entry_price * (1 + REBOUND_TP2_PCT / 100.0),
-                        "sl_price": entry_price * (1 + REBOUND_SL_PCT / 100.0),
-                        "status": "OPEN", "resolve_price": None, "resolve_ret_pct": None, "resolve_reason": None,
-                        "rsi": info.get("rsi"), "macd_hist": info.get("macd_hist"), "vol_ratio": info.get("vol_ratio"),
-                        "whitelist_accumulation_net_pct": info.get("whitelist_accumulation_net_pct"),
-                        "whitelist_num_brokers": info.get("whitelist_num_brokers"),
-                    }
-                    dirty = True
-                    summary["new_fires"] += 1
-                    break  # first-touch SEKALI/hari
+                rolling_low = float(bars["Low"].astype(float).min())
+                if rolling_low <= 0:
+                    continue
+                trigger_price = rolling_low * (1 + REBOUND_TIER_PCT / 100.0)
+                current_price = float(bars["Close"].astype(float).iloc[-1])
+                overshoot_pct = (current_price - trigger_price) / trigger_price * 100
 
-    # --- (2) monitor posisi OPEN ---
+                entry_price = None
+                if overshoot_pct <= 0:
+                    # belum overshoot -- order msh "menunggu" turun. Tetap cek apakah
+                    # bar terakhir SUDAH menyentuh trigger_price (High >= trigger).
+                    last_high = float(bars["High"].astype(float).iloc[-1])
+                    if last_high >= trigger_price:
+                        entry_price = trigger_price
+                elif overshoot_pct <= REBOUND_TOLERANCE_PCT:
+                    # sudah lewat trigger_price teoritis tapi overshoot masih dlm
+                    # toleransi -- entry di HARGA REAL saat ini (bukan harga teoritis
+                    # yg sudah tidak achievable). overshoot > toleransi -> SKIP,
+                    # genuinely kelewatan, tunggu siklus berikutnya.
+                    entry_price = current_price
+
+                if entry_price is None:
+                    continue
+                entry_time = bars.index[-1].time()
+                info = state["top5_info"].get(t, {})
+                picks[t] = {
+                    "ticker": t, "status": "OPEN",
+                    "entry_price": entry_price, "entry_time": entry_time.strftime("%H:%M"),
+                    "avg_cost": entry_price, "did_avgdown": False, "floor_pct": None,
+                    "sl_price": entry_price * (1 - REBOUND_SL_PCT / 100.0),
+                    "avgdown_price": entry_price * (1 - REBOUND_AVGDOWN_PCT / 100.0),
+                    "resolve_price": None, "resolve_ret_pct": None, "resolve_reason": None,
+                    "rsi": info.get("rsi"), "macd_hist": info.get("macd_hist"), "vol_ratio": info.get("vol_ratio"),
+                    "whitelist_accumulation_net_pct": info.get("whitelist_accumulation_net_pct"),
+                    "whitelist_num_brokers": info.get("whitelist_num_brokers"),
+                }
+                dirty = True
+                summary["new_fires"] += 1
+
+    # --- (2) monitor posisi OPEN: SL keras, avg-down sekali, tiered trailing TP ---
     open_positions = [t for t, p in picks.items() if p["status"] == "OPEN"]
     if open_positions:
         data2 = await _fetch_with_timeout(_fetch_today_1m, open_positions, default=pd.DataFrame())
@@ -4898,28 +4990,50 @@ async def run_rebound_live_once() -> dict:
                 bars_since_entry = bars[[ts.time() >= entry_time_of_day for ts in bars.index]]
                 if bars_since_entry.empty:
                     continue
-                day_high = float(bars_since_entry["High"].astype(float).max())
-                day_low = float(bars_since_entry["Low"].astype(float).min())
-                last_close = float(bars_since_entry["Close"].astype(float).iloc[-1])
-                exit_deadline_time = datetime.datetime.strptime(p["exit_deadline"], "%H:%M").time()
 
-                if day_low <= p["sl_price"]:
-                    p["status"], p["resolve_reason"] = "CLOSED", "SL"
-                    p["resolve_price"] = p["sl_price"]
-                elif day_high >= p["tp_price"]:
-                    p["status"], p["resolve_reason"] = "CLOSED", "TP"
-                    p["resolve_price"] = p["tp_price"]
-                elif now_time >= exit_deadline_time:
+                closed_this_cycle = False
+                for _, bar in bars_since_entry.iterrows():
+                    bar_low = float(bar["Low"])
+                    bar_high = float(bar["High"])
+                    if bar_low <= p["sl_price"]:
+                        p["status"], p["resolve_reason"] = "CLOSED", "SL"
+                        p["resolve_price"] = p["sl_price"]
+                        closed_this_cycle = True
+                        break
+                    if not p["did_avgdown"] and bar_low <= p["avgdown_price"]:
+                        p["avg_cost"] = (p["entry_price"] + p["avgdown_price"]) / 2
+                        p["did_avgdown"] = True
+                        continue
+                    high_pct = (bar_high - p["avg_cost"]) / p["avg_cost"] * 100
+                    low_pct = (bar_low - p["avg_cost"]) / p["avg_cost"] * 100
+                    if high_pct >= REBOUND_TIERS[-1][0]:
+                        p["status"], p["resolve_reason"] = "CLOSED", "TP_FULL"
+                        p["resolve_price"] = p["avg_cost"] * (1 + REBOUND_TIERS[-1][0] / 100.0)
+                        closed_this_cycle = True
+                        break
+                    if p["floor_pct"] is not None and low_pct <= p["floor_pct"]:
+                        p["status"], p["resolve_reason"] = "CLOSED", "TP_TRAIL"
+                        p["resolve_price"] = p["avg_cost"] * (1 + p["floor_pct"] / 100.0)
+                        closed_this_cycle = True
+                        break
+                    for threshold, new_floor in REBOUND_TIERS[:-1]:
+                        if high_pct >= threshold:
+                            if p["floor_pct"] is None or new_floor > p["floor_pct"]:
+                                p["floor_pct"] = new_floor
+
+                if not closed_this_cycle and now_time >= REBOUND_SCAN_WINDOW_END:
+                    last_close = float(bars_since_entry["Close"].astype(float).iloc[-1])
                     p["status"], p["resolve_reason"] = "CLOSED", "TIMEOUT"
                     p["resolve_price"] = last_close
-                else:
-                    continue  # masih OPEN, tidak ada perubahan
-                p["resolve_ret_pct"] = (p["resolve_price"] - p["entry_price"]) / p["entry_price"] * 100
-                dirty = True
-                summary["resolved"] += 1
+                    closed_this_cycle = True
+
+                if closed_this_cycle:
+                    p["resolve_ret_pct"] = (p["resolve_price"] - p["avg_cost"]) / p["avg_cost"] * 100
+                    dirty = True
+                    summary["resolved"] += 1
 
     if dirty:
-        text = _render_rebound_message(list(picks.values()))
+        text = _render_rebound_message(top5, state.get("top5_info", {}), picks)
         bot = _get_shared_bot()
         if state.get("message_id") and bot is not None:
             try:
