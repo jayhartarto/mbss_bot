@@ -430,6 +430,37 @@ async def show_winrate(update, context):
         lines.append(f"\n📈 KESELURUHAN ({len(all_resolved)} pick selesai): {overall_winrate:.0f}% Win — "
                       f"rata-rata {avg_gain:+.2f}%/pick, total {overall_gain:+.1f}%")
 
+    # MBSS v2 (user request): "saham yang masih open for entry (masih dalam
+    # range entry, masih ada ruang untuk TP), urutkan dari tag dengan winrate
+    # & avg gain tertinggi" -- status "pending_entry" (belum di-fill, entry
+    # otomatis di OPEN hari bursa berikutnya, TANPA syarat harga) & "pending_
+    # resolution" (sudah entry, belum kena TP1/cut_loss/time-based) SAMA-SAMA
+    # genuinely "masih terbuka, belum resolve" -- unresolved BY DEFINITION
+    # masih py ruang gerak ke TP/SL, bukan klaim baru. Diurutkan pakai
+    # winrate_pct/avg_gain yg SUDAH dihitung per signal_label di atas (REUSE
+    # signal_rows, bukan hitung ulang) -- tag TANPA histori resolved (msh
+    # terlalu baru) taruh PALING BAWAH dgn catatan eksplisit, bukan diam2
+    # diberi angka 0% yg menyesatkan.
+    signal_stats = {label: (winrate_pct, avg_gain) for label, winrate_pct, _, _, avg_gain in signal_rows}
+    open_picks = [p for p in history if p["status"] in ("pending_entry", "pending_resolution")]
+    if open_picks:
+        def _open_pick_sort_key(p):
+            label = p.get("signal_label") or "N/A (data lama)"
+            stats = signal_stats.get(label)
+            if stats is None:
+                return (1, 0.0, 0.0)  # belum ada histori -- taruh paling bawah
+            return (0, -stats[0], -stats[1])  # winrate desc, lalu avg_gain desc
+        open_picks_sorted = sorted(open_picks, key=_open_pick_sort_key)
+
+        lines.append("\n🚪 Saham Masih Open for Entry (belum resolve -- masih ada ruang TP/SL), diurutkan winrate+avg gain tag tertinggi")
+        for p in open_picks_sorted:
+            label = p.get("signal_label") or "N/A (data lama)"
+            stats = signal_stats.get(label)
+            stats_txt = f"{stats[0]:.0f}% Win avg{stats[1]:+.1f}%" if stats else "belum ada histori"
+            status_str = core.STATUS_LABEL_ID.get(p["status"], p["status"])
+            source_str = p.get("source", "screendaytrade")
+            lines.append(f"{p['ticker']} // {label} ({stats_txt}) // {status_str} // {source_str} // {p['pick_date']}")
+
     await core.safe_reply(update.message, "\n".join(lines))
 
 
