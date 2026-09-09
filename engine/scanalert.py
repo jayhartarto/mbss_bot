@@ -836,6 +836,27 @@ BSJP_CLEAN_CLOSE_MULT = 1.025
 # mean+12.09% -- jelas beda kelas, dapat 3 fire.
 BSJP_TIER_VOL_MULT = 10.0
 BSJP_TP1_MEDIAN_GAP_PCT = 3.1  # dipakai _build_bsjp_message (alert live), TIDAK terkait tier/fading di atas
+# MBSS v2 (user request 2026-09-09, delay-fetch review): BSJP py NOL proteksi
+# thd gap delay yfinance (~10-15min) + waktu baca user -- current_price/
+# decision_price ditampilkan sbg harga tunggal tanpa toleransi apapun, beda
+# dari ENTRY PAGI (sudah py Entry Range+ceiling, commit 93d510e) & REBOUND
+# (limit-order tolerance, commit 6e572c1). BSJP py thesis momentum/kontinuasi
+# -- turun tidak pernah merusak thesis, jadi dipakai CEILING SATU SISI
+# ("beli HANYA JIKA harga <= ceiling"), BUKAN range dua sisi spt ENTRY PAGI
+# (yg py leg avg-down, BSJP fire alert tidak py itu).
+#
+# Backtest cepat (scratchpad bsjp_ceiling_tolerance.py): populasi kecil intraday
+# (1m, n=314, gate disederhanakan TANPA filter volume pace-adjusted -- caveat
+# eksplisit, BUKAN direct match popolasi produksi n=712/win71.6% di atas)
+# menunjukkan entry TANPA ceiling sama sekali (harga alert dipakai apa
+# adanya) mean D+1 NEGATIF (-0.88%), sedangkan ceiling di toleransi manapun
+# (0.5/1.0/1.5/2.0%) membalik ke flat-positif (mean -0.05% s/d +0.15%,
+# win 48-50%). Beda antar-toleransi kecil/noise-level pada sampel ini --
+# dipilih 1.0% (konsisten dgn ENTRY PAGI yg sudah divalidasi lebih matang,
+# posisi tengah dari sweep yg relatif datar), BUKAN diasumsikan otomatis
+# sama krn instruksi eksplisit utk tidak reuse buta -- treat sbg direksional,
+# bukan final-tuned spt REBOUND/ENTRY PAGI.
+BSJP_CEILING_TOLERANCE_PCT = 1.0
 BSJP_RECHECK_WINDOW_START = datetime.time(9, 30)
 BSJP_RECHECK_WINDOW_END = datetime.time(15, 50)
 # MBSS v2 (user request 2026-09-02): 900s->300s -- alasan LANGSUNG terkait
@@ -1240,8 +1261,9 @@ def _bsjp_tier(snap: dict) -> int:
 
 
 def _build_bsjp_message(ticker: str, snap: dict, tier: int) -> str:
-    current_price = snap["current_price"]
-    tp1_price = current_price * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0)
+    current_price = _idx_round_tick(snap["current_price"])
+    ceiling = _idx_round_tick(snap["current_price"] * (1 + BSJP_CEILING_TOLERANCE_PCT / 100.0))
+    tp1_price = _idx_round_tick(snap["current_price"] * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0))
     vol_vs_prev = snap["vol_vs_prev_fair"]
     vol_vs_ma200 = snap["vol_vs_ma200_fair"]
     fire = "🔥" * tier
@@ -1250,6 +1272,7 @@ def _build_bsjp_message(ticker: str, snap: dict, tier: int) -> str:
         f"BSJP\n"
         f"{fire} {ticker} {label} — vol {vol_vs_prev:.1f}x kemarin, {vol_vs_ma200:.1f}x avg 200hr, harga dekat high hari ini\n"
         f"Harga sekarang: {current_price:,.0f}\n"
+        f"Beli HANYA JIKA harga masih <= {ceiling:,.0f}. Sudah tembus? SKIP, jangan dikejar.\n"
         f"TP1 (estimasi): {tp1_price:,.0f}\n"
         f"BELI SORE INI. Jual besok pagi begitu TP1 tersentuh."
     )
@@ -1557,11 +1580,14 @@ async def run_bsjp_recheck_once() -> dict:
             old_tier = tier_map.get(t, 1)
             if new_tier > old_tier:
                 fire = "🔥" * new_tier
+                upgrade_price = _idx_round_tick(snap["current_price"])
+                upgrade_ceiling = _idx_round_tick(snap["current_price"] * (1 + BSJP_CEILING_TOLERANCE_PCT / 100.0))
                 msg = (
                     f"BSJP UPGRADE\n"
                     f"{fire} {t} naik ke tier {new_tier} — vol {snap['vol_vs_prev_fair']:.1f}x kemarin, "
                     f"{snap['vol_vs_ma200_fair']:.1f}x avg 200hr\n"
-                    f"Harga sekarang: {snap['current_price']:,.0f}"
+                    f"Harga sekarang: {upgrade_price:,.0f}\n"
+                    f"Beli HANYA JIKA harga masih <= {upgrade_ceiling:,.0f}. Sudah tembus? SKIP, jangan dikejar."
                 )
                 if bot is not None:
                     await core.safe_reply(bot, msg, chat_id=core.TELEGRAM_CHAT_ID)
@@ -1802,7 +1828,17 @@ def _bsjp_d1_tp_sl_for_tier23(avg_cost: float, now_time: datetime.time) -> tuple
 
 
 def _render_bsjp_pyramid_message(positions: list[dict]) -> str:
-    """Satu pesan per hari alert, di-edit-in-place sepanjang D+1 (avg-down/TP/SL/masuk sesi 2)."""
+    """
+    Satu pesan per hari alert, di-edit-in-place sepanjang D+1 (avg-down/TP/SL/masuk sesi 2).
+
+    Ceiling +BSJP_CEILING_TOLERANCE_PCT dari decision_price ditambahkan
+    (2026-09-09) HANYA sbg instruksi pesan utk status OPEN -- posisi itu
+    SUDAH lolos validasi 15:00 & avg_cost/TP/SL SUDAH dikunci di
+    decision_price utk konsistensi dgn backtest (BUKAN diubah di sini,
+    lihat run_bsjp_pyramid_validation_once) -- ceiling ini cuma membantu
+    user yg baru sempat baca pesan beberapa menit kemudian tahu batas
+    wajar eksekusi manual, bukan mengubah mekanisme tracking posisi.
+    """
     header = (
         "ENTRY SORE\n"
         "Posisi lolos validasi 15:00 -- avg down maks 2x besok (tier2 -2%, tier3 -5%)\n"
@@ -1823,18 +1859,26 @@ def _render_bsjp_pyramid_message(positions: list[dict]) -> str:
             avgdown_note = " (avg down tier2+tier3 TERISI)"
         elif p.get("filled_tier2"):
             avgdown_note = " (avg down tier2 TERISI)"
+        tp = _idx_round_tick(p["tp"])
+        sl = _idx_round_tick(p["sl"])
         if p["status"] == "SESSION2":
             blocks.append(
                 f"TICK {i}\n{p['ticker']} — {p['tier']}\n"
-                f"🔄 Masuk Sesi 2\nTP : {p['tp']:,.0f} | SL : {p['sl']:,.0f}"
+                f"🔄 Masuk Sesi 2\nTP : {tp:,.0f} | SL : {sl:,.0f}"
             )
         else:
+            decision_price = _idx_round_tick(p["decision_price"])
+            ceiling_line = ""
+            if p["status"] == "OPEN":
+                ceiling = _idx_round_tick(p["decision_price"] * (1 + BSJP_CEILING_TOLERANCE_PCT / 100.0))
+                ceiling_line = f"Beli HANYA JIKA harga masih <= {ceiling:,.0f}. Sudah tembus? SKIP, jangan dikejar.\n"
             blocks.append(
                 f"TICK {i}\n"
                 f"{p['ticker']} — {p['tier']} ({_BSJP_TIER_LABEL.get(p['tier'], '')})\n"
-                f"Harga keputusan (15:00): {p['decision_price']:,.0f}\n"
-                f"TP : {p['tp']:,.0f}\n"
-                f"SL : {p['sl']:,.0f}\n"
+                f"Harga keputusan (15:00): {decision_price:,.0f}\n"
+                f"{ceiling_line}"
+                f"TP : {tp:,.0f}\n"
+                f"SL : {sl:,.0f}\n"
                 f"{marker.get(p['status'], p['status'])}{avgdown_note}"
             )
     return header + "\n\n" + "\n\n".join(blocks)
