@@ -1392,6 +1392,33 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
             _gap_narrowing = macd_hist.iloc[-1] < macd_hist.iloc[-3] if current_macd_hist > 0 else macd_hist.iloc[-1] > macd_hist.iloc[-3]
             macd_imminent_cross = bool(_gap_pct_rank <= 0.33 and _gap_narrowing)
 
+    # MBSS v2 (2026-09-09, external repo scouting -- trading-cli/mariobgsp,
+    # memory backlog_external_repo_feature_scouting_2026_09_09.md): VCP
+    # (Volatility Contraction Pattern) tightening score -- DISTINCT dari
+    # Bollinger squeeze yg sudah ada (squeeze = SATU angka bandwidth
+    # percentile; VCP = 3-tahap penyempitan rentang 15h->10h->5h + volume
+    # dry-up + dekat high 20h, digabung). Backtest (n=139-348 tergantung
+    # lane): squeeze-alone LEMAH (mean NEGATIF di populasi foreign-flow),
+    # VCP jauh lebih baik & robust (plateau di sweep rasio 0.6-0.85).
+    # `vcp_tightness_ratio` = r3/r1 (KONTINU, makin RENDAH makin ketat/baik
+    # -- dipakai sbg booster ranking factor). `vcp_pass` = BOOLEAN hard
+    # gate (tightening & vol_dryup & near_high) -- dipakai FF DAYTRADE.
+    vcp_tightness_ratio = None
+    vcp_pass = None
+    if len(close_prices) >= 20 and len(high_prices) >= 20 and len(low_prices) >= 20 and len(volumes) >= 20:
+        _cur_close = close_prices.iloc[-1]
+        if _cur_close and _cur_close > 0:
+            _r1 = (high_prices.tail(15).max() - low_prices.tail(15).min()) / _cur_close
+            _r2 = (high_prices.tail(10).max() - low_prices.tail(10).min()) / _cur_close
+            _r3 = (high_prices.tail(5).max() - low_prices.tail(5).min()) / _cur_close
+            if _r1 and _r1 > 0:
+                vcp_tightness_ratio = round(float(_r3 / _r1), 4)
+                _tightening = bool(_r1 > _r2 > _r3 and _r3 < _r1 * 0.7)
+                _vol_dryup = bool(volumes.tail(5).mean() < volumes.tail(15).mean())
+                _high20 = high_prices.tail(20).max()
+                _near_high = bool(_high20 and _high20 > 0 and (_cur_close - _high20) / _high20 > -0.10)
+                vcp_pass = bool(_tightening and _vol_dryup and _near_high)
+
     # MBSS v2 (user request, real observasi live intraday — saham dengan
     # "order buy tebal" yang bergerak mengikuti harga, seolah dijaga rapi
     # di level tertentu yang naik bareng harga). Bot TIDAK punya akses
@@ -2218,6 +2245,8 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         "macd_lifecycle_state": macd_lifecycle_state,  # BREAKING / CONTINUATION / WATCH_PULLBACK / None -- lihat catatan di atas
         "macd_accelerating": macd_accelerating,  # histogram msh naik 2 hari terakhir -- lihat catatan foreign-flow day-trade lane di atas
         "macd_imminent_cross": macd_imminent_cross,  # gap MACD-Signal sempit & menyempit (mendekati cross) -- kohort TERBURUK, dipakai sbg exclusion
+        "vcp_tightness_ratio": vcp_tightness_ratio,  # r3/r1, makin rendah makin ketat/baik -- lihat catatan VCP di atas
+        "vcp_pass": vcp_pass,  # boolean hard gate (tightening & vol_dryup & near_high) -- lihat catatan VCP di atas
         "tight_trailing_support": tight_trailing_support,  # informational/bonus only, TIDAK menggating apa pun -- lihat catatan di atas
         "ema9_slope_pct": ema9_slope_pct,
         "trailing_support_undercut_days": trailing_support_undercut_days,

@@ -4752,6 +4752,17 @@ REBOUND_TOP5_VOL_RATIO_MIN = 1.5
 # lebih penting drpd frekuensi utk config yg sudah solid ini.
 REBOUND_TOP5_N = 5
 
+# MBSS v2 (2026-09-09, VCP scouting, memory backlog_external_repo_feature_
+# scouting_2026_09_09.md): "booster" (default) adds VCP tightness as a 4th
+# composite-rank factor, NEVER shrinks the daily candidate pool -- user
+# explicit request "apakah ini tidak mengurangi kandidat yg di deliver
+# oleh bot kan?". "hard_filter" is the higher-quality but much sparser
+# alternative (tested win39.1%/mean+1.264% n=348 vs booster's win30.9%/
+# mean+0.442% n=2202 -- SAME fire-day count as no-VCP baseline -- vs
+# hard_filter's 216/455 fire-days, mean 1.62 picks/day instead of 4.85).
+# Toggle here if the volume-vs-quality trade-off is reconsidered later.
+REBOUND_VCP_MODE = "booster"  # "booster" | "hard_filter" | "off"
+
 
 def rank_rebound_top5_candidates(scored: dict) -> list[str]:
     """
@@ -4759,6 +4770,13 @@ def rank_rebound_top5_candidates(scored: dict) -> list[str]:
     & vol_ratio>=1.07 (D-1, formula produksi), diurutkan komposit
     (RSI+MACD+Volume, masing2 di-rank lalu dijumlah, skor terendah
     menang). List kosong kalau tidak ada yg lolos gate -- BUKAN error.
+
+    VCP (MBSS v2, 2026-09-09, lihat REBOUND_VCP_MODE di atas): mode
+    "booster" (default) tambah faktor rank ke-4 dari vcp_tightness_ratio
+    (makin rendah/ketat makin baik, missing=worst-rank via +inf, TIDAK
+    exclude ticker). Mode "hard_filter" mempersempit pool ke vcp_pass=True
+    SEBELUM ranking (kualitas lebih tinggi tapi kandidat jauh lebih
+    sedikit -- lihat catatan angka di REBOUND_VCP_MODE).
     """
     pool = []
     for t, info in scored.items():
@@ -4768,9 +4786,17 @@ def rank_rebound_top5_candidates(scored: dict) -> list[str]:
         if rsi is None or macd_hist is None or vol_ratio is None:
             continue
         if rsi >= REBOUND_TOP5_RSI_MIN and macd_hist > 0 and vol_ratio >= REBOUND_TOP5_VOL_RATIO_MIN:
-            pool.append({"ticker": t, "rsi": rsi, "macd_hist": macd_hist, "vol_ratio": vol_ratio})
+            pool.append({
+                "ticker": t, "rsi": rsi, "macd_hist": macd_hist, "vol_ratio": vol_ratio,
+                "vcp_tightness_ratio": info.get("vcp_tightness_ratio"), "vcp_pass": info.get("vcp_pass"),
+            })
     if not pool:
         return []
+
+    if REBOUND_VCP_MODE == "hard_filter":
+        pool = [r for r in pool if r["vcp_pass"] is True]
+        if not pool:
+            return []
 
     def rank_map(seq, key):
         ordered = sorted(seq, key=key, reverse=True)
@@ -4781,6 +4807,12 @@ def rank_rebound_top5_candidates(scored: dict) -> list[str]:
     r3 = rank_map(pool, lambda r: r["vol_ratio"])
     for r in pool:
         r["score"] = r1[r["ticker"]] + r2[r["ticker"]] + r3[r["ticker"]]
+
+    if REBOUND_VCP_MODE == "booster":
+        r4 = rank_map(pool, lambda r: -(r["vcp_tightness_ratio"] if r["vcp_tightness_ratio"] is not None else float("inf")))
+        for r in pool:
+            r["score"] += r4[r["ticker"]]
+
     pool.sort(key=lambda r: r["score"])
     return [r["ticker"] for r in pool[:REBOUND_TOP5_N]]
 
@@ -5268,6 +5300,13 @@ def _rank_ff_daytrade_candidates(scored: dict) -> list[dict]:
     None), macd_imminent_cross WAJIB bukan True (None/False lolos, True
     dikecualikan) -- exclusion-type, missing dianggap "bukan mendekati
     cross" (tidak dihukum krn data tidak tersedia).
+
+    VCP (MBSS v2, 2026-09-09, memory backlog_external_repo_feature_
+    scouting_2026_09_09.md): vcp_pass WAJIB True (fail-closed spt
+    macd_accelerating -- lane ini SUDAH all-hard-AND by design, jadi
+    tambah VCP sbg AND lagi konsisten dgn arsitektur yg ada, TIDAK spt
+    REBOUND yg butuh keputusan booster-vs-filter krn REBOUND deliver
+    Top-5/hari dan harus jaga volume kandidat).
     """
     rows = []
     for t, info in scored.items():
@@ -5280,6 +5319,7 @@ def _rank_ff_daytrade_candidates(scored: dict) -> list[dict]:
         adx = info.get("adx")
         accel = info.get("macd_accelerating")
         imminent = info.get("macd_imminent_cross")
+        vcp_pass = info.get("vcp_pass")
         if rsi is None or macd_hist is None or net_ratio is None or pct_b is None or dist_sma20 is None or adx is None:
             continue
         if not isinstance(cmf, (int, float)):
@@ -5287,6 +5327,8 @@ def _rank_ff_daytrade_candidates(scored: dict) -> list[dict]:
         if accel is not True:
             continue
         if imminent is True:
+            continue
+        if vcp_pass is not True:
             continue
         if not (rsi >= FF_DAYTRADE_RSI_MIN and macd_hist > FF_DAYTRADE_MACD_MIN):
             continue
