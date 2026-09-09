@@ -2710,6 +2710,25 @@ async def pingpong_watchlist_command(update, context):
     Sideways-bias-naik (SMA20 slope) tetap DILUAR gate keras -- cuma info
     di pesan (window 3hr sudah cukup spesifik/responsif).
 
+    RANKING & IRISAN (MBSS v2, 2026-09-09, user request -- "urutkan
+    prioritas dari vol, range, dan irisan dengan tools lainnya... saya
+    akan merasa lebih aman kalau ada irisan dengan setup lain, misalnya
+    worst case nyangkut" + follow-up "juga sdt dan hc ya"): kandidat
+    diranking komposit (rank volume + rank range, sama pola rank-sum spt
+    rank_rebound_top5_candidates/_rank_entry_pagi_candidates -- REUSE,
+    bukan reinvent), lalu ditandai kalau JUGA muncul di lane/tool lain
+    yg sudah tervalidasi -- REBOUND Top-5, gate ENTRY PAGI (RSI>=65&
+    MACD>0), FF DAYTRADE, SDT, HC, plus Smart Money (whitelist broker) &
+    Foreign Flow (net_ratio_1d). REBOUND/ENTRY PAGI-gate/FF DAYTRADE
+    dihitung LANGSUNG dari `scored` (100% D-1-based). SDT/HC REUSE
+    _consensus_sdt_hc_selected yg sama dgn /consensus (EOD-only, butuh
+    backbone_daily cache malam ini -- degradasi anggun/kosong kalau
+    belum ada, TIDAK blokir /pingpong). Tetap murni baca cache, TIDAK
+    ada fetch baru. Irisan ini BUKAN penambah win-rate (ping-pong
+    sendiri TERBUKTI tidak ada edge) -- murni "kalau worst-case
+    nyangkut, ticker ini juga punya dukungan fundamental/momentum dari
+    sudut lain" spt yg diminta user.
+
     Murni baca cache -- instan, tidak fetch apa pun.
     """
     scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
@@ -2721,15 +2740,20 @@ async def pingpong_watchlist_command(update, context):
     for t, r in scored.items():
         vt20 = r.get("value_traded_20d_avg")
         range_ok = r.get("range_gt3pct_alldays_3d")
+        range3avg = r.get("range_pct_3d_avg")
         near_open3 = r.get("close_near_open_pct_3d_avg")
         vol5d = r.get("avg_volume_5d")
         sma_slope = r.get("sma20_slope_20d_pct")
-        if vt20 is None or range_ok is None or near_open3 is None or vol5d is None:
+        if vt20 is None or range_ok is None or range3avg is None or near_open3 is None or vol5d is None:
             continue
         rows.append({
             "ticker": t, "value_traded_20d_avg": vt20, "range_gt3pct_alldays_3d": range_ok,
-            "close_near_open_pct_3d_avg": near_open3, "avg_volume_5d": vol5d,
+            "range_pct_3d_avg": range3avg, "close_near_open_pct_3d_avg": near_open3, "avg_volume_5d": vol5d,
             "sma20_slope_20d_pct": sma_slope,
+            "whitelist_accumulation_net_pct": r.get("whitelist_accumulation_net_pct"),
+            "whitelist_num_brokers": r.get("whitelist_num_brokers"),
+            "foreign_net_ratio_1d": r.get("foreign_net_ratio_1d"),
+            "rsi": r.get("rsi"), "macd_hist": r.get("macd_hist"),
         })
 
     if len(rows) < 10:
@@ -2756,18 +2780,63 @@ async def pingpong_watchlist_command(update, context):
         await core.safe_reply(update.message, "📋 RANGE WATCH — tidak ada saham yang cocok pola ping-pong malam ini (wajar, gate memang ketat by design).")
         return
 
-    candidates.sort(key=lambda r: r["avg_volume_5d"], reverse=True)
+    # Irisan dgn lane lain -- REBOUND & FF DAYTRADE gate-nya 100% D-1-based,
+    # bisa dihitung ulang langsung dari `scored` yg sama (TANPA fetch baru).
+    rebound_top5 = set(scanalert_engine.rank_rebound_top5_candidates(scored))
+    ff_daytrade_tickers = {x["ticker"] for x in scanalert_engine._rank_ff_daytrade_candidates(scored)}
+
+    # SDT/HC (MBSS v2, user follow-up "juga sdt dan hc ya") -- REUSE
+    # _consensus_sdt_hc_selected yg sama dgn /consensus (EOD-only, tanpa
+    # live intraday re-enrichment). Butuh backbone_daily cache malam ini --
+    # degradasi anggun kalau belum ada (sdt/hc kosong, TIDAK blokir /pingpong
+    # yg gate-nya sendiri tidak butuh backbone).
+    sdt_selected, hc_selected = set(), set()
+    try:
+        backbone_result, _ = nightly_engine.load_backbone_daily_allow_stale()
+        if backbone_result:
+            pool_bb = backbone_engine.filter_to_gate_survivors(list(scored.values()), backbone_result)
+            sdt_selected, hc_selected = _consensus_sdt_hc_selected(pool_bb, backbone_result.get("market_regime"))
+    except Exception:
+        pass
+
+    # Ranking komposit (rank volume + rank range, pola rank-sum yg sama dgn
+    # REBOUND/ENTRY PAGI -- REUSE, bukan reinvent).
+    def _rank_map(seq, key, reverse=False):
+        ordered = sorted(seq, key=key, reverse=reverse)
+        return {x["ticker"]: i for i, x in enumerate(ordered, start=1)}
+    r_vol = _rank_map(candidates, lambda x: x["avg_volume_5d"], reverse=True)
+    r_range = _rank_map(candidates, lambda x: x["range_pct_3d_avg"], reverse=True)
+    for r in candidates:
+        r["priority_score"] = r_vol[r["ticker"]] + r_range[r["ticker"]]
+        tags = []
+        if r["ticker"] in rebound_top5:
+            tags.append("REBOUND")
+        if r["ticker"] in ff_daytrade_tickers:
+            tags.append("FF DAYTRADE")
+        if r["rsi"] is not None and r["macd_hist"] is not None and r["rsi"] >= scanalert_engine.ENTRY_PAGI_RSI_MIN and r["macd_hist"] > scanalert_engine.ENTRY_PAGI_MACD_MIN:
+            tags.append("ENTRY PAGI")
+        if r["ticker"] in sdt_selected:
+            tags.append("SDT")
+        if r["ticker"] in hc_selected:
+            tags.append("HC")
+        r["cross_tags"] = tags
+        r["sm_tag"] = scanalert_engine._smart_money_tag(r["whitelist_accumulation_net_pct"], r["whitelist_num_brokers"])
+    candidates.sort(key=lambda r: r["priority_score"])
 
     lines = [
         "📋 RANGE WATCH -- watchlist pattern-match, BUKAN sinyal trading",
         "Mekanisme antri-beli-low/jual-high SUDAH diuji: TIDAK ADA edge kotor, negatif net-fee di semua konfigurasi.",
-        "Murni utk observasi manual atau uji posisi SANGAT KECIL dulu mengenali pola -- BUKAN dasar sizing entry sungguhan.\n",
+        "Murni utk observasi manual atau uji posisi SANGAT KECIL dulu mengenali pola -- BUKAN dasar sizing entry sungguhan.",
+        "Diurutkan by prioritas (volume + range komposit). Tag irisan = ADA dukungan dari lane lain -- BUKAN jaminan, cuma info tambahan kalau worst-case nyangkut.\n",
     ]
     for i, r in enumerate(candidates[:15], 1):
         slope_txt = f"{r['sma20_slope_20d_pct']:+.1f}%" if r["sma20_slope_20d_pct"] is not None else "N/A"
+        cross_txt = f" [{', '.join(r['cross_tags'])}]" if r["cross_tags"] else ""
+        ff = r["foreign_net_ratio_1d"]
+        ff_txt = f" | FF {ff*100:+.1f}%" if isinstance(ff, (int, float)) else ""
         lines.append(
-            f"{i}. {r['ticker']} — 3hr beruntun range>3% | "
-            f"close~open {r['close_near_open_pct_3d_avg']:.1f}% | slope SMA20 {slope_txt} | Value {r['value_traded_20d_avg']/1e9:.1f}M | Vol5d {r['avg_volume_5d']/1e6:.1f}M lbr"
+            f"{i}. {r['ticker']}{cross_txt}{r['sm_tag']} — range 3d {r['range_pct_3d_avg']:.1f}% | "
+            f"close~open {r['close_near_open_pct_3d_avg']:.1f}% | slope SMA20 {slope_txt} | Value {r['value_traded_20d_avg']/1e9:.1f}M | Vol5d {r['avg_volume_5d']/1e6:.1f}M lbr{ff_txt}"
         )
     if staleness_note:
         lines.insert(0, staleness_note)
