@@ -4954,6 +4954,18 @@ async def run_rebound_live_once() -> dict:
                 "whitelist_num_brokers": scored[t].get("whitelist_num_brokers")}
             for t in top5
         }
+        # MBSS v2 FIX (bug ditemukan 2026-09-09, live case SOHO/UANG/SMMT/
+        # SHID/INDR terkunci tapi TIDAK ADA satupun entry trigger sepanjang
+        # hari -- pesan sebelumnya cuma dikirim kalau `dirty` True, yg cuma
+        # terjadi kalau ADA fire/resolve. Kalau tidak ada satupun trigger
+        # sepanjang hari (mis. semua Top-5 sudah ARA-lock, tanpa dip),
+        # SEBELUM fix ini user TIDAK PERNAH lihat pesan apapun -- bahkan
+        # "Top-5 hari ini: ..." pun tidak. Sekarang pesan awal dikirim
+        # SEKALI begitu Top-5 terkunci, terlepas ada trigger atau tidak.
+        if top5:
+            text = _render_rebound_message(top5, state["top5_info"], {})
+            state["message_id"] = await _rebound_send_new_message(text)
+            state["chat_id"] = core.TELEGRAM_CHAT_ID
         _save_rebound_state(state)
 
     top5 = state.get("top5") or []
