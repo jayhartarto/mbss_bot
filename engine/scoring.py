@@ -1434,6 +1434,11 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
     net_move_10d_pct = None
     vol_spike_ratio_10d = None
     sma20_slope_20d_pct = None
+    avg_day_range_pct_10d = None  # FIX 2026-09-09: rata2 rentang HARIAN (H-L)/C 10hr -- BEDA dari
+    # day_range_pct_10d yg sudah ada (itu rentang TOTAL high-low 10hr sbg satu angka, bisa tinggi
+    # krn trending kuat TANPA genuinely berosilasi tiap hari -- field lama SALAH dipakai versi awal
+    # /pingpong utk numerator range_move_ratio, screen jadi tidak persis match riset tervalidasi
+    # yg pakai avg_range_10d = day_range_pct.rolling(10).mean()). Field baru ini yg benar dipakai.
     if len(close_prices) >= 40 and len(volumes) >= 40:
         try:
             _vt_series = (close_prices * volumes).tail(20)
@@ -1450,6 +1455,10 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
                 _sma20_20ago = sma20_series.iloc[-20]
                 if _sma20_20ago and _sma20_20ago > 0:
                     sma20_slope_20d_pct = round(float((_sma20_now - _sma20_20ago) / _sma20_20ago * 100), 2)
+            _h10, _l10, _c10 = high_prices.tail(10), low_prices.tail(10), close_prices.tail(10)
+            _daily_range_pct_10d = (_h10 - _l10) / _c10.replace(0, pd.NA) * 100
+            if _daily_range_pct_10d.notna().sum() >= 8:
+                avg_day_range_pct_10d = round(float(_daily_range_pct_10d.mean()), 2)
         except Exception:
             pass
 
@@ -2285,6 +2294,7 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         "net_move_10d_pct": net_move_10d_pct,  # /pingpong watchlist raw field
         "vol_spike_ratio_10d": vol_spike_ratio_10d,  # /pingpong watchlist raw field -- exclude re-rating events spt KKES
         "sma20_slope_20d_pct": sma20_slope_20d_pct,  # /pingpong watchlist raw field -- "sideways bias naik" character
+        "avg_day_range_pct_10d": avg_day_range_pct_10d,  # /pingpong watchlist raw field -- rata2 rentang HARIAN 10hr (BUKAN day_range_pct_10d yg sudah ada), numerator range_move_ratio yg BENAR
         "tight_trailing_support": tight_trailing_support,  # informational/bonus only, TIDAK menggating apa pun -- lihat catatan di atas
         "ema9_slope_pct": ema9_slope_pct,
         "trailing_support_undercut_days": trailing_support_undercut_days,

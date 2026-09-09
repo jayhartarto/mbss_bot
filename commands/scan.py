@@ -2690,9 +2690,15 @@ async def pingpong_watchlist_command(update, context):
 
     4 gate (persis riset tervalidasi, scratchpad pingpong_screen*.py):
     1. Likuiditas >= median cross-sectional malam ini (value_traded_20d_avg)
-    2. Karakter range-bound: day_range_pct_10d / |net_move_10d_pct| di
+    2. Karakter range-bound: avg_day_range_pct_10d / |net_move_10d_pct| di
        tercile TERATAS (adaptive percentile lintas universe malam ini,
-       reuse backbone_engine.percentile_rank_list -- BUKAN threshold tetap)
+       reuse backbone_engine.percentile_rank_list -- BUKAN threshold tetap).
+       FIX 2026-09-09: numerator SEMPAT salah pakai day_range_pct_10d
+       (rentang TOTAL high-low 10hr, field lama, bisa tinggi krn trending
+       kuat TANPA genuinely berosilasi) -- sudah diganti avg_day_range_
+       pct_10d (rata2 rentang HARIAN 10hr, field baru) yg PERSIS match
+       formula riset tervalidasi (avg_range_10d = day_range_pct.rolling
+       (10).mean()).
     3. Tanpa lonjakan volume (vol_spike_ratio_10d < 3x) -- exclude event
        re-rating spt KKES (false-positive yg sudah dikonfirmasi di riset)
     4. Sideways bias naik: sma20_slope_20d_pct antara 0% dan +15%
@@ -2707,7 +2713,7 @@ async def pingpong_watchlist_command(update, context):
     rows = []
     for t, r in scored.items():
         vt20 = r.get("value_traded_20d_avg")
-        day_range = r.get("day_range_pct_10d")
+        day_range = r.get("avg_day_range_pct_10d")
         net_move = r.get("net_move_10d_pct")
         vol_spike = r.get("vol_spike_ratio_10d")
         sma_slope = r.get("sma20_slope_20d_pct")
