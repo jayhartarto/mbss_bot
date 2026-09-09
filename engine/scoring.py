@@ -1371,6 +1371,27 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         len(macd_line) > 1 and macd_line.iloc[-1] >= 0 and macd_line.iloc[-2] < 0
     )
 
+    # MBSS v2 (2026-09-09, foreign-flow day-trade lane research — memory
+    # project_foreign_flow_accumulation_breakout_2026_09_09.md): dua fitur
+    # histogram MACD baru, DIVALIDASI robust (plateau, bukan spike) sebagai
+    # bagian dari stack terbaik yang ditemukan (swing win 55.3%, day-trade
+    # win 48.0% sebelum ADX). `macd_accelerating` = histogram masih naik
+    # 2 hari terakhir (slope>0) -- KEBALIKAN dari deselerasi murni yg
+    # sudah DITOLAK (gagal uji robustness, arah berbalik antar-window).
+    # `macd_imminent_cross` = gap MACD-Signal (histogram itu sendiri)
+    # SEMPIT (persentil rendah thd histori sendiri, adaptive-percentile
+    # house convention) DAN masih menyempit -- terbukti kohort TERBURUK
+    # (win 38.9%/mean NEGATIF), jadi dipakai sbg EXCLUSION bukan inclusion.
+    macd_accelerating = None
+    macd_imminent_cross = None
+    if len(macd_hist) > 3:
+        macd_accelerating = bool(macd_hist.iloc[-1] > macd_hist.iloc[-3])
+        _macd_gap_hist = macd_hist.abs().tail(120)
+        if len(_macd_gap_hist) >= 20:
+            _gap_pct_rank = core.percentile_rank(_macd_gap_hist.iloc[:-1], abs(current_macd_hist))
+            _gap_narrowing = macd_hist.iloc[-1] < macd_hist.iloc[-3] if current_macd_hist > 0 else macd_hist.iloc[-1] > macd_hist.iloc[-3]
+            macd_imminent_cross = bool(_gap_pct_rank <= 0.33 and _gap_narrowing)
+
     # MBSS v2 (user request, real observasi live intraday — saham dengan
     # "order buy tebal" yang bergerak mengikuti harga, seolah dijaga rapi
     # di level tertentu yang naik bareng harga). Bot TIDAK punya akses
@@ -2195,6 +2216,8 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         "macd_centerline_cross_today": macd_centerline_cross_today,
         "macd_fresh_breakout_confirmed": macd_fresh_breakout_confirmed,  # HC-appropriate: konfirmasi breakout SUDAH terjadi, cross 4-11 hari dari signal cross -- lihat catatan riset di atas
         "macd_lifecycle_state": macd_lifecycle_state,  # BREAKING / CONTINUATION / WATCH_PULLBACK / None -- lihat catatan di atas
+        "macd_accelerating": macd_accelerating,  # histogram msh naik 2 hari terakhir -- lihat catatan foreign-flow day-trade lane di atas
+        "macd_imminent_cross": macd_imminent_cross,  # gap MACD-Signal sempit & menyempit (mendekati cross) -- kohort TERBURUK, dipakai sbg exclusion
         "tight_trailing_support": tight_trailing_support,  # informational/bonus only, TIDAK menggating apa pun -- lihat catatan di atas
         "ema9_slope_pct": ema9_slope_pct,
         "trailing_support_undercut_days": trailing_support_undercut_days,

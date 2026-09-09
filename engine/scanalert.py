@@ -5169,3 +5169,369 @@ async def run_rebound_live_once() -> dict:
     else:
         _save_rebound_state(state)
     return summary
+
+
+# ═══════════════════ FF DAYTRADE (foreign-flow high-conviction day-trade lane) ═══════════════════
+# MBSS v2 (2026-09-09, riset thread foreign-flow -- memory
+# project_foreign_flow_accumulation_breakout_2026_09_09.md): lane BARU,
+# TERPISAH dari ENTRY PAGI/REBOUND/BSJP -- stack sinyal (Bollinger%B +
+# akselerasi-MACD + CMF + ADX di atas gate RSI/MACD/foreign-flow) SUDAH
+# dicoba diwiring ke ENTRY PAGI (3 pendekatan: filter keras, booster,
+# tiebreaker) dan SEMUA GAGAL (filter keras membunuh ketersediaan --
+# 0/248 hari cukup kandidat; booster/tiebreaker mengencerkan tanpa
+# menaikkan kualitas) -- CLOSED utk ENTRY PAGI, stack ini butuh rumah
+# SENDIRI. Framing DAYTRADE (bukan swing) terbukti genuinely menerima
+# stack ini (win 48.0% sblm ADX, tervalidasi n=358), ADX>=30 menambah
+# nilai lagi di sini (redundant di swing, TIDAK redundant di daytrade --
+# tergantung apa yg sudah ada di stack).
+#
+# Gate lengkap (SEMUA hard AND-condition, populasi SUDAH sangat sempit by
+# design -- n=271 dari ~458hari x 626ticker, ini lane conviction-tinggi
+# frekuensi-rendah, BUKAN pengganti ENTRY PAGI):
+#   RSI_prior>=65 & MACD_prior>0 & foreign_net_ratio_1d>=5% & pct_b dlm
+#   [0.5,0.9) & |dist_to_SMA20|<30% & MACD histogram msh naik 2hari &
+#   BUKAN mendekati cross (gap MACD-Signal sempit&menyempit) & CMF>0.15 &
+#   ADX>=30.
+#
+# SIMPLIFIKASI v1 (dicatat eksplisit): spec riset asli pakai
+# `net_ratio_1d>=5% OR persist_5d>=5hari beruntun net-buy` -- persist_5d
+# butuh HISTORI foreign-flow multi-hari, sementara fetch_idx_foreign_flow_
+# net_ratio() cuma fetch SATU hari/malam (tidak ada rolling cache). Riset
+# OR-combo sendiri tunjukkan net_ratio_1d SENDIRIAN sudah menangkap
+# hampir semua nilai (win46.7%/mean+0.64% vs OR-combo 46.7%/+0.66%,
+# selisih tipis) -- v1 SENGAJA drop leg persist_5d drpd membangun
+# infrastruktur cache history yg belum perlu, bisa ditambah nanti kalau
+# terbukti worth it.
+#
+# Entry: TANPA ceiling/toleransi (beda dari ENTRY PAGI) -- riset konfirmasi
+# risiko gap utk populasi INI nyaris nol (median gap D+1 ~0.00%, cuma
+# 0.4% hari gap>3%, 0% gap>5% -- filter "belum extended" yg sudah ada di
+# stack ini SECARA OTOMATIS menekan risiko chasing). Entry_price = harga
+# real-time SAAT SCAN pertama sukses jalan pagi ini.
+#
+# Exit: TP+10%/SL-5%/avg-down SEKALI di -2% dari entry ASLI (SL tetap dari
+# entry asli, tidak dilonggarkan oleh averaging -- pola sama persis spt
+# REBOUND/ENTRY PAGI). Force-close di AKHIR HARI (TANPA carry D+2 -- ini
+# genuinely lane DAYTRADE, beda filosofi dari ENTRY PAGI yg py D2 carry)
+# memakai closing price kalau belum resolve.
+#
+# Validasi: n=271, win~59%, mean~+1.16-1.18% dgn TP/SL/avg-down (vs
+# win51.7%/mean+0.911% cuma open-to-close) -- TAPI angka TP/SL ini pakai
+# reachability bar HARIAN (High/Low), bukan sekuens intraday asli (data
+# 1m lokal cuma overlap 11 hari sinyal, terlalu tipis utk verifikasi
+# langsung) -- treat sbg konservatif/pendekatan, bukan validasi intraday
+# penuh spt REBOUND.
+FF_DAYTRADE_ENABLED = True  # feature-toggle terisolasi -- set False kalau perlu mematikan cepat TANPA menyentuh lane lain
+FF_DAYTRADE_RSI_MIN = 65.0
+FF_DAYTRADE_MACD_MIN = 0.0
+FF_DAYTRADE_NET_RATIO_MIN = 0.05  # foreign_net_ratio_1d >= 5%
+FF_DAYTRADE_PCTB_MIN = 0.5
+FF_DAYTRADE_PCTB_MAX = 0.9
+FF_DAYTRADE_DIST_SMA20_MAX_PCT = 30.0  # |price_vs_sma20_pct| < ini
+FF_DAYTRADE_CMF_MIN = 0.15
+FF_DAYTRADE_ADX_MIN = 30.0
+FF_DAYTRADE_TP_PCT = 10.0
+FF_DAYTRADE_SL_PCT = 5.0
+FF_DAYTRADE_AVGDOWN_PCT = -2.0
+
+FF_DAYTRADE_SCAN_WINDOW_START = datetime.time(9, 0)
+FF_DAYTRADE_SCAN_WINDOW_END = datetime.time(9, 15)
+FF_DAYTRADE_MONITOR_WINDOW_START = datetime.time(9, 0)
+FF_DAYTRADE_MONITOR_WINDOW_END = datetime.time(15, 50)
+FF_DAYTRADE_FORCE_EOD_TIME = datetime.time(15, 45)
+
+STATE_FILE_FF_DAYTRADE = os.path.join(core.PROJECT_ROOT, "ff_daytrade_state.json")
+
+
+def _load_ff_daytrade_state() -> dict:
+    if not os.path.exists(STATE_FILE_FF_DAYTRADE):
+        return {}
+    try:
+        with open(STATE_FILE_FF_DAYTRADE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_ff_daytrade_state(state: dict):
+    with open(STATE_FILE_FF_DAYTRADE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def _rank_ff_daytrade_candidates(scored: dict) -> list[dict]:
+    """
+    Gate SEMUA hard AND (bukan Top-N ranking spt ENTRY PAGI/REBOUND --
+    populasi sudah sangat sempit by design, tiap yg lolos langsung fire).
+    Field numerik WAJIB ada (fail-closed) -- ini SEMUA kondisi inti definisi
+    populasi yg divalidasi, beda dari field bonus (mis. whitelist net-buy)
+    yg missing=neutral. macd_accelerating WAJIB True (fail-closed kalau
+    None), macd_imminent_cross WAJIB bukan True (None/False lolos, True
+    dikecualikan) -- exclusion-type, missing dianggap "bukan mendekati
+    cross" (tidak dihukum krn data tidak tersedia).
+    """
+    rows = []
+    for t, info in scored.items():
+        rsi = info.get("rsi")
+        macd_hist = info.get("macd_hist")
+        net_ratio = info.get("foreign_net_ratio_1d")
+        pct_b = info.get("pct_b")
+        dist_sma20 = info.get("price_vs_sma20_pct")
+        cmf = info.get("cmf")
+        adx = info.get("adx")
+        accel = info.get("macd_accelerating")
+        imminent = info.get("macd_imminent_cross")
+        if rsi is None or macd_hist is None or net_ratio is None or pct_b is None or dist_sma20 is None or adx is None:
+            continue
+        if not isinstance(cmf, (int, float)):
+            continue
+        if accel is not True:
+            continue
+        if imminent is True:
+            continue
+        if not (rsi >= FF_DAYTRADE_RSI_MIN and macd_hist > FF_DAYTRADE_MACD_MIN):
+            continue
+        if net_ratio < FF_DAYTRADE_NET_RATIO_MIN:
+            continue
+        if not (FF_DAYTRADE_PCTB_MIN <= pct_b < FF_DAYTRADE_PCTB_MAX):
+            continue
+        if abs(dist_sma20) >= FF_DAYTRADE_DIST_SMA20_MAX_PCT:
+            continue
+        if cmf < FF_DAYTRADE_CMF_MIN:
+            continue
+        if adx < FF_DAYTRADE_ADX_MIN:
+            continue
+        rows.append({
+            "ticker": t, "rsi": rsi, "macd_hist": macd_hist, "net_ratio_1d": net_ratio,
+            "whitelist_accumulation_net_pct": info.get("whitelist_accumulation_net_pct"),
+            "whitelist_num_brokers": info.get("whitelist_num_brokers"),
+        })
+    return rows
+
+
+def _render_ff_daytrade_message(picks: list[dict]) -> str:
+    header = (
+        "FF DAYTRADE\n"
+        "Beli sekarang, avg down 1x\n"
+        "Jual hari ini di TP, force-close closing kalau belum resolve"
+    )
+    marker = {
+        "WAITING": "⏳ Menunggu",
+        "TP": "✅ TP TERCAPAI",
+        "SL": "✅ SL KENA",
+        "CLOSED_EOD": "🔚 FORCE CLOSE (akhir sesi)",
+    }
+    blocks = []
+    for i, p in enumerate(picks, start=1):
+        entry = _idx_round_tick(p["entry_price"])
+        avg_down = _idx_round_tick(p["avg_down_price"])
+        tp = _idx_round_tick(p["tp"])
+        sl = _idx_round_tick(p["sl"])
+        avgdown_note = " (avg down TERISI)" if p.get("filled_avgdown") else ""
+        sm_tag = _smart_money_tag(p.get("whitelist_accumulation_net_pct"), p.get("whitelist_num_brokers"))
+        status_line = marker.get(p["status"], p["status"])
+        if p["status"] in ("TP", "SL", "CLOSED_EOD") and p.get("resolve_price") is not None:
+            resolve_price = _idx_round_tick(p["resolve_price"])
+            status_line += f" — RESOLVE at {resolve_price:,.0f} ({p['resolve_ret_pct']:+.1f}%)"
+        blocks.append(
+            f"TICK {i}\n"
+            f"{p['ticker']} — {entry:,.0f} (harga alert){sm_tag}\n"
+            f"Avg down : {avg_down:,.0f}\n"
+            f"TP : {tp:,.0f}\n"
+            f"SL : {sl:,.0f}\n"
+            f"{status_line}{avgdown_note}"
+        )
+    return header + "\n\n" + "\n\n".join(blocks)
+
+
+async def _ff_daytrade_send_new_message(text: str) -> int | None:
+    bot = _get_shared_bot()
+    if bot is None:
+        print(f"[NO TELEGRAM TOKEN] {text}")
+        return None
+    for attempt in range(2):
+        try:
+            sent = await bot.send_message(chat_id=core.TELEGRAM_CHAT_ID, text=text)
+            return sent.message_id
+        except Exception as e:
+            print(f"⚠️ FF Daytrade: gagal kirim pesan awal (attempt {attempt + 1}): {e}")
+            if attempt == 0:
+                await asyncio.sleep(3)
+    return None
+
+
+async def _ff_daytrade_edit_message(state: dict):
+    if not state.get("message_id"):
+        return
+    bot = _get_shared_bot()
+    if bot is None:
+        return
+    text = _render_ff_daytrade_message(state["picks"])
+    try:
+        await bot.edit_message_text(chat_id=state.get("chat_id", core.TELEGRAM_CHAT_ID), message_id=state["message_id"], text=text)
+    except Exception as e:
+        print(f"⚠️ FF Daytrade: gagal edit pesan: {e}")
+
+
+async def run_ff_daytrade_scan_once(force: bool = False) -> dict:
+    """
+    Scan SEKALI/hari (guard `fired`) -- gate SEMUA hard AND (lihat catatan
+    panjang di atas), entry_price = harga real-time saat scan ini sukses
+    jalan (pagi hari, TANPA OR-window/ceiling -- risiko gap utk populasi
+    ini nyaris nol, sudah divalidasi).
+    """
+    summary = {"skipped_reason": None, "picks": 0}
+    if not FF_DAYTRADE_ENABLED:
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not force and not (FF_DAYTRADE_SCAN_WINDOW_START <= now_wib.time() <= FF_DAYTRADE_SCAN_WINDOW_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+    if await asyncio.to_thread(core.is_idx_market_holiday_today):
+        summary["skipped_reason"] = "holiday"
+        return summary
+    if not is_scan_alert_enabled():
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+
+    today = _today_str()
+    state = _load_ff_daytrade_state()
+    if not force and state.get("trading_day_marker") == today and state.get("fired"):
+        summary["skipped_reason"] = "already_fired_today"
+        return summary
+
+    import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
+    scored = nightly_engine.load_daily_scan_cache()
+    if not scored:
+        summary["skipped_reason"] = "no_cache"
+        return summary
+
+    picks_raw = _rank_ff_daytrade_candidates(scored)
+    if not picks_raw:
+        new_state = {"trading_day_marker": today, "fired": True, "message_id": None, "chat_id": core.TELEGRAM_CHAT_ID, "picks": []}
+        _save_ff_daytrade_state(new_state)
+        print("ℹ️ FF Daytrade: tidak ada kandidat lolos gate hari ini (wajar, populasi memang sempit by design).")
+        summary["picks"] = 0
+        return summary
+
+    tickers = [r["ticker"] for r in picks_raw]
+    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+
+    picks_state = []
+    for r in picks_raw:
+        t = r["ticker"]
+        sym = t + ".JK"
+        entry_price = None
+        try:
+            bars = data[sym].dropna(how="all").sort_index()
+            if not bars.empty:
+                entry_price = float(bars["Close"].astype(float).iloc[-1])
+        except Exception:
+            pass
+        if entry_price is None or entry_price <= 0:
+            continue  # data blm tersedia -- lewati siklus ini, TIDAK dianggap fire dgn harga fiktif
+        avg_down_price = entry_price * (1 + FF_DAYTRADE_AVGDOWN_PCT / 100.0)
+        picks_state.append({
+            "ticker": t, "entry_price": entry_price, "avg_down_price": avg_down_price,
+            "avg_cost": entry_price, "filled_avgdown": False,
+            "tp": entry_price * (1 + FF_DAYTRADE_TP_PCT / 100.0),
+            "sl": entry_price * (1 - FF_DAYTRADE_SL_PCT / 100.0),
+            "status": "WAITING", "resolve_price": None, "resolve_ret_pct": None,
+            "rsi": r.get("rsi"), "macd_hist": r.get("macd_hist"), "net_ratio_1d": r.get("net_ratio_1d"),
+            "whitelist_accumulation_net_pct": r.get("whitelist_accumulation_net_pct"),
+            "whitelist_num_brokers": r.get("whitelist_num_brokers"),
+        })
+
+    new_state = {
+        "trading_day_marker": today, "fired": True, "message_id": None,
+        "chat_id": core.TELEGRAM_CHAT_ID, "picks": picks_state,
+    }
+    if picks_state:
+        new_state["message_id"] = await _ff_daytrade_send_new_message(_render_ff_daytrade_message(picks_state))
+    else:
+        print("ℹ️ FF Daytrade: kandidat lolos gate tapi data harga blm tersedia, tidak ada TICK terkirim hari ini.")
+
+    _save_ff_daytrade_state(new_state)
+    summary["picks"] = len(picks_state)
+    print(f"✅ FF Daytrade scan selesai: {len(picks_raw)} kandidat lolos gate, {len(picks_state)} jadi TICK.")
+    return summary
+
+
+async def run_ff_daytrade_monitor_once() -> dict:
+    """
+    Monitor sepanjang hari YG SAMA -- cek avg-down/TP/SL dari avg_cost,
+    force-close di akhir sesi (TANPA carry D+2 -- genuinely daytrade,
+    beda filosofi dari ENTRY PAGI). Edit pesan in-place tiap ada perubahan.
+    """
+    summary = {"skipped_reason": None, "updated": 0}
+    if not FF_DAYTRADE_ENABLED:
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (FF_DAYTRADE_MONITOR_WINDOW_START <= now_wib.time() <= FF_DAYTRADE_MONITOR_WINDOW_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+
+    today = _today_str()
+    state = _load_ff_daytrade_state()
+    if state.get("trading_day_marker") != today or not state.get("picks"):
+        summary["skipped_reason"] = "no_active_picks"
+        return summary
+
+    open_picks = [p for p in state["picks"] if p["status"] == "WAITING"]
+    if not open_picks:
+        summary["skipped_reason"] = "no_open_picks"
+        return summary
+
+    tickers = [p["ticker"] for p in open_picks]
+    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+    if data is None or (hasattr(data, "empty") and data.empty):
+        summary["skipped_reason"] = "no_intraday_data"
+        return summary
+
+    dirty = False
+    force_eod = now_wib.time() >= FF_DAYTRADE_FORCE_EOD_TIME
+    for p in open_picks:
+        sym = p["ticker"] + ".JK"
+        try:
+            bars = data[sym].dropna(how="all").sort_index()
+        except Exception:
+            continue
+        if bars.empty:
+            continue
+        try:
+            day_high = float(bars["High"].astype(float).max())
+            day_low = float(bars["Low"].astype(float).min())
+            last_close = float(bars["Close"].astype(float).iloc[-1])
+        except Exception:
+            continue
+
+        if not p["filled_avgdown"] and day_low <= p["avg_down_price"]:
+            p["avg_cost"] = (p["entry_price"] + p["avg_down_price"]) / 2.0
+            p["filled_avgdown"] = True
+            p["tp"] = p["avg_cost"] * (1 + FF_DAYTRADE_TP_PCT / 100.0)
+            p["sl"] = p["avg_cost"] * (1 - FF_DAYTRADE_SL_PCT / 100.0)
+            dirty = True
+
+        if day_high >= p["tp"]:
+            p["status"], p["resolve_price"] = "TP", p["tp"]
+        elif day_low <= p["sl"]:
+            p["status"], p["resolve_price"] = "SL", p["sl"]
+        elif force_eod:
+            p["status"], p["resolve_price"] = "CLOSED_EOD", last_close
+        else:
+            continue
+        p["resolve_ret_pct"] = (p["resolve_price"] - p["avg_cost"]) / p["avg_cost"] * 100
+        dirty = True
+
+    if dirty:
+        summary["updated"] = sum(1 for p in open_picks if p["status"] != "WAITING")
+        await _ff_daytrade_edit_message(state)
+        _save_ff_daytrade_state(state)
+    return summary

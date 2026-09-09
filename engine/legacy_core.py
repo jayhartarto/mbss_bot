@@ -7667,6 +7667,32 @@ async def run_rebound_live_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ Rebound live job gagal: {e}")
 
 
+async def run_ff_daytrade_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH -- FF DAYTRADE (lane baru 2026-09-09, hasil
+    riset foreign-flow -- gate RSI/MACD/foreign-flow/Bollinger/akselerasi-
+    MACD/CMF/ADX, conviction tinggi/frekuensi rendah, TERPISAH dari ENTRY
+    PAGI), engine/scanalert.py run_ff_daytrade_scan_once. Isolasi ketat
+    spt lane lain -- error di sini TIDAK boleh ganggu job lain.
+    """
+    try:
+        await scanalert_engine.run_ff_daytrade_scan_once()
+    except Exception as e:
+        print(f"⚠️ FF Daytrade scan job gagal: {e}")
+
+
+async def run_ff_daytrade_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH -- monitor FF DAYTRADE (avg-down/TP/SL,
+    force-close akhir sesi TANPA carry D+2), engine/scanalert.py
+    run_ff_daytrade_monitor_once.
+    """
+    try:
+        await scanalert_engine.run_ff_daytrade_monitor_once()
+    except Exception as e:
+        print(f"⚠️ FF Daytrade monitor job gagal: {e}")
+
+
 async def send_startup_notice(app: Application):
     """Sent once automatically when the bot process starts — the person's cue that
     it's alive, and the one place the disclaimer appears instead of every message."""
@@ -7885,6 +7911,16 @@ def build_app():
         # 200-140=60(!). 60 mod 60 = 0 -- TABRAKAN dgn validation_job tiap
         # 900s (kelipatan 180 & 300). Geser first ke 205 utk hindari itu.
         app.job_queue.run_repeating(run_rebound_live_job, interval=300, first=205)
+        # MBSS v2 (2026-09-09 -- lane FF DAYTRADE baru, lihat blok "FF
+        # DAYTRADE" di engine/scanalert.py): DUA job TERPISAH, interval=180s
+        # sama cadence dgn ENTRY PAGI (jendela scan sempit 09:00-09:15,
+        # monitoring TP/SL sepanjang hari). first=172/176 sengaja beda dari
+        # semua first= 180s-interval lain di atas (70/95/115/140/160) &
+        # tidak mod60 collide dgn job 300s (first=205) -- state file
+        # (ff_daytrade_state.json) & toggle (FF_DAYTRADE_ENABLED) TERPISAH
+        # SEPENUHNYA dari lane lain.
+        app.job_queue.run_repeating(run_ff_daytrade_scan_job, interval=180, first=172)
+        app.job_queue.run_repeating(run_ff_daytrade_monitor_job, interval=180, first=176)
     else:
         print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
               "scan-alert intraday TIDAK akan jalan otomatis. Install dgn: "
