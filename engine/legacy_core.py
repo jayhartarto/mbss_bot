@@ -7785,6 +7785,7 @@ def build_app():
     # scan.py go_command utk detail lengkap.
     app.add_handler(CommandHandler(["go"], commands_scan.go_command))
     app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.strong_buy_command))
+    app.add_handler(CommandHandler("pingpong", commands_scan.pingpong_watchlist_command))
     app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
     app.add_handler(CommandHandler("fast", commands_scan.fast_candidates_command))
     app.add_handler(CommandHandler("fastscan", commands_scan.fast_scan_command))

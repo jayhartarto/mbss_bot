@@ -1419,6 +1419,40 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
                 _near_high = bool(_high20 and _high20 > 0 and (_cur_close - _high20) / _high20 > -0.10)
                 vcp_pass = bool(_tightening and _vol_dryup and _near_high)
 
+    # MBSS v2 (2026-09-09, intraday ping-pong range-watch -- memory
+    # backlog_intraday_pingpong_range_trade_2026_09_09.md): raw fields for
+    # the /pingpong WATCHLIST command (NOT a trading signal -- the actual
+    # queue-buy-low/queue-sell-high mechanism was backtested and REJECTED,
+    # no gross edge, negative after fees; see memory). This is pure
+    # pattern-match discovery for manual observation/small-size learning
+    # only. Cross-sectional gates (liquidity-vs-universe-median, range-
+    # ratio percentile) can't be computed per-ticker here -- stored as RAW
+    # values, the /pingpong command does the cross-sectional comparison at
+    # read-time (same pattern as ENTRY PAGI's liquidity median filter in
+    # _rank_entry_pagi_candidates, NOT computed in this per-ticker function).
+    value_traded_20d_avg = None
+    net_move_10d_pct = None
+    vol_spike_ratio_10d = None
+    sma20_slope_20d_pct = None
+    if len(close_prices) >= 40 and len(volumes) >= 40:
+        try:
+            _vt_series = (close_prices * volumes).tail(20)
+            value_traded_20d_avg = round(float(_vt_series.mean()), 0)
+            _close_10ago = close_prices.iloc[-10]
+            if _close_10ago and _close_10ago > 0:
+                net_move_10d_pct = round(float((close_prices.iloc[-1] - _close_10ago) / _close_10ago * 100), 2)
+            _vol_10d_max = volumes.tail(10).max()
+            _vol_prior30_median = volumes.iloc[-40:-10].median()
+            if _vol_prior30_median and _vol_prior30_median > 0:
+                vol_spike_ratio_10d = round(float(_vol_10d_max / _vol_prior30_median), 2)
+            if len(sma20_series.dropna()) >= 20:
+                _sma20_now = sma20_series.iloc[-1]
+                _sma20_20ago = sma20_series.iloc[-20]
+                if _sma20_20ago and _sma20_20ago > 0:
+                    sma20_slope_20d_pct = round(float((_sma20_now - _sma20_20ago) / _sma20_20ago * 100), 2)
+        except Exception:
+            pass
+
     # MBSS v2 (user request, real observasi live intraday — saham dengan
     # "order buy tebal" yang bergerak mengikuti harga, seolah dijaga rapi
     # di level tertentu yang naik bareng harga). Bot TIDAK punya akses
@@ -2247,6 +2281,10 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         "macd_imminent_cross": macd_imminent_cross,  # gap MACD-Signal sempit & menyempit (mendekati cross) -- kohort TERBURUK, dipakai sbg exclusion
         "vcp_tightness_ratio": vcp_tightness_ratio,  # r3/r1, makin rendah makin ketat/baik -- lihat catatan VCP di atas
         "vcp_pass": vcp_pass,  # boolean hard gate (tightening & vol_dryup & near_high) -- lihat catatan VCP di atas
+        "value_traded_20d_avg": value_traded_20d_avg,  # /pingpong watchlist raw field -- lihat catatan di atas
+        "net_move_10d_pct": net_move_10d_pct,  # /pingpong watchlist raw field
+        "vol_spike_ratio_10d": vol_spike_ratio_10d,  # /pingpong watchlist raw field -- exclude re-rating events spt KKES
+        "sma20_slope_20d_pct": sma20_slope_20d_pct,  # /pingpong watchlist raw field -- "sideways bias naik" character
         "tight_trailing_support": tight_trailing_support,  # informational/bonus only, TIDAK menggating apa pun -- lihat catatan di atas
         "ema9_slope_pct": ema9_slope_pct,
         "trailing_support_undercut_days": trailing_support_undercut_days,

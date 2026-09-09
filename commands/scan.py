@@ -2676,6 +2676,94 @@ async def strong_buy_command(update, context):
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
 
+async def pingpong_watchlist_command(update, context):
+    """
+    /pingpong -- RANGE WATCH (MBSS v2, 2026-09-09, memory backlog_intraday_
+    pingpong_range_trade_2026_09_09.md). MURNI watchlist pattern-match utk
+    observasi manual/uji posisi SANGAT KECIL dulu (permintaan user persis) --
+    BUKAN sinyal trading. Mekanisme trading yg diuji (antri beli di rolling-
+    low, jual di rolling-high, diulang) TERBUKTI TIDAK ADA edge KOTOR
+    (gross return flat-negatif di semua lebar target yg dicoba) DAN negatif
+    net-fee di semua konfigurasi -- lihat memory utk detail lengkap. List
+    ini TIDAK boleh dibaca sbg win rate/confidence apapun ("No heuristic
+    score may be called probability" -- aturan engineering user sendiri).
+
+    4 gate (persis riset tervalidasi, scratchpad pingpong_screen*.py):
+    1. Likuiditas >= median cross-sectional malam ini (value_traded_20d_avg)
+    2. Karakter range-bound: day_range_pct_10d / |net_move_10d_pct| di
+       tercile TERATAS (adaptive percentile lintas universe malam ini,
+       reuse backbone_engine.percentile_rank_list -- BUKAN threshold tetap)
+    3. Tanpa lonjakan volume (vol_spike_ratio_10d < 3x) -- exclude event
+       re-rating spt KKES (false-positive yg sudah dikonfirmasi di riset)
+    4. Sideways bias naik: sma20_slope_20d_pct antara 0% dan +15%
+
+    Murni baca cache -- instan, tidak fetch apa pun.
+    """
+    scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
+    if not scored:
+        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum pernah ada — jalankan /eodscan dulu.")
+        return
+
+    rows = []
+    for t, r in scored.items():
+        vt20 = r.get("value_traded_20d_avg")
+        day_range = r.get("day_range_pct_10d")
+        net_move = r.get("net_move_10d_pct")
+        vol_spike = r.get("vol_spike_ratio_10d")
+        sma_slope = r.get("sma20_slope_20d_pct")
+        if vt20 is None or day_range is None or net_move is None or vol_spike is None or sma_slope is None:
+            continue
+        if abs(net_move) < 0.5:
+            continue  # hindari div-by-zero/rasio meledak utk ticker yg genuinely nyaris flat 10hari
+        rows.append({
+            "ticker": t, "value_traded_20d_avg": vt20, "day_range_pct_10d": day_range,
+            "range_move_ratio": day_range / abs(net_move), "vol_spike_ratio_10d": vol_spike,
+            "sma20_slope_20d_pct": sma_slope,
+        })
+
+    if len(rows) < 10:
+        await core.safe_reply(update.message, "📋 Data field ping-pong belum cukup malam ini (kandidat lengkap < 10) — coba lagi setelah /eodscan berikutnya.")
+        return
+
+    vt_sorted = sorted(r["value_traded_20d_avg"] for r in rows)
+    median_vt = vt_sorted[len(vt_sorted) // 2]
+    ratio_values = [r["range_move_ratio"] for r in rows]
+
+    candidates = []
+    for r in rows:
+        if r["value_traded_20d_avg"] < median_vt:
+            continue
+        if r["vol_spike_ratio_10d"] >= 3.0:
+            continue
+        if not (0.0 <= r["sma20_slope_20d_pct"] <= 15.0):
+            continue
+        if backbone_engine.percentile_rank_list(ratio_values, r["range_move_ratio"]) < 0.667:  # tercile teratas
+            continue
+        candidates.append(r)
+
+    if not candidates:
+        await core.safe_reply(update.message, "📋 RANGE WATCH — tidak ada saham yang cocok pola ping-pong malam ini (wajar, gate memang ketat by design).")
+        return
+
+    candidates.sort(key=lambda r: r["sma20_slope_20d_pct"], reverse=True)
+
+    lines = [
+        "📋 RANGE WATCH -- watchlist pattern-match, BUKAN sinyal trading",
+        "Mekanisme antri-beli-low/jual-high SUDAH diuji: TIDAK ADA edge kotor, negatif net-fee di semua konfigurasi.",
+        "Murni utk observasi manual atau uji posisi SANGAT KECIL dulu mengenali pola -- BUKAN dasar sizing entry sungguhan.\n",
+    ]
+    for i, r in enumerate(candidates[:15], 1):
+        lines.append(
+            f"{i}. {r['ticker']} — range 10hr {r['day_range_pct_10d']:.1f}% | "
+            f"slope SMA20 {r['sma20_slope_20d_pct']:+.1f}% | Value {r['value_traded_20d_avg']/1e9:.1f}M"
+        )
+    if staleness_note:
+        lines.insert(0, staleness_note)
+
+    buttons = core.build_check_buttons([r["ticker"] for r in candidates[:15]])
+    await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
+
+
 def compute_consensus_candidates(scored: dict, broksum_data: dict, market_regime: str | None = None) -> tuple[list, list]:
     """
     Shared cross-tool tagging logic behind /consensus, extracted so /tanya can
