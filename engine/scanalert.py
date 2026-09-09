@@ -4233,25 +4233,48 @@ def _entry_pagi_opening_range_from_bars(data, tickers: list[str], or_window_end:
 
 def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
     """
-    Composite ranking (reuse formula research/rsi_macd_filter_backtest.py
-    get_top10): entry_pos_in_or (posisi entry_ref dlm range OR -- makin
-    dekat OR_low makin baik, ini strategi pullback), dist_from_prior_
-    high_pct (makin jauh di bawah high D-1 makin baik), or_range_pct
-    (opening range makin lebar makin baik). Liquidity filter: top-half by
-    D-1 value_traded (proxy `day_vol_avg_prior` riset -- REUSE field yg
-    SUDAH dihitung nightly, TANPA fetch tambahan). Filter FINAL RSI/MACD
-    diterapkan di SINI (setelah top-10, BUKAN sebelum) -- match urutan
-    persis section3_production_backtest.
+    FUNNEL DIBALIK (MBSS v2, 2026-09-09 -- diagnosis 3-hari-beruntun ENTRY
+    PAGI gagal fire, memory project_entry_pagi_funnel_redesign_2026_09_09.
+    md). Desain LAMA: rank SELURUH universe by posisi-OR dulu (buta thd
+    momentum) -> ambil Top-10 -> BARU filter RSI/MACD. Kalau Top-10 hasil
+    posisi-OR itu kebetulan tidak ada yg RSI/MACD-qualifying, SELURUHNYA
+    kosong -- walau pool RSI/MACD sendiri (scan/prefilter EOD) SEHAT.
+    Backtest 2thn (458 hari): gate RSI/MACD SENDIRI cuma kosong 0.7% hari,
+    tapi desain LAMA (rank-dulu-filter-belakangan) kosong ~46.5% hari --
+    45.8 poin persen semata2 krn URUTAN funnel, BUKAN kondisi pasar. Live
+    case malam ini (user report): prefilter EOD 127 ticker lolos RSI/
+    MACD, TAPI alert intraday 3 hari beruntun tidak pernah keluar -- PERSIS
+    gejala bug ini, bukan kebetulan.
 
-    Faktor ke-4 (MBSS v2, 2026-09-09): foreign_net_ratio_1d (D-1 foreign
-    net-buy/volume, dari engine.broker.fetch_idx_foreign_flow_net_ratio via
-    nightly cache) -- BOOSTER re-ranking, BUKAN gate tambahan (konvensi
-    project, lihat feedback_booster_over_gate) -- backtest konfirmasi Top-5/
-    hari win 39.8%->47.9% di n IDENTIK (research/foreign_flow_2y.sqlite,
-    n=5,220+, lihat memory project_foreign_flow_accumulation_breakout_
-    2026_09_09.md). Ticker TANPA data foreign flow (None) diberi rank
-    TERBURUK (bukan di-drop/dipenalti keras) -- "missing = neutral" jadi
-    "missing = tidak dpt boost", bukan "missing = excluded".
+    FIX: gate RSI>=65 & MACD>0 diterapkan DI SINI (line pertama, ke
+    SELURUH or_data), SEBELUM liquidity-filter & ranking -- bukan lagi di
+    akhir stlh Top-10. Backtest desain baru: tingkat kosong turun ke 0.7%
+    (persis match tingkat kosong gate itu sendiri), win39.8%->kira2 sama/
+    lebih baik, TANPA ongkos kualitas (fix murni urutan, bukan mengubah
+    apa yg menentukan ADA-tidaknya kandidat).
+
+    Composite ranking 5 faktor (naik dari 4): entry_pos_in_or (posisi
+    entry_ref dlm range OR -- makin dekat OR_low makin baik, strategi
+    pullback), dist_from_prior_high_pct (makin jauh di bawah high D-1
+    makin baik), or_range_pct (opening range makin lebar makin baik),
+    foreign_net_ratio_1d (D-1 foreign net-buy/volume, booster sejak
+    2026-09-09 pagi, commit e1a3e89), DAN BARU: extension-risk (rank
+    ASCENDING by RSI -- makin RENDAH/kurang-extended makin baik). User
+    keputusan eksplisit: DEPRIORITIZE bukan hard-exclude utk RSI ekstrem
+    (mis. SAFE RSI94/SOHO RSI89/UANG RSI87 malam ini) -- nama itu MASIH
+    bisa masuk Top-10 kalau faktor lain sangat kuat, cuma diturunkan
+    prioritasnya, TIDAK dikeluarkan paksa dari pool. Backtest konfirmasi
+    band RSI 65-80 (win52.8%/mean+0.50%) jauh lebih baik dari >=85
+    (win38.4%/mean+0.07%) -- gradien monoton bersih, bukan spike.
+
+    Liquidity filter: top-half by D-1 value_traded (proxy `day_vol_avg_
+    prior` riset -- REUSE field yg SUDAH dihitung nightly, TANPA fetch
+    tambahan) -- TIDAK berubah dari desain lama.
+
+    Ticker TANPA data foreign flow (None) diberi rank TERBURUK di r4
+    (bukan di-drop/dipenalti keras) -- "missing = neutral" jadi "missing
+    = tidak dpt boost", bukan "missing = excluded". RSI/MACD WAJIB ada
+    (fail-closed, gate inti) -- beda dari foreign_net_ratio_1d yg opsional.
     """
     rows = []
     for t, snap in or_data.items():
@@ -4262,6 +4285,10 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
         value_traded = info.get("value_traded")
         if not prior_high or prior_high <= 0 or not value_traded:
             continue
+        rsi = info.get("rsi")
+        macd_hist = info.get("macd_hist")
+        if rsi is None or macd_hist is None or not (rsi >= ENTRY_PAGI_RSI_MIN and macd_hist > ENTRY_PAGI_MACD_MIN):
+            continue  # gate INTI diterapkan DI SINI (fix funnel-order), bukan di akhir stlh Top-10
         or_high, or_low, entry_ref = snap["or_high"], snap["or_low"], snap["entry_ref"]
         or_range_pct = (or_high - or_low) / or_low * 100 if or_low > 0 else None
         entry_pos_in_or = (
@@ -4273,7 +4300,7 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
         rows.append({
             "ticker": t, "entry_ref": entry_ref, "value_traded": value_traded,
             "entry_pos_in_or": entry_pos_in_or, "dist_from_prior_high_pct": dist_from_prior_high_pct,
-            "or_range_pct": or_range_pct, "rsi": info.get("rsi"), "macd_hist": info.get("macd_hist"),
+            "or_range_pct": or_range_pct, "rsi": rsi, "macd_hist": macd_hist,
             "whitelist_accumulation_net_pct": info.get("whitelist_accumulation_net_pct"),
             "whitelist_num_brokers": info.get("whitelist_num_brokers"),
             "foreign_net_ratio_1d": info.get("foreign_net_ratio_1d"),
@@ -4298,16 +4325,15 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
     # spt r3. Missing (None) diperlakukan sbg -inf shg selalu rank TERBURUK,
     # bukan crash (None tidak bisa dibandingkan langsung dgn float di sort()).
     r4 = _rank_map(liquid, lambda r: r["foreign_net_ratio_1d"] if r["foreign_net_ratio_1d"] is not None else float("-inf"), reverse=True)
+    # extension-risk (MBSS v2, 2026-09-09): rank ASCENDING by RSI -- makin
+    # RENDAH/kurang-extended makin baik (deprioritize, BUKAN exclude, sesuai
+    # keputusan user). rsi SELALU ada di titik ini (gate inti di atas sudah
+    # mewajibkan), jadi tidak butuh guard None.
+    r5 = _rank_map(liquid, lambda r: r["rsi"])
     for r in liquid:
-        r["score"] = r1[r["ticker"]] + r2[r["ticker"]] + r3[r["ticker"]] + r4[r["ticker"]]
+        r["score"] = r1[r["ticker"]] + r2[r["ticker"]] + r3[r["ticker"]] + r4[r["ticker"]] + r5[r["ticker"]]
     liquid.sort(key=lambda r: r["score"])
-    top10 = liquid[:ENTRY_PAGI_TOP_N]
-
-    return [
-        r for r in top10
-        if r["rsi"] is not None and r["macd_hist"] is not None
-        and r["rsi"] >= ENTRY_PAGI_RSI_MIN and r["macd_hist"] > ENTRY_PAGI_MACD_MIN
-    ]
+    return liquid[:ENTRY_PAGI_TOP_N]
 
 
 def _smart_money_tag(net_pct, num_brokers) -> str:
