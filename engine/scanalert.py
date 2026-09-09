@@ -4089,6 +4089,17 @@ ENTRY_PAGI_TOP_N = 10
 ENTRY_PAGI_AVGDOWN_PCT = -3.0
 ENTRY_PAGI_D1_TP_PCT = 6.0
 ENTRY_PAGI_D1_SL_PCT = 6.0
+# MBSS v2 (user request 2026-09-09, delay-fetch review): entry_price
+# dihitung dari OR window (bisa >=beberapa menit stale krn delay yfinance
+# + waktu baca user). Backtest ceiling-tolerance (research/entry_pagi_
+# ceiling_tolerance.py, n=42 kandidat) -- 1.0% tetap sehat (win 76-79%,
+# mean +2.9-3.05% vs baseline TANPA cek apapun 81-87%/+3.37-3.39%), lebih
+# longgar (2-3%) mulai menurunkan kualitas (mean turun ke +1.95-2.29%).
+# ~45-55% kandidat genuinely akan ke-skip (harga sudah lewat ceiling saat
+# scan) -- ini REALISTIS bukan bug, alert dikirim SEKALI shg tidak bisa
+# re-cek harga terus-menerus spt REBOUND. Kandidat yg ke-skip TETAP
+# ditampilkan (nama saja) di footer pesan supaya user tahu jangan kejar.
+ENTRY_PAGI_CEILING_TOLERANCE_PCT = 1.0
 
 ENTRY_PAGI_D2_WINDOW_START = datetime.time(9, 0)
 ENTRY_PAGI_D2_SESSION1_END = datetime.time(11, 59, 59)  # force-exit DI SINI, TIDAK lanjut sesi 2 (riset: lanjut sesi2 memperburuk subset lemah ini)
@@ -4256,17 +4267,25 @@ def _smart_money_tag(net_pct, num_brokers) -> str:
     return ""
 
 
-def _render_entry_pagi_message(picks: list[dict]) -> str:
+def _render_entry_pagi_message(picks: list[dict], skipped: list[dict] | None = None) -> str:
     """
     Satu pesan yg SAMA di-edit-in-place sepanjang hari (BUKAN pesan baru
     tiap ada perubahan status) -- render ULANG dari state, dipanggil tiap
     kali ADA perubahan (avg-down terisi / TP / SL / carry D+2).
+
+    Entry Range = [avg_down_price, entry_price*(1+ENTRY_PAGI_CEILING_
+    TOLERANCE_PCT)] -- batas ATAS sudah termasuk toleransi ceiling
+    (gabungan, bukan baris terpisah, per user request 2026-09-09). Semua
+    harga dibulatkan ke tick resmi IDX (_idx_round_tick). `skipped` --
+    kandidat yg SUDAH tembus ceiling saat scan (harga sudah lewat
+    achievable) ditampilkan namanya saja di footer, supaya user tahu
+    jangan dikejar, bukan disembunyikan begitu saja.
     """
     header = (
         "ENTRY PAGI\n"
-        "Beli sekarang, avg down 1x\n"
-        "Jual hari ini di TP\n"
-        "Hold sampai besok jika tidak sampai TP"
+        "Beli HANYA JIKA harga masih di Entry Range\n"
+        "Sudah tembus di atas Entry Range? SKIP hari ini, jangan dikejar\n"
+        "Avg down 1x, jual hari ini di TP, hold besok jika belum TP"
     )
     marker = {
         "WAITING": "⏳ Menunggu",
@@ -4276,19 +4295,27 @@ def _render_entry_pagi_message(picks: list[dict]) -> str:
     }
     blocks = []
     for i, p in enumerate(picks, start=1):
-        entry, avg_down = p["entry_price"], p["avg_down_price"]
-        lo, hi = sorted([avg_down, entry])
+        entry = _idx_round_tick(p["entry_price"])
+        avg_down = _idx_round_tick(p["avg_down_price"])
+        ceiling = _idx_round_tick(p["entry_price"] * (1 + ENTRY_PAGI_CEILING_TOLERANCE_PCT / 100.0))
+        lo, hi = sorted([avg_down, ceiling])
+        tp = _idx_round_tick(p["tp"])
+        sl = _idx_round_tick(p["sl"])
         avgdown_note = " (avg down TERISI)" if p.get("filled_avgdown") else ""
         sm_tag = _smart_money_tag(p.get("whitelist_accumulation_net_pct"), p.get("whitelist_num_brokers"))
         blocks.append(
             f"TICK {i}\n"
             f"{p['ticker']} — {entry:,.0f} (harga alert){sm_tag}\n"
             f"Entry Range : {lo:,.0f}-{hi:,.0f}\n"
-            f"TP : {p['tp']:,.0f}\n"
-            f"SL : {p['sl']:,.0f}\n"
+            f"TP : {tp:,.0f}\n"
+            f"SL : {sl:,.0f}\n"
             f"{marker.get(p['status'], p['status'])}{avgdown_note}"
         )
-    return header + "\n\n" + "\n\n".join(blocks)
+    text = header + "\n\n" + "\n\n".join(blocks)
+    if skipped:
+        names = ", ".join(s["ticker"] for s in skipped)
+        text += f"\n\nSKIP (harga sudah lewat Entry Range saat scan, jangan dikejar): {names}"
+    return text
 
 
 def _render_entry_pagi_d2_message(picks: list[dict]) -> str:
@@ -4329,7 +4356,7 @@ async def _entry_pagi_edit_message(state: dict):
     bot = _get_shared_bot()
     if bot is None:
         return
-    text = _render_entry_pagi_message(state["picks"])
+    text = _render_entry_pagi_message(state["picks"], state.get("skipped"))
     try:
         await bot.edit_message_text(chat_id=state.get("chat_id", core.TELEGRAM_CHAT_ID), message_id=state["message_id"], text=text)
     except Exception as e:
@@ -4407,12 +4434,35 @@ async def run_entry_pagi_scan_once(force: bool = False) -> dict:
     or_data = _entry_pagi_opening_range_from_bars(data, universe, or_window_end=or_window_end)
     picks_raw = _rank_entry_pagi_candidates(scored, or_data)
 
+    # MBSS v2 (user request 2026-09-09): entry_price = harga alert (dari OR
+    # window, sudah delay). Cek sekali lagi thd harga TERKINI (last close di
+    # `data`, bar TERBARU yg tersedia saat scan ini genuinely jalan -- bisa
+    # beberapa menit setelah or_window_end kalau scan tidak persis di batas
+    # window) -- kalau sudah tembus ceiling (+1%), SKIP kandidat itu drpd
+    # ngasih entry_price yg sudah tidak achievable. Backtest (research/
+    # entry_pagi_ceiling_tolerance.py): toleransi 1% tetap sehat (win
+    # 76-79%/mean +2.9-3.05%), TAPI realistis ~45-55% kandidat akan ke-skip
+    # dgn cara ini -- itu bukan bug, itu memang gap delay yg nyata.
     picks_state = []
+    skipped_state = []
     for r in picks_raw:
+        t = r["ticker"]
         entry_price = r["entry_ref"]
+        current_price = entry_price
+        sym = t + ".JK"
+        try:
+            bars_now = data[sym].dropna(how="all").sort_index()
+            if not bars_now.empty:
+                current_price = float(bars_now["Close"].astype(float).iloc[-1])
+        except Exception:
+            pass
+        ceiling = entry_price * (1 + ENTRY_PAGI_CEILING_TOLERANCE_PCT / 100.0)
+        if current_price > ceiling:
+            skipped_state.append({"ticker": t, "entry_price": entry_price, "current_price": current_price})
+            continue
         avg_down_price = entry_price * (1 + ENTRY_PAGI_AVGDOWN_PCT / 100.0)
         picks_state.append({
-            "ticker": r["ticker"], "entry_price": entry_price, "avg_down_price": avg_down_price,
+            "ticker": t, "entry_price": entry_price, "avg_down_price": avg_down_price,
             "avg_cost": entry_price, "filled_avgdown": False,
             "tp": entry_price * (1 + ENTRY_PAGI_D1_TP_PCT / 100.0),
             "sl": entry_price * (1 - ENTRY_PAGI_D1_SL_PCT / 100.0),
@@ -4423,16 +4473,17 @@ async def run_entry_pagi_scan_once(force: bool = False) -> dict:
 
     new_state = {
         "trading_day_marker": today, "fired": True, "message_id": None,
-        "chat_id": core.TELEGRAM_CHAT_ID, "picks": picks_state,
+        "chat_id": core.TELEGRAM_CHAT_ID, "picks": picks_state, "skipped": skipped_state,
     }
-    if picks_state:
-        new_state["message_id"] = await _entry_pagi_send_new_message(_render_entry_pagi_message(picks_state))
+    if picks_state or skipped_state:
+        new_state["message_id"] = await _entry_pagi_send_new_message(_render_entry_pagi_message(picks_state, skipped_state))
     else:
         print("ℹ️ Entry Pagi: tidak ada kandidat lolos filter RSI/MACD hari ini.")
 
     _save_entry_pagi_state(new_state)
     summary["picks"] = len(picks_state)
-    print(f"✅ Entry Pagi scan selesai: {len(universe)} ticker dicek, {len(picks_state)} lolos jadi TICK.")
+    summary["skipped"] = len(skipped_state)
+    print(f"✅ Entry Pagi scan selesai: {len(universe)} ticker dicek, {len(picks_state)} lolos jadi TICK, {len(skipped_state)} ke-skip (sudah lewat ceiling).")
     return summary
 
 
