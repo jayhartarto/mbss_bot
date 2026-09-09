@@ -1434,6 +1434,8 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
     net_move_10d_pct = None
     vol_spike_ratio_10d = None
     sma20_slope_20d_pct = None
+    range_pct_3d_avg = None
+    close_near_open_pct_3d_avg = None
     avg_day_range_pct_10d = None  # FIX 2026-09-09: rata2 rentang HARIAN (H-L)/C 10hr -- BEDA dari
     # day_range_pct_10d yg sudah ada (itu rentang TOTAL high-low 10hr sbg satu angka, bisa tinggi
     # krn trending kuat TANPA genuinely berosilasi tiap hari -- field lama SALAH dipakai versi awal
@@ -1459,6 +1461,20 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
             _daily_range_pct_10d = (_h10 - _l10) / _c10.replace(0, pd.NA) * 100
             if _daily_range_pct_10d.notna().sum() >= 8:
                 avg_day_range_pct_10d = round(float(_daily_range_pct_10d.mean()), 2)
+            # MBSS v2 (2026-09-09, user request -- "10d avg potensi sudah lewat fase
+            # volatil pingpong-nya"): window 3hr LEBIH RESPONSIF utk fase ping-pong yg
+            # SEDANG berlangsung (10d avg terlalu lambat, bisa masih tinggi walau fase
+            # ping-pong sudah lewat, atau miss fase yg baru mulai). close_near_open_pct
+            # = ciri LANGSUNG ping-pong genuine: rentang H-L lebar TAPI close~open
+            # (net flat harian, bukan trending). BEDA dari net_move_10d_pct (net flat
+            # ANTAR hari) -- ini net flat DALAM SATU hari.
+            if "Open" in hist.columns:
+                _o3, _h3, _l3, _c3 = hist["Open"].tail(3), high_prices.tail(3), low_prices.tail(3), close_prices.tail(3)
+                _range3 = (_h3 - _l3) / _c3.replace(0, pd.NA) * 100
+                _near_open3 = (_c3 - _o3).abs() / _o3.replace(0, pd.NA) * 100
+                if _range3.notna().sum() == 3 and _near_open3.notna().sum() == 3:
+                    range_pct_3d_avg = round(float(_range3.mean()), 2)
+                    close_near_open_pct_3d_avg = round(float(_near_open3.mean()), 2)
         except Exception:
             pass
 
@@ -2295,6 +2311,8 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         "vol_spike_ratio_10d": vol_spike_ratio_10d,  # /pingpong watchlist raw field -- exclude re-rating events spt KKES
         "sma20_slope_20d_pct": sma20_slope_20d_pct,  # /pingpong watchlist raw field -- "sideways bias naik" character
         "avg_day_range_pct_10d": avg_day_range_pct_10d,  # /pingpong watchlist raw field -- rata2 rentang HARIAN 10hr (BUKAN day_range_pct_10d yg sudah ada), numerator range_move_ratio yg BENAR
+        "range_pct_3d_avg": range_pct_3d_avg,  # /pingpong -- rata2 rentang harian (H-L)/C, 3 hari terakhir SAJA (lebih responsif dari 10d avg)
+        "close_near_open_pct_3d_avg": close_near_open_pct_3d_avg,  # /pingpong -- rata2 |close-open|/open, 3 hari terakhir -- ciri LANGSUNG ping-pong genuine (lebar tapi net flat harian)
         "tight_trailing_support": tight_trailing_support,  # informational/bonus only, TIDAK menggating apa pun -- lihat catatan di atas
         "ema9_slope_pct": ema9_slope_pct,
         "trailing_support_undercut_days": trailing_support_undercut_days,

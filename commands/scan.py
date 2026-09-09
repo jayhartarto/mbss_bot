@@ -2688,20 +2688,25 @@ async def pingpong_watchlist_command(update, context):
     ini TIDAK boleh dibaca sbg win rate/confidence apapun ("No heuristic
     score may be called probability" -- aturan engineering user sendiri).
 
-    4 gate (persis riset tervalidasi, scratchpad pingpong_screen*.py):
+    4 gate (REVISI 2026-09-09, user request -- "10d avg potensi sudah lewat
+    fase volatil pingpong-nya", ganti dari window 10hr yg terlalu lambat
+    bereaksi ke window 3hr yg responsif thd fase ping-pong yg SEDANG
+    berlangsung SEKARANG):
     1. Likuiditas >= median cross-sectional malam ini (value_traded_20d_avg)
-    2. Karakter range-bound: avg_day_range_pct_10d / |net_move_10d_pct| di
-       tercile TERATAS (adaptive percentile lintas universe malam ini,
-       reuse backbone_engine.percentile_rank_list -- BUKAN threshold tetap).
-       FIX 2026-09-09: numerator SEMPAT salah pakai day_range_pct_10d
-       (rentang TOTAL high-low 10hr, field lama, bisa tinggi krn trending
-       kuat TANPA genuinely berosilasi) -- sudah diganti avg_day_range_
-       pct_10d (rata2 rentang HARIAN 10hr, field baru) yg PERSIS match
-       formula riset tervalidasi (avg_range_10d = day_range_pct.rolling
-       (10).mean()).
-    3. Tanpa lonjakan volume (vol_spike_ratio_10d < 3x) -- exclude event
+    2. Rentang harian lebar BARU-BARU INI: range_pct_3d_avg > 3.0% (rata2
+       rentang (H-L)/C, 3 hari terakhir SAJA -- bukan 10hr avg yg sudah
+       diganti krn terlalu lambat)
+    3. Close dekat Open (ciri LANGSUNG ping-pong genuine -- lebar intraday
+       TAPI net flat harian, beda dari trending): close_near_open_pct_3d_avg
+       di tercile TERBAWAH (adaptive percentile lintas universe malam ini,
+       reuse backbone_engine.percentile_rank_list -- BUKAN threshold tetap)
+    4. Tanpa lonjakan volume (vol_spike_ratio_10d < 3x) -- exclude event
        re-rating spt KKES (false-positive yg sudah dikonfirmasi di riset)
-    4. Sideways bias naik: sma20_slope_20d_pct antara 0% dan +15%
+
+    Sideways-bias-naik (SMA20 slope) DIHAPUS dari gate keras -- tetap
+    ditampilkan sbg info di pesan, tapi tidak lagi mensyaratkan 0-15%
+    (window 3hr sudah cukup spesifik/responsif, tidak perlu syarat
+    tambahan yg bisa membuang kandidat genuinely ping-pong hari ini).
 
     Murni baca cache -- instan, tidak fetch apa pun.
     """
@@ -2713,17 +2718,15 @@ async def pingpong_watchlist_command(update, context):
     rows = []
     for t, r in scored.items():
         vt20 = r.get("value_traded_20d_avg")
-        day_range = r.get("avg_day_range_pct_10d")
-        net_move = r.get("net_move_10d_pct")
+        range3 = r.get("range_pct_3d_avg")
+        near_open3 = r.get("close_near_open_pct_3d_avg")
         vol_spike = r.get("vol_spike_ratio_10d")
         sma_slope = r.get("sma20_slope_20d_pct")
-        if vt20 is None or day_range is None or net_move is None or vol_spike is None or sma_slope is None:
+        if vt20 is None or range3 is None or near_open3 is None or vol_spike is None:
             continue
-        if abs(net_move) < 0.5:
-            continue  # hindari div-by-zero/rasio meledak utk ticker yg genuinely nyaris flat 10hari
         rows.append({
-            "ticker": t, "value_traded_20d_avg": vt20, "day_range_pct_10d": day_range,
-            "range_move_ratio": day_range / abs(net_move), "vol_spike_ratio_10d": vol_spike,
+            "ticker": t, "value_traded_20d_avg": vt20, "range_pct_3d_avg": range3,
+            "close_near_open_pct_3d_avg": near_open3, "vol_spike_ratio_10d": vol_spike,
             "sma20_slope_20d_pct": sma_slope,
         })
 
@@ -2733,17 +2736,17 @@ async def pingpong_watchlist_command(update, context):
 
     vt_sorted = sorted(r["value_traded_20d_avg"] for r in rows)
     median_vt = vt_sorted[len(vt_sorted) // 2]
-    ratio_values = [r["range_move_ratio"] for r in rows]
+    near_open_values = [r["close_near_open_pct_3d_avg"] for r in rows]
 
     candidates = []
     for r in rows:
         if r["value_traded_20d_avg"] < median_vt:
             continue
+        if r["range_pct_3d_avg"] <= 3.0:
+            continue
         if r["vol_spike_ratio_10d"] >= 3.0:
             continue
-        if not (0.0 <= r["sma20_slope_20d_pct"] <= 15.0):
-            continue
-        if backbone_engine.percentile_rank_list(ratio_values, r["range_move_ratio"]) < 0.667:  # tercile teratas
+        if backbone_engine.percentile_rank_list(near_open_values, r["close_near_open_pct_3d_avg"]) > 0.333:  # tercile TERBAWAH (paling dekat open)
             continue
         candidates.append(r)
 
@@ -2751,7 +2754,7 @@ async def pingpong_watchlist_command(update, context):
         await core.safe_reply(update.message, "📋 RANGE WATCH — tidak ada saham yang cocok pola ping-pong malam ini (wajar, gate memang ketat by design).")
         return
 
-    candidates.sort(key=lambda r: r["sma20_slope_20d_pct"], reverse=True)
+    candidates.sort(key=lambda r: r["range_pct_3d_avg"], reverse=True)
 
     lines = [
         "📋 RANGE WATCH -- watchlist pattern-match, BUKAN sinyal trading",
@@ -2759,9 +2762,10 @@ async def pingpong_watchlist_command(update, context):
         "Murni utk observasi manual atau uji posisi SANGAT KECIL dulu mengenali pola -- BUKAN dasar sizing entry sungguhan.\n",
     ]
     for i, r in enumerate(candidates[:15], 1):
+        slope_txt = f"{r['sma20_slope_20d_pct']:+.1f}%" if r["sma20_slope_20d_pct"] is not None else "N/A"
         lines.append(
-            f"{i}. {r['ticker']} — range 10hr {r['day_range_pct_10d']:.1f}% | "
-            f"slope SMA20 {r['sma20_slope_20d_pct']:+.1f}% | Value {r['value_traded_20d_avg']/1e9:.1f}M"
+            f"{i}. {r['ticker']} — range 3hr {r['range_pct_3d_avg']:.1f}% | "
+            f"close~open {r['close_near_open_pct_3d_avg']:.1f}% | slope SMA20 {slope_txt} | Value {r['value_traded_20d_avg']/1e9:.1f}M"
         )
     if staleness_note:
         lines.insert(0, staleness_note)
