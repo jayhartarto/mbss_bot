@@ -576,6 +576,40 @@ async def run_nightly_full_scan(context):
         except Exception as e:
             print(f"⚠️ Gagal menerapkan whitelist accumulation adjustment: {e}")
 
+        # IDX foreign flow -- booster ranking ENTRY PAGI (MBSS v2, 2026-09-09)
+        # ------------------------------------------------------------------
+        # net_ratio_1d (foreign_net/volume, D-1) dipakai sebagai faktor
+        # ranking KE-4 di _rank_entry_pagi_candidates (engine/scanalert.py)
+        # -- BUKAN gate keras (backtest konfirmasi: hard-filter nambah 8
+        # hari kosong/2thn, booster tidak nambah sama sekali krn gate-nya
+        # tidak berubah, cuma re-rank di dalam pool yg sama -- lihat memory
+        # project_foreign_flow_accumulation_breakout_2026_09_09.md, "ENTRY
+        # PAGI wiring design"). Endpoint publik IDX, gratis/tanpa budget
+        # bulanan spt RapidAPI/Zapi -- tetap pakai same-day dedup (satu
+        # call/malam cukup, /eodscan re-run di hari sama tidak perlu fetch
+        # ulang) via marker terpisah, sama pola dgn _rapidapi_cache_fresh_
+        # today di atas.
+        try:
+            if _rapidapi_cache_fresh_today("idx_foreign_flow_marker"):
+                print("📋 IDX foreign flow: sudah jalan hari ini, skip (hemat request).")
+            else:
+                foreign_flow_ratios = await asyncio.to_thread(broker_engine.fetch_idx_foreign_flow_net_ratio)
+                if foreign_flow_ratios:
+                    n_matched = 0
+                    for r in results:
+                        ticker = r.get("ticker")
+                        ratio = foreign_flow_ratios.get(ticker)
+                        if ratio is not None:
+                            r["foreign_net_ratio_1d"] = ratio
+                            n_matched += 1
+                    save_daily_scan_cache(results)
+                    cache_manager.set("idx_foreign_flow_marker", True, meta={"trading_day_marker": core.get_current_calendar_date_marker()})
+                    print(f"🌊 IDX foreign flow: {n_matched}/{len(results)} ticker dpt net_ratio_1d, cache di-update ulang.")
+                else:
+                    print("⚠️ IDX foreign flow: fetch kosong/gagal, skip (ticker tanpa data tetap None -- missing=neutral, tidak dipenalti).")
+        except Exception as e:
+            print(f"⚠️ Gagal fetch IDX foreign flow: {e}")
+
         # RapidAPI IDX sentiment shortlist (MBSS v2, RapidAPI integration) —
         # retail-vs-bandar divergence for a small top-scored shortlist, the
         # one signal in the whole RapidAPI integration with no OHLCV-

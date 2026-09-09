@@ -4242,6 +4242,16 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
     SUDAH dihitung nightly, TANPA fetch tambahan). Filter FINAL RSI/MACD
     diterapkan di SINI (setelah top-10, BUKAN sebelum) -- match urutan
     persis section3_production_backtest.
+
+    Faktor ke-4 (MBSS v2, 2026-09-09): foreign_net_ratio_1d (D-1 foreign
+    net-buy/volume, dari engine.broker.fetch_idx_foreign_flow_net_ratio via
+    nightly cache) -- BOOSTER re-ranking, BUKAN gate tambahan (konvensi
+    project, lihat feedback_booster_over_gate) -- backtest konfirmasi Top-5/
+    hari win 39.8%->47.9% di n IDENTIK (research/foreign_flow_2y.sqlite,
+    n=5,220+, lihat memory project_foreign_flow_accumulation_breakout_
+    2026_09_09.md). Ticker TANPA data foreign flow (None) diberi rank
+    TERBURUK (bukan di-drop/dipenalti keras) -- "missing = neutral" jadi
+    "missing = tidak dpt boost", bukan "missing = excluded".
     """
     rows = []
     for t, snap in or_data.items():
@@ -4266,6 +4276,7 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
             "or_range_pct": or_range_pct, "rsi": info.get("rsi"), "macd_hist": info.get("macd_hist"),
             "whitelist_accumulation_net_pct": info.get("whitelist_accumulation_net_pct"),
             "whitelist_num_brokers": info.get("whitelist_num_brokers"),
+            "foreign_net_ratio_1d": info.get("foreign_net_ratio_1d"),
         })
     if len(rows) < ENTRY_PAGI_TOP_N:
         return []
@@ -4283,8 +4294,12 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
     r1 = _rank_map(liquid, lambda r: r["entry_pos_in_or"])
     r2 = _rank_map(liquid, lambda r: r["dist_from_prior_high_pct"])
     r3 = _rank_map(liquid, lambda r: r["or_range_pct"], reverse=True)
+    # foreign_net_ratio_1d makin TINGGI makin baik (net-buy asing) -> reverse=True
+    # spt r3. Missing (None) diperlakukan sbg -inf shg selalu rank TERBURUK,
+    # bukan crash (None tidak bisa dibandingkan langsung dgn float di sort()).
+    r4 = _rank_map(liquid, lambda r: r["foreign_net_ratio_1d"] if r["foreign_net_ratio_1d"] is not None else float("-inf"), reverse=True)
     for r in liquid:
-        r["score"] = r1[r["ticker"]] + r2[r["ticker"]] + r3[r["ticker"]]
+        r["score"] = r1[r["ticker"]] + r2[r["ticker"]] + r3[r["ticker"]] + r4[r["ticker"]]
     liquid.sort(key=lambda r: r["score"])
     top10 = liquid[:ENTRY_PAGI_TOP_N]
 

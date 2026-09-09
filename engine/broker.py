@@ -2474,3 +2474,84 @@ def get_market_mover_for_ticker(ticker: str) -> dict | None:
         if sd.get("code") == ticker:
             return sd
     return None
+
+
+# ==========================================
+# 📋 IDX DIRECT FOREIGN FLOW (MBSS v2, 2026-09-09 — ENTRY PAGI booster wiring)
+# ==========================================
+# Source: IDX's own public GetStockSummary endpoint (free, no quota budget
+# like RapidAPI/Zapi — same mechanism validated by the research backfill at
+# research/fetch_foreign_flow.py, which built a 2-year 464k-row database
+# used to VALIDATE this signal before wiring: net_ratio_1d (foreign_net/
+# volume) as a 4th composite-ranking factor in ENTRY PAGI's candidate
+# ranking (_rank_entry_pagi_candidates, engine/scanalert.py) lifted a
+# Top-5/day re-rank test from win 39.8%->47.9% at IDENTICAL n (booster,
+# never shrinks the pool — see memory project_foreign_flow_accumulation_
+# breakout_2026_09_09.md "ENTRY PAGI wiring design" for the full backtest,
+# placebo-verification, and n-impact comparison vs a hard-filter design).
+#
+# ONE call/night covers the WHOLE exchange (market-wide payload, not
+# per-ticker) — same reason the research backfill could do 2 years in one
+# script. No monthly-budget tracking needed (free public endpoint, not a
+# paid API), but same-day dedup IS applied (mirrors _rapidapi_cache_fresh_
+# today's pattern) so re-running /eodscan same day doesn't re-hit IDX.
+try:
+    from curl_cffi import requests as _idx_ff_requests
+    _IDX_FF_BACKEND = "curl_cffi"
+except ImportError:  # pragma: no cover — falls back if curl_cffi isn't installed
+    _idx_ff_requests = requests
+    _IDX_FF_BACKEND = "requests"
+
+_IDX_FF_HOME = "https://www.idx.co.id/"
+_IDX_FF_API = "https://www.idx.co.id/primary/TradingSummary/GetStockSummary"
+_IDX_FF_HEADERS = {
+    "Referer": "https://www.idx.co.id/en/market-data/trading-summary/stock-summary",
+    "Accept": "application/json, text/plain, */*",
+}
+
+
+def fetch_idx_foreign_flow_net_ratio(date: datetime.date | None = None, timeout: int = 30) -> dict:
+    """
+    Fetch ONE trading day's foreign net-buy ratio (foreign_net/volume) for
+    the WHOLE exchange from IDX's own public endpoint, one call. `date`
+    defaults to yesterday (D-1, matching how ENTRY PAGI's ranking consumes
+    it — D-1 close, same timing as RSI/MACD/vol_ratio already in `scored`).
+
+    Return {ticker: net_ratio_1d} — MISSING/failed tickers are simply
+    absent from the dict (never included as 0.0 or a penalty), per this
+    project's "missing = neutral, never penalize" convention. Returns {}
+    on total fetch failure (network error, IDX block, bad response) —
+    caller degrades gracefully the same way every other optional nightly
+    enrichment step in engine/nightly.py already does (try/except around
+    the call site, never lets one failed source break the whole scan).
+    """
+    if date is None:
+        date = datetime.date.today() - datetime.timedelta(days=1)
+    date_api = date.strftime("%Y%m%d")
+    try:
+        if _IDX_FF_BACKEND == "curl_cffi":
+            session = _idx_ff_requests.Session(impersonate="chrome")
+        else:
+            session = _idx_ff_requests.Session()
+            session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        session.get(_IDX_FF_HOME, timeout=timeout)  # warm up, acquire cookies
+        resp = session.get(
+            _IDX_FF_API, params={"date": date_api, "start": 0, "length": 9999},
+            headers=_IDX_FF_HEADERS, timeout=timeout,
+        )
+        if resp.status_code != 200:
+            print(f"⚠️ IDX foreign flow: HTTP {resp.status_code} utk {date_api}")
+            return {}
+        rows = resp.json().get("data", [])
+    except Exception as e:
+        print(f"⚠️ IDX foreign flow: gagal fetch {date_api}: {e}")
+        return {}
+
+    out = {}
+    for r in rows:
+        ticker = r.get("StockCode")
+        fbuy, fsell, vol = r.get("ForeignBuy"), r.get("ForeignSell"), r.get("Volume")
+        if not ticker or fbuy is None or fsell is None or not vol or vol <= 0:
+            continue  # missing/zero-volume ticker -- excluded, not penalized
+        out[ticker] = (fbuy - fsell) / vol
+    return out
