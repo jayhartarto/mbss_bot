@@ -2688,25 +2688,27 @@ async def pingpong_watchlist_command(update, context):
     ini TIDAK boleh dibaca sbg win rate/confidence apapun ("No heuristic
     score may be called probability" -- aturan engineering user sendiri).
 
-    4 gate (REVISI 2026-09-09, user request -- "10d avg potensi sudah lewat
-    fase volatil pingpong-nya", ganti dari window 10hr yg terlalu lambat
-    bereaksi ke window 3hr yg responsif thd fase ping-pong yg SEDANG
-    berlangsung SEKARANG):
+    4 gate (REVISI #2 2026-09-09, user request):
     1. Likuiditas >= median cross-sectional malam ini (value_traded_20d_avg)
-    2. Rentang harian lebar BARU-BARU INI: range_pct_3d_avg > 3.0% (rata2
-       rentang (H-L)/C, 3 hari terakhir SAJA -- bukan 10hr avg yg sudah
-       diganti krn terlalu lambat)
+    2. Rentang harian >3% SEMUA 3 HARI TERAKHIR INDIVIDUALLY (bukan rata2 --
+       "range di cek per day, jika dlm minimal 3hari, setiap harinya ada
+       range>3% baru masuk"): range_gt3pct_alldays_3d harus True. Lebih
+       ketat dari revisi sebelumnya (range_pct_3d_avg > 3.0, yg bisa lolos
+       walau 1 hari sepi asal 2 hari lain lebar).
     3. Close dekat Open (ciri LANGSUNG ping-pong genuine -- lebar intraday
        TAPI net flat harian, beda dari trending): close_near_open_pct_3d_avg
-       di tercile TERBAWAH (adaptive percentile lintas universe malam ini,
-       reuse backbone_engine.percentile_rank_list -- BUKAN threshold tetap)
-    4. Tanpa lonjakan volume (vol_spike_ratio_10d < 3x) -- exclude event
-       re-rating spt KKES (false-positive yg sudah dikonfirmasi di riset)
+       <= 2.0% (threshold TETAP -- semula tercile adaptif, diganti user
+       request krn kandidatnya terlalu sedikit dgn tercile)
+    4. Volume TOP tercile CROSS-SECTIONAL (avg_volume_5d, adaptive percentile
+       lintas universe malam ini) -- "volume jangan pakai spike, tapi pakai
+       gate top volume frequencies, BUKAN relatif thd sahamnya sendiri".
+       GANTI TOTAL dari vol_spike_ratio_10d (self-relative thd histori
+       ticker itu sendiri, yg dulu dipakai utk exclude event re-rating spt
+       KKES) -- sekarang top-volume RANKING lintas market, bukan spike
+       relatif thd diri sendiri.
 
-    Sideways-bias-naik (SMA20 slope) DIHAPUS dari gate keras -- tetap
-    ditampilkan sbg info di pesan, tapi tidak lagi mensyaratkan 0-15%
-    (window 3hr sudah cukup spesifik/responsif, tidak perlu syarat
-    tambahan yg bisa membuang kandidat genuinely ping-pong hari ini).
+    Sideways-bias-naik (SMA20 slope) tetap DILUAR gate keras -- cuma info
+    di pesan (window 3hr sudah cukup spesifik/responsif).
 
     Murni baca cache -- instan, tidak fetch apa pun.
     """
@@ -2718,15 +2720,15 @@ async def pingpong_watchlist_command(update, context):
     rows = []
     for t, r in scored.items():
         vt20 = r.get("value_traded_20d_avg")
-        range3 = r.get("range_pct_3d_avg")
+        range_ok = r.get("range_gt3pct_alldays_3d")
         near_open3 = r.get("close_near_open_pct_3d_avg")
-        vol_spike = r.get("vol_spike_ratio_10d")
+        vol5d = r.get("avg_volume_5d")
         sma_slope = r.get("sma20_slope_20d_pct")
-        if vt20 is None or range3 is None or near_open3 is None or vol_spike is None:
+        if vt20 is None or range_ok is None or near_open3 is None or vol5d is None:
             continue
         rows.append({
-            "ticker": t, "value_traded_20d_avg": vt20, "range_pct_3d_avg": range3,
-            "close_near_open_pct_3d_avg": near_open3, "vol_spike_ratio_10d": vol_spike,
+            "ticker": t, "value_traded_20d_avg": vt20, "range_gt3pct_alldays_3d": range_ok,
+            "close_near_open_pct_3d_avg": near_open3, "avg_volume_5d": vol5d,
             "sma20_slope_20d_pct": sma_slope,
         })
 
@@ -2736,17 +2738,17 @@ async def pingpong_watchlist_command(update, context):
 
     vt_sorted = sorted(r["value_traded_20d_avg"] for r in rows)
     median_vt = vt_sorted[len(vt_sorted) // 2]
-    near_open_values = [r["close_near_open_pct_3d_avg"] for r in rows]
+    volume_values = [r["avg_volume_5d"] for r in rows]
 
     candidates = []
     for r in rows:
         if r["value_traded_20d_avg"] < median_vt:
             continue
-        if r["range_pct_3d_avg"] <= 3.0:
+        if r["range_gt3pct_alldays_3d"] is not True:
             continue
-        if r["vol_spike_ratio_10d"] >= 3.0:
+        if r["close_near_open_pct_3d_avg"] > 2.0:  # threshold TETAP (user request -- tercile adaptif kandidatnya terlalu sedikit)
             continue
-        if backbone_engine.percentile_rank_list(near_open_values, r["close_near_open_pct_3d_avg"]) > 0.333:  # tercile TERBAWAH (paling dekat open)
+        if backbone_engine.percentile_rank_list(volume_values, r["avg_volume_5d"]) < 0.667:  # tercile TERATAS (volume tertinggi lintas market)
             continue
         candidates.append(r)
 
@@ -2754,7 +2756,7 @@ async def pingpong_watchlist_command(update, context):
         await core.safe_reply(update.message, "📋 RANGE WATCH — tidak ada saham yang cocok pola ping-pong malam ini (wajar, gate memang ketat by design).")
         return
 
-    candidates.sort(key=lambda r: r["range_pct_3d_avg"], reverse=True)
+    candidates.sort(key=lambda r: r["avg_volume_5d"], reverse=True)
 
     lines = [
         "📋 RANGE WATCH -- watchlist pattern-match, BUKAN sinyal trading",
@@ -2764,8 +2766,8 @@ async def pingpong_watchlist_command(update, context):
     for i, r in enumerate(candidates[:15], 1):
         slope_txt = f"{r['sma20_slope_20d_pct']:+.1f}%" if r["sma20_slope_20d_pct"] is not None else "N/A"
         lines.append(
-            f"{i}. {r['ticker']} — range 3hr {r['range_pct_3d_avg']:.1f}% | "
-            f"close~open {r['close_near_open_pct_3d_avg']:.1f}% | slope SMA20 {slope_txt} | Value {r['value_traded_20d_avg']/1e9:.1f}M"
+            f"{i}. {r['ticker']} — 3hr beruntun range>3% | "
+            f"close~open {r['close_near_open_pct_3d_avg']:.1f}% | slope SMA20 {slope_txt} | Value {r['value_traded_20d_avg']/1e9:.1f}M | Vol5d {r['avg_volume_5d']/1e6:.1f}M lbr"
         )
     if staleness_note:
         lines.insert(0, staleness_note)

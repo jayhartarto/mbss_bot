@@ -1436,6 +1436,8 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
     sma20_slope_20d_pct = None
     range_pct_3d_avg = None
     close_near_open_pct_3d_avg = None
+    range_gt3pct_alldays_3d = None
+    avg_volume_5d = None
     avg_day_range_pct_10d = None  # FIX 2026-09-09: rata2 rentang HARIAN (H-L)/C 10hr -- BEDA dari
     # day_range_pct_10d yg sudah ada (itu rentang TOTAL high-low 10hr sbg satu angka, bisa tinggi
     # krn trending kuat TANPA genuinely berosilasi tiap hari -- field lama SALAH dipakai versi awal
@@ -1475,6 +1477,21 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
                 if _range3.notna().sum() == 3 and _near_open3.notna().sum() == 3:
                     range_pct_3d_avg = round(float(_range3.mean()), 2)
                     close_near_open_pct_3d_avg = round(float(_near_open3.mean()), 2)
+                    # MBSS v2 (2026-09-09, revisi #2 -- user request "range di cek per
+                    # day, jika dlm minimal 3hari, setiap harinya ada range>3% baru
+                    # masuk"): BEDA dari range_pct_3d_avg (RATA-RATA 3hari, bisa lolos
+                    # walau 1 hari sepi asal 2 hari lain lebar) -- ini WAJIB SEMUA 3
+                    # hari individually >3%, lebih ketat/lebih genuine "3 hari beruntun
+                    # aktif", bukan cuma rata2 aktif.
+                    range_gt3pct_alldays_3d = bool((_range3 > 3.0).all())
+            # MBSS v2 (2026-09-09, revisi #2 -- user request "volume jangan pakai
+            # spike, tapi pakai gate top volume frequencies, BUKAN relatif thd
+            # sahamnya sendiri"): avg_volume_5d dipakai /pingpong utk ranking
+            # CROSS-SECTIONAL (top tercile lintas universe malam ini), GANTI TOTAL
+            # dari vol_spike_ratio_10d (self-relative thd histori ticker itu
+            # sendiri) -- field lama TETAP disimpan (dipakai tempat lain / histori),
+            # cuma tidak lagi dipakai gate /pingpong.
+            avg_volume_5d = round(float(volumes.tail(5).mean()), 0)
         except Exception:
             pass
 
@@ -2313,6 +2330,8 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         "avg_day_range_pct_10d": avg_day_range_pct_10d,  # /pingpong watchlist raw field -- rata2 rentang HARIAN 10hr (BUKAN day_range_pct_10d yg sudah ada), numerator range_move_ratio yg BENAR
         "range_pct_3d_avg": range_pct_3d_avg,  # /pingpong -- rata2 rentang harian (H-L)/C, 3 hari terakhir SAJA (lebih responsif dari 10d avg)
         "close_near_open_pct_3d_avg": close_near_open_pct_3d_avg,  # /pingpong -- rata2 |close-open|/open, 3 hari terakhir -- ciri LANGSUNG ping-pong genuine (lebar tapi net flat harian)
+        "range_gt3pct_alldays_3d": range_gt3pct_alldays_3d,  # /pingpong -- boolean, SEMUA 3 hari terakhir individually range>3% (bukan rata2)
+        "avg_volume_5d": avg_volume_5d,  # /pingpong -- volume rata2 5hr (lembar), dipakai ranking CROSS-SECTIONAL top-tercile, GANTI vol_spike_ratio_10d
         "tight_trailing_support": tight_trailing_support,  # informational/bonus only, TIDAK menggating apa pun -- lihat catatan di atas
         "ema9_slope_pct": ema9_slope_pct,
         "trailing_support_undercut_days": trailing_support_undercut_days,
