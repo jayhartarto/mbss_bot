@@ -6,6 +6,7 @@ import pickle
 import copy
 import time
 import glob
+import math
 import shutil
 import asyncio
 import logging
@@ -1176,6 +1177,33 @@ def score_from_percentile(pct: float, invert: bool = False) -> float:
     """Map a 0-1 percentile rank to a 1-10 score. invert=True means LOWER is better."""
     p = 1 - pct if invert else pct
     return round(max(1.0, min(10.0, 1 + p * 9)), 1)
+
+
+def wilson_lower_bound(wins: int, n: int, confidence: float = 0.95) -> float:
+    """
+    Wilson score interval lower bound for a win rate — MBSS v2 (2026-09-09,
+    external repo scouting -- trading-cli/mariobgsp, memory backlog_
+    external_repo_feature_scouting_2026_09_09.md). Gives an honest
+    statistical floor instead of the ad-hoc "n<100 don't trust" heuristic
+    used throughout this session's research: "n=360, win 55%" becomes
+    "95% confident TRUE win rate is at least X%" -- a strictly stronger
+    claim, and one that naturally penalizes small n instead of just
+    flagging it as a binary threshold. z=1.96 for 95% confidence (the
+    only level this project uses so far; add a lookup table if another
+    confidence level is ever needed instead of hand-picking a new z).
+
+    Returns 0.0 for n=0 (no data => no lower bound to claim).
+    """
+    if n <= 0:
+        return 0.0
+    z = 1.96 if abs(confidence - 0.95) < 1e-9 else None
+    if z is None:
+        raise ValueError(f"wilson_lower_bound: hanya confidence=0.95 (z=1.96) yg didukung saat ini, dapat {confidence}")
+    p = wins / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = (z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / denom
+    return max(0.0, centre - half)
 
 
 MIN_HISTORY_FOR_ADAPTIVE = 120  # ~6 months of trading days needed to build a meaningful per-stock baseline
