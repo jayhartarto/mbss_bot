@@ -2565,6 +2565,56 @@ async def entry_pagi_manual_command(update, context):
         await core.safe_reply(update.message, "✅ Selesai -- 0 kandidat lolos filter RSI>=65 & MACD>0 hari ini (wajar, bukan error).")
 
 
+async def ff_daytrade_manual_command(update, context):
+    """
+    /ffdaytrade -- trigger MANUAL run_ff_daytrade_scan_once(force=True)
+    (MBSS v2, lane baru 2026-09-09 -- lihat blok "FF DAYTRADE" di
+    engine/scanalert.py). Mirror persis pola /entrypagi -- force=True
+    melewati guard jendela waktu (09:00-09:15) & "sudah fire hari ini",
+    guard weekday/holiday/toggle/cache TETAP berlaku (genuine blocker).
+
+    Populasi lane ini SANGAT sempit by design (conviction tinggi/frekuensi
+    rendah, semua gate hard AND) -- 0 kandidat adalah hasil WAJAR
+    sehari-hari, bukan indikasi ada yg salah.
+    """
+    ff_state = scanalert_engine._load_ff_daytrade_state()
+    already_active = (
+        ff_state.get("trading_day_marker") == scanalert_engine._today_str()
+        and ff_state.get("fired") and ff_state.get("picks")
+    )
+    if already_active and not (context.args and context.args[0].lower() == "force"):
+        await core.safe_reply(
+            update.message,
+            f"⚠️ FF DAYTRADE hari ini SUDAH ada {len(ff_state['picks'])} TICK aktif sedang dipantau. "
+            "Menjalankan ulang akan MENIMPA state itu & kirim TICK baru (pesan lama berhenti di-update). "
+            "Kalau yakin (mis. scan pagi tadi genuinely gagal), ketik /ffdaytrade force."
+        )
+        return
+
+    await core.safe_reply(update.message, "🌅 Menjalankan ulang scan FF DAYTRADE manual...")
+    try:
+        result = await scanalert_engine.run_ff_daytrade_scan_once(force=True)
+    except Exception as e:
+        await core.safe_reply(update.message, f"⚠️ Scan FF DAYTRADE manual gagal: {e}")
+        return
+
+    if result.get("skipped_reason"):
+        reason_id = {
+            "toggled_off": "lane FF DAYTRADE sedang dimatikan (FF_DAYTRADE_ENABLED=False)",
+            "weekend": "hari ini weekend",
+            "holiday": "hari ini libur bursa",
+            "no_cache": "cache /eodscan belum ada/basi -- jalankan /eodscan dulu",
+        }.get(result["skipped_reason"], result["skipped_reason"])
+        await core.safe_reply(update.message, f"⚠️ Scan dibatalkan: {reason_id}")
+        return
+
+    picks = result.get("picks", 0)
+    if picks:
+        await core.safe_reply(update.message, f"✅ Selesai -- {picks} kandidat lolos, TICK baru sudah dikirim di atas.")
+    else:
+        await core.safe_reply(update.message, "✅ Selesai -- 0 kandidat lolos gate hari ini (wajar -- lane ini conviction tinggi/frekuensi rendah, gate sangat ketat by design).")
+
+
 async def strong_buy_command(update, context):
     """
     /strongbuy — SEMUA saham dengan action_id STRONG_BUY dari cache /eodscan,
