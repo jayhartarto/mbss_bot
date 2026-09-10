@@ -1166,6 +1166,56 @@ def load_broksum_daily_history() -> dict:
 BROKSUM_PERMANENT_HISTORY_DB = os.path.join(core.PROJECT_ROOT, "research", "broksum_daily_history.sqlite")
 
 
+def seed_broksum_permanent_history_from_cache():
+    """
+    ONE-TIME migration: the VPS already has up to BROKSUM_DAILY_HISTORY_
+    MAX_DAYS=15 real days of per-broker history sitting in the existing
+    `broksum_daily_history` cache (cache/broksum_daily_history.pkl,
+    written by append_broksum_daily_history above) -- same buy_value/
+    sell_value/buy_avg/sell_avg schema this permanent sqlite log wants,
+    just scoped to the 13 SMART_MONEY_BROKER_WHITELIST codes. Seeding
+    from it gives the new permanent log a ~15-day head start for those
+    13 brokers instead of starting from zero -- run this ONCE (idempotent
+    via INSERT OR REPLACE, safe to re-run) on the VPS after pulling this
+    commit, then let accumulate_broksum_permanent_history take over
+    nightly as usual (which covers EVERY broker, not just these 13,
+    going forward).
+    """
+    import sqlite3
+
+    history = load_broksum_daily_history()
+    if not history:
+        print("ℹ️ Tidak ada broksum_daily_history cache untuk di-seed (kosong/belum pernah jalan).")
+        return
+    os.makedirs(os.path.dirname(BROKSUM_PERMANENT_HISTORY_DB), exist_ok=True)
+    conn = sqlite3.connect(BROKSUM_PERMANENT_HISTORY_DB)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS broker_daily (
+            ticker TEXT NOT NULL, broker_code TEXT NOT NULL, date TEXT NOT NULL,
+            buy_value REAL, sell_value REAL, buy_avg REAL, sell_avg REAL,
+            buy_freq REAL, sell_freq REAL,
+            PRIMARY KEY (ticker, broker_code, date)
+        )
+    """)
+    rows = [
+        (ticker, b.get("code"), entry.get("date"), b.get("buy_value"), b.get("sell_value"),
+         b.get("buy_avg"), b.get("sell_avg"), None, None)
+        for ticker, entries in history.items()
+        for entry in entries
+        for b in entry.get("brokers", [])
+        if b.get("code") and entry.get("date")
+    ]
+    conn.executemany(
+        "INSERT OR REPLACE INTO broker_daily "
+        "(ticker, broker_code, date, buy_value, sell_value, buy_avg, sell_avg, buy_freq, sell_freq) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    print(f"🌱 Seed dari broksum_daily_history cache: +{len(rows)} baris ({len(history)} ticker, 13 broker whitelist).")
+
+
 def accumulate_broksum_permanent_history(broksum_250_data: dict):
     """Append today's FULL broker-level snapshot (every broker, not just
     whitelist) to a permanent, uncapped local sqlite log -- one row per
