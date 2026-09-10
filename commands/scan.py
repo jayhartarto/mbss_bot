@@ -950,7 +950,7 @@ async def screen_daytrade(update, context):
         return (
             f"{header}\n"
             f"   Entry ~{price} (ref: open sesi berikutnya) | TP {tp1} (+6%) | SL {sl} | RR {rr_str}"
-            f"{''.join(extra)}{market_engine.format_sector_tag(r.get('sector'))}"
+            f"{''.join(extra)}{market_engine.format_sector_tag(r.get('sector'))}{scanalert_engine.format_vcp_tag(r.get('vcp_pass'))}"
         )
 
     lines = ["🎯 SCREENING DAY TRADE — SETUP PRA-BREAKOUT\n"]
@@ -1910,7 +1910,7 @@ async def high_conviction_command(update, context):
             lines.append(
                 f"• {r['ticker']} — {r.get('price')}\n"
                 f"   TP1 {info['price']:,.0f} / +{info['level_pct']:.1f}% (WR {info['wr_pct']:.0f}%)" + (f" | SL {cut_loss}" if cut_loss else "")
-                + f"{danger_note}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
+                + f"{danger_note}{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}{scanalert_engine.format_vcp_tag(r.get('vcp_pass'))}"
             )
     else:
         # MBSS v2 BUGFIX (user request 2026-08-27): 0 kandidat DAY TRADE

@@ -4352,6 +4352,27 @@ def _smart_money_tag(net_pct, num_brokers) -> str:
     return ""
 
 
+def format_vcp_tag(vcp_pass) -> str:
+    """
+    MBSS v2 (2026-09-10, backlog_bollinger_squeeze_crossref item #2 --
+    "wire VCP as an explicit cross-tool confirmation signal into SDT/HC/
+    Explosive"). PURE INFORMATIONAL TAG, same pattern as _smart_money_tag
+    -- NOT a gate, NOT a rank/score reweight. Unlike REBOUND (booster,
+    backtested win39.1%/mean+1.264% n=348) and FF DAYTRADE (hard gate,
+    the lane's original validation target), SDT/HC's own Danger Gate/
+    Probability Rank machinery was explicitly left untested for VCP in
+    the scouting backlog ("not reliably reconstructable at 2-year
+    historical scale... forcing a low-quality approximation would produce
+    untrustworthy numbers") -- so this does NOT silently bake VCP into
+    any formula there, only surfaces the already-proven vcp_pass field as
+    a visible badge, same role breakout_alerts/smart-money tags already
+    play. Empty string if vcp_pass isn't True (missing/False both = no
+    tag, never a penalty -- same "missing=neutral" convention as
+    _smart_money_tag above).
+    """
+    return " 🎯 VCP" if vcp_pass is True else ""
+
+
 def _render_entry_pagi_message(picks: list[dict], skipped: list[dict] | None = None) -> str:
     """
     Satu pesan yg SAMA di-edit-in-place sepanjang hari (BUKAN pesan baru
@@ -4772,11 +4793,14 @@ REBOUND_TOP5_RSI_MIN = 65.0
 # RSI>=65+vol>=1.5 MENGALAHKAN RSI>=60+vol>=1.5 (dua threshold tidak
 # aditif, jangan asumsikan sweep tunggal langsung bisa digabung).
 REBOUND_TOP5_VOL_RATIO_MIN = 1.5
-# Dikembalikan ke 5 (dari 7 yg sempat dicoba 2026-09-08 pagi) -- riset
-# fee-adjusted (research/rebound_final_fee_sensitivity.py) tunjukkan
-# Top-5 net-of-fee mean +1.26% vs Top-7 net +0.90% -- kualitas per-trade
-# lebih penting drpd frekuensi utk config yg sudah solid ini.
-REBOUND_TOP5_N = 5
+# DINAIKKAN ke 10 (dari 5) atas permintaan eksplisit user 2026-09-10,
+# MESKIPUN riset fee-adjusted (research/rebound_final_fee_sensitivity.py)
+# menunjukkan Top-5 net-of-fee mean +1.26% mengalahkan Top-7 net +0.90% --
+# user sudah diberi tahu trade-off ini (kualitas per-trade kemungkinan
+# turun lebih jauh di N=10, belum divalidasi ulang) dan tetap memilih
+# lebih banyak kandidat/hari. Kalau nanti kualitas terasa menurun nyata,
+# ini kandidat pertama utk dikembalikan turun.
+REBOUND_TOP5_N = 10
 
 # MBSS v2 (2026-09-09, VCP scouting, memory backlog_external_repo_feature_
 # scouting_2026_09_09.md): "booster" (default) adds VCP tightness as a 4th
