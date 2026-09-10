@@ -5092,6 +5092,7 @@ async def run_rebound_live_once() -> dict:
         return summary
 
     picks = state.setdefault("picks", {})
+    last_checked = state.setdefault("last_checked", {})  # {ticker: "HH:MM"} -- bar terakhir yg SUDAH diperiksa siklus lalu
     pending = [t for t in top5 if t not in picks]
     open_positions = [t for t, p in picks.items() if p["status"] == "OPEN"]
 
@@ -5117,26 +5118,53 @@ async def run_rebound_live_once() -> dict:
                 if rolling_low <= 0:
                     continue
                 trigger_price = rolling_low * (1 + REBOUND_TIER_PCT / 100.0)
-                current_price = float(bars["Close"].astype(float).iloc[-1])
-                overshoot_pct = (current_price - trigger_price) / trigger_price * 100
+
+                # MBSS v2 BUGFIX (2026-09-10, live case SAPX -- "rebound berkali2 tapi
+                # tidak pernah entry, sekarang harganya sudah terbang"): versi SEBELUM
+                # ini cuma cek bar TERAKHIR (bars.iloc[-1]) tiap siklus 5menit -- kalau
+                # harga SEMPAT menyentuh trigger_price di bar TENGAH (bukan bar
+                # terakhir) lalu bergerak lagi sebelum siklus berikutnya fetch, touch
+                # itu HILANG SAMA SEKALI, tidak pernah diperiksa. TIDAK match backtest
+                # tervalidasi (rebound_final_validation.py get_entry(), yg scan SELURUH
+                # live_window antar 2 siklus, bukan cuma bar terakhirnya). Fix: scan
+                # SEMUA bar baru sejak `last_checked[t]` (bukan cuma bar paling akhir)
+                # utk cari touch PALING AWAL -- persis semantik "limit order resting",
+                # order kesentuh begitu ADA bar manapun yg High >= trigger, bukan cuma
+                # kalau kebetulan bar checkpoint-nya masih di atas trigger.
+                last_checked_str = last_checked.get(t)
+                # last_checked disimpan sbg STRING (state di-JSON-dump, datetime.time
+                # bukan JSON-serializable) -- parse balik ke time() sblm dibandingkan.
+                last_checked_time = datetime.datetime.strptime(last_checked_str, "%H:%M:%S").time() if last_checked_str else None
+                new_bars = bars[bars.index.time > last_checked_time] if last_checked_time else bars
+                if new_bars.empty:
+                    continue
+                last_checked[t] = new_bars.index[-1].time().strftime("%H:%M:%S")
 
                 entry_price = None
-                if overshoot_pct <= 0:
-                    # belum overshoot -- order msh "menunggu" turun. Tetap cek apakah
-                    # bar terakhir SUDAH menyentuh trigger_price (High >= trigger).
-                    last_high = float(bars["High"].astype(float).iloc[-1])
-                    if last_high >= trigger_price:
-                        entry_price = trigger_price
-                elif overshoot_pct <= REBOUND_TOLERANCE_PCT:
-                    # sudah lewat trigger_price teoritis tapi overshoot masih dlm
-                    # toleransi -- entry di HARGA REAL saat ini (bukan harga teoritis
-                    # yg sudah tidak achievable). overshoot > toleransi -> SKIP,
-                    # genuinely kelewatan, tunggu siklus berikutnya.
-                    entry_price = current_price
+                entry_ts = None
+                touch_mask = new_bars["High"].astype(float) >= trigger_price
+                if touch_mask.any():
+                    # Touch PALING AWAL di jendela bar baru ini -- match live_window
+                    # semantics: order resting kesentuh begitu bar PERTAMA yg
+                    # High>=trigger muncul, bukan nunggu bar terakhir jendela.
+                    hit_idx = touch_mask.idxmax()
+                    entry_price = trigger_price
+                    entry_ts = hit_idx
+                else:
+                    current_price = float(new_bars["Close"].astype(float).iloc[-1])
+                    overshoot_pct = (current_price - trigger_price) / trigger_price * 100
+                    if 0 < overshoot_pct <= REBOUND_TOLERANCE_PCT:
+                        # sudah lewat trigger_price teoritis (di SEMUA bar baru, tidak
+                        # ada satupun yg touch persis) tapi overshoot bar terakhir masih
+                        # dlm toleransi -- entry di HARGA REAL saat ini (bukan harga
+                        # teoritis yg sudah tidak achievable). overshoot > toleransi ->
+                        # SKIP, genuinely kelewatan, tunggu siklus berikutnya.
+                        entry_price = current_price
+                        entry_ts = new_bars.index[-1]
 
                 if entry_price is None:
                     continue
-                entry_time = bars.index[-1].time()
+                entry_time = entry_ts.time()
                 info = state["top5_info"].get(t, {})
                 picks[t] = {
                     "ticker": t, "status": "OPEN",
