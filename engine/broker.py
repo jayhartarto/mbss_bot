@@ -2509,6 +2509,44 @@ _IDX_FF_HEADERS = {
     "Accept": "application/json, text/plain, */*",
 }
 
+# 2026-09-10: VPS's datacenter IP gets a Cloudflare Managed Challenge
+# ("Just a moment...", cf-mitigated: challenge) from idx.co.id even with
+# curl_cffi's Chrome impersonation -- a JS challenge, not a UA/fingerprint
+# block, so it can't be solved without a real browser. Laptop (residential
+# IP) is NOT challenged, so `push_foreign_flow.py` fetches locally and
+# commits the result to `foreign_flow_daily/{date}.json`; the nightly scan
+# prefers this pre-pushed file over the live call (which is kept as-is for
+# graceful degradation if the file wasn't pushed that day).
+FOREIGN_FLOW_DAILY_DIR = os.path.join(core.PROJECT_ROOT, "foreign_flow_daily")
+
+
+def _idx_ff_target_date(date: datetime.date | None = None) -> datetime.date:
+    """Same D-1 default used by fetch_idx_foreign_flow_net_ratio -- kept as
+    its own helper so the pushed-file loader stays in sync with the live
+    fetch's date convention."""
+    if date is None:
+        return datetime.date.today() - datetime.timedelta(days=1)
+    return date
+
+
+def load_pushed_foreign_flow_net_ratio(date: datetime.date | None = None) -> dict | None:
+    """
+    Read a foreign-flow net_ratio_1d dict pushed manually from a laptop
+    (see push_foreign_flow.py) at foreign_flow_daily/{date}.json. Returns
+    None (not {}) when the file doesn't exist, so callers can distinguish
+    "nobody pushed today" from "pushed but genuinely empty."
+    """
+    target = _idx_ff_target_date(date)
+    path = os.path.join(FOREIGN_FLOW_DAILY_DIR, f"{target.isoformat()}.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ IDX foreign flow: gagal baca pushed file {path}: {e}")
+        return None
+
 
 def fetch_idx_foreign_flow_net_ratio(date: datetime.date | None = None, timeout: int = 30) -> dict:
     """
@@ -2525,8 +2563,7 @@ def fetch_idx_foreign_flow_net_ratio(date: datetime.date | None = None, timeout:
     enrichment step in engine/nightly.py already does (try/except around
     the call site, never lets one failed source break the whole scan).
     """
-    if date is None:
-        date = datetime.date.today() - datetime.timedelta(days=1)
+    date = _idx_ff_target_date(date)
     date_api = date.strftime("%Y%m%d")
     try:
         if _IDX_FF_BACKEND == "curl_cffi":

@@ -593,7 +593,15 @@ async def run_nightly_full_scan(context):
             if _rapidapi_cache_fresh_today("idx_foreign_flow_marker"):
                 print("📋 IDX foreign flow: sudah jalan hari ini, skip (hemat request).")
             else:
-                foreign_flow_ratios = await asyncio.to_thread(broker_engine.fetch_idx_foreign_flow_net_ratio)
+                # 2026-09-10: coba pakai file yang di-push manual dari laptop
+                # dulu (VPS kena Cloudflare challenge kalau fetch langsung —
+                # lihat engine/broker.py load_pushed_foreign_flow_net_ratio).
+                # Fallback ke live-fetch kalau belum ada yang di-push hari ini.
+                foreign_flow_ratios = broker_engine.load_pushed_foreign_flow_net_ratio()
+                if foreign_flow_ratios is not None:
+                    print(f"📥 IDX foreign flow: pakai file yang di-push dari laptop ({len(foreign_flow_ratios)} ticker).")
+                else:
+                    foreign_flow_ratios = await asyncio.to_thread(broker_engine.fetch_idx_foreign_flow_net_ratio)
                 if foreign_flow_ratios:
                     n_matched = 0
                     for r in results:
