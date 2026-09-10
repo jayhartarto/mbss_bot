@@ -509,6 +509,7 @@ async def run_nightly_full_scan(context):
         # ini ke histori harian (bukan cuma cache sesaat) — supaya trend
         # akumulasi/distribusi bisa dilihat beberapa hari ke belakang.
         await asyncio.to_thread(append_broksum_daily_history, merged_broksum)
+        await asyncio.to_thread(accumulate_broksum_permanent_history, merged_broksum)
 
         # RapidAPI market-wide sweep (MBSS v2, RapidAPI integration) —
         # breakout alerts + multibagger scan + sector rotation, every
@@ -1147,3 +1148,62 @@ def append_broksum_daily_history(broksum_250_data: dict):
 def load_broksum_daily_history() -> dict:
     history = cache_manager.get("broksum_daily_history", default={})
     return history if isinstance(history, dict) else {}
+
+
+# 2026-09-10 — "whale transaction" research prerequisite: append_broksum_
+# daily_history above only keeps SMART_MONEY_BROKER_WHITELIST brokers (13
+# codes) capped at BROKSUM_DAILY_HISTORY_MAX_DAYS=15 rolling days — fine for
+# Bias Bandar's trend display, but useless for backtesting "does an unusual
+# single-broker transaction-value spike (ANY broker, not just the whitelist)
+# predict a future move" since that needs (a) every broker, not just 13, and
+# (b) months of uncapped history to build up a real per-broker baseline +
+# enough forward-return samples. This is the SAME data already fetched for
+# broksum_250 above (merged_broksum) -- ZERO new API/quota cost, pure
+# persistence, mirrors the 1m-intraday-accumulation precedent (see memory
+# project_intraday_1m_data_accumulation_2026_09_10.md): grows by one
+# permanent day forward every trading night, not retroactively backfillable
+# (Index Alpha/RapidAPI broker data has no long historical lookback either).
+BROKSUM_PERMANENT_HISTORY_DB = os.path.join(core.PROJECT_ROOT, "research", "broksum_daily_history.sqlite")
+
+
+def accumulate_broksum_permanent_history(broksum_250_data: dict):
+    """Append today's FULL broker-level snapshot (every broker, not just
+    whitelist) to a permanent, uncapped local sqlite log -- one row per
+    (ticker, broker, date). INSERT OR REPLACE keeps re-running /eodscan
+    same-day idempotent instead of duplicating rows."""
+    if not broksum_250_data:
+        return
+    import sqlite3
+
+    today_marker = core.get_current_calendar_date_marker()
+    os.makedirs(os.path.dirname(BROKSUM_PERMANENT_HISTORY_DB), exist_ok=True)
+    try:
+        conn = sqlite3.connect(BROKSUM_PERMANENT_HISTORY_DB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS broker_daily (
+                ticker TEXT NOT NULL,
+                broker_code TEXT NOT NULL,
+                date TEXT NOT NULL,
+                buy_value REAL, sell_value REAL,
+                buy_avg REAL, sell_avg REAL,
+                buy_freq REAL, sell_freq REAL,
+                PRIMARY KEY (ticker, broker_code, date)
+            )
+        """)
+        rows = [
+            (ticker, r.get("code"), today_marker, r.get("buy_value"), r.get("sell_value"),
+             r.get("buy_avg"), r.get("sell_avg"), r.get("buy_freq"), r.get("sell_freq"))
+            for ticker, brokers in broksum_250_data.items()
+            for r in brokers if r.get("code")
+        ]
+        conn.executemany(
+            "INSERT OR REPLACE INTO broker_daily "
+            "(ticker, broker_code, date, buy_value, sell_value, buy_avg, sell_avg, buy_freq, sell_freq) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+        print(f"💾 Broksum permanent history: +{len(rows)} baris ({today_marker}), total ticker hari ini: {len(broksum_250_data)}")
+    except Exception as e:
+        print(f"⚠️ Gagal menyimpan broksum permanent history: {e}")
