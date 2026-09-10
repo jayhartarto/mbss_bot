@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import re
+import sys
 import json
 import pickle
 import copy
@@ -12,6 +13,7 @@ import asyncio
 import logging
 import datetime
 import sqlite3
+import subprocess
 import requests
 import xml.etree.ElementTree as ET
 import email.utils
@@ -7721,6 +7723,64 @@ async def run_ff_daytrade_monitor_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ FF Daytrade monitor job gagal: {e}")
 
 
+# MBSS v2 (2026-09-10, riset intraday -- BSJP early-breakout, REBOUND,
+# ping-pong range-trade -- SEMUA dibatasi n<50 sepanjang sesi ini krn DB 1m
+# lokal cuma ~20 hari, dibatasi window rolling ~30hari Yahoo Finance utk
+# interval 1m (TIDAK bisa backfill retroaktif spt foreign-flow yg py
+# endpoint historis 2thn). Satu2nya cara nambah sample: jalan SEKALI/hari
+# stlh closing, akumulasi maju terus (research/fetch_intraday_1m.py).
+# Job GRATIS/tanpa kuota (yfinance publik) beda dari RapidAPI-backed
+# features -- aman dijadwalkan otomatis, TIDAK spt /eodscan yg sengaja
+# manual-only (lihat memory project_eodscan_manual_only_and_stale_db_
+# hardening.md) krn alasan KUOTA, bukan krn alasan APLIKATIF spt ini.
+STATE_FILE_INTRADAY_1M_BACKFILL = os.path.join(PROJECT_ROOT, "intraday_1m_backfill_state.json")
+
+
+async def run_intraday_1m_backfill_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH -- akumulasi harian 1m OHLCV (research/
+    fetch_intraday_1m.py, dijalankan via subprocess spy proses fetch yfinance
+    yg agak lama TIDAK memblokir event loop bot utama). Jalan SEKALI/hari,
+    di jendela SETELAH closing (16:00-16:30 WIB) -- guard trading_day_marker
+    persis pola lane lain (mis. run_entry_pagi_scan_once's `fired` guard),
+    supaya re-run/restart bot di hari yg sama tidak fetch dobel. Murni
+    infrastruktur riset -- TIDAK menyentuh lane trading manapun.
+    """
+    try:
+        now_wib = datetime.datetime.now(WIB)
+        if now_wib.weekday() >= 5:
+            return
+        if not (datetime.time(16, 0) <= now_wib.time() <= datetime.time(16, 30)):
+            return
+        today = now_wib.strftime("%Y-%m-%d")
+        state = {}
+        if os.path.exists(STATE_FILE_INTRADAY_1M_BACKFILL):
+            try:
+                with open(STATE_FILE_INTRADAY_1M_BACKFILL) as f:
+                    state = json.load(f)
+            except Exception:
+                state = {}
+        if state.get("last_run_date") == today:
+            return
+        if await asyncio.to_thread(is_idx_market_holiday_today):
+            return
+
+        script_path = os.path.join(PROJECT_ROOT, "research", "fetch_intraday_1m.py")
+        proc = await asyncio.to_thread(
+            subprocess.run, [sys.executable, script_path],
+            capture_output=True, text=True, timeout=1800,
+        )
+        if proc.returncode != 0:
+            print(f"⚠️ Intraday 1m backfill job gagal (exit {proc.returncode}): {proc.stderr[-500:]}")
+            return
+        print(f"📊 Intraday 1m backfill selesai: {proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else 'OK'}")
+        state["last_run_date"] = today
+        with open(STATE_FILE_INTRADAY_1M_BACKFILL, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Intraday 1m backfill job gagal: {e}")
+
+
 async def send_startup_notice(app: Application):
     """Sent once automatically when the bot process starts — the person's cue that
     it's alive, and the one place the disclaimer appears instead of every message."""
@@ -7951,6 +8011,13 @@ def build_app():
         # SEPENUHNYA dari lane lain.
         app.job_queue.run_repeating(run_ff_daytrade_scan_job, interval=180, first=172)
         app.job_queue.run_repeating(run_ff_daytrade_monitor_job, interval=180, first=176)
+        # MBSS v2 (2026-09-10 -- akumulasi 1m intraday, lihat catatan panjang
+        # di run_intraday_1m_backfill_job): interval LONGGAR (1800s/30menit)
+        # krn job ini cuma perlu genuinely JALAN sekali dlm jendela 16:00-
+        # 16:30 WIB tiap hari -- guard trading_day_marker internal yg
+        # mencegah dobel, interval singkat tidak perlu. Murni infrastruktur
+        # riset, TIDAK terhubung ke lane trading manapun.
+        app.job_queue.run_repeating(run_intraday_1m_backfill_job, interval=1800, first=300)
     else:
         print("⚠️ JobQueue tidak tersedia (python-telegram-bot[job-queue] belum terinstall) — "
               "scan-alert intraday TIDAK akan jalan otomatis. Install dgn: "
