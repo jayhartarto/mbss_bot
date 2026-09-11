@@ -2097,7 +2097,7 @@ async def run_bsjp_pyramid_d1_once() -> dict:
     # deteksi avg-down/SL yg butuh LOW. Pakai _fetch_today_1m (bar 1m,
     # SAMA pola dgn ENTRY PAGI) supaya dapat High/Low intrabar riil.
     tickers = [p["ticker"] for p in open_positions]
-    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+    data = await _get_shared_1m_bars(tickers)  # 2026-09-11: shared-fetch cache, lihat catatan di _shared_1m_cache
     if data is None or (hasattr(data, "empty") and data.empty):
         summary["skipped_reason"] = "no_intraday_data"
         return summary
@@ -2364,6 +2364,108 @@ def _fetch_today_1m(tickers: list[str]):
         if data.empty:
             print("⚠️ Scan-alert: retry jg kosong total -- genuinely gagal siklus ini, coba lagi siklus berikutnya.")
     return data
+
+
+# MBSS v2 (2026-09-11, live incident -- user report "REBOUND & ENTRY PAGI
+# tidak ada alert sama sekali, cuma BSJP"): root cause investigation found
+# REBOUND's Top-10 WAS locked correctly, but its monitor never saw a single
+# fresh 1m bar all day (`last_checked` stayed empty). bot.log showed BOTH
+# "fetch bar 1m KOSONG TOTAL" (Yahoo batch-block, same pattern as the
+# 2026-08-27 "248 Failed downloads" incident documented above) AND
+# "Timeout 90s: _fetch_today_1m(509 item)" (ENTRY PAGI's own once-daily
+# full-universe morning scan). Root cause: SIX different jobs (REBOUND
+# monitor 300s, ENTRY PAGI scan/monitor/D2 180s each, FF DAYTRADE scan/
+# monitor 180s each, BSJP pyramid validation/D1 180s each) each
+# independently called yf.download for 1m data on their own schedule --
+# with `first=` offsets clustered within ~70-176s of each other, most of
+# them effectively fire WITHIN THE SAME ~2-minute window every cycle,
+# producing a repeated BURST of concurrent 1m batch requests from one VPS
+# IP throughout the whole trading day. User's diagnosis (confirmed
+# correct): consolidate into ONE shared fetch consumed by all lanes,
+# instead of each lane hitting Yahoo independently.
+#
+# Scope: covers the MONITORING call sites only (REBOUND pending/open,
+# ENTRY PAGI D1/D2 monitor, FF DAYTRADE monitor, BSJP pyramid D1 monitor)
+# -- NOT ENTRY PAGI's once-daily full-universe (509-ticker) morning scan,
+# which is a fundamentally different discovery pass (whole universe, once
+# at 09:20-09:30) rather than a narrow "check my already-picked tickers"
+# monitor -- folding it into every 150s cycle for the rest of the day
+# would waste far more requests than it saves.
+_shared_1m_cache = {"data": None, "fetched_at": None, "tickers": frozenset()}
+SHARED_1M_CACHE_MAX_AGE_SEC = 200  # sedikit longgar drpd interval job (150s) -- toleransi 1 siklus telat/timeout
+
+
+def _collect_active_monitor_tickers() -> list[str]:
+    """Union semua ticker yg SEDANG butuh dipantau live lintas REBOUND/
+    ENTRY PAGI/FF DAYTRADE/BSJP pyramid -- dipakai job fetch bersama supaya
+    SATU panggilan yf.download melayani semua lane sekaligus."""
+    tickers = set()
+
+    rb_state = _load_rebound_state()
+    rb_top5 = rb_state.get("top5") or []
+    rb_picks = rb_state.get("picks") or {}
+    tickers.update(t for t in rb_top5 if t not in rb_picks)  # pending
+    tickers.update(t for t, p in rb_picks.items() if p.get("status") == "OPEN")
+
+    ep_state = _load_entry_pagi_state()
+    ep_picks = ep_state.get("picks") or []
+    tickers.update(p["ticker"] for p in ep_picks if p.get("day") == "D1" and p.get("status") == "WAITING")
+    tickers.update(p["ticker"] for p in ep_picks if p.get("day") == "D2" and p.get("status") == "CARRY_D2")
+
+    ff_state = _load_ff_daytrade_state()
+    ff_picks = ff_state.get("picks") or []
+    tickers.update(p["ticker"] for p in ff_picks if p.get("status") == "WAITING")
+
+    bj_state = _load_bsjp_pyramid_state()
+    bj_positions = (bj_state.get("positions") or {}).values()
+    today = _today_str()
+    tickers.update(
+        p["ticker"] for p in bj_positions
+        if p.get("status") in ("OPEN", "SESSION2") and p.get("decision_date") != today
+    )
+
+    return sorted(tickers)
+
+
+async def run_shared_1m_monitor_fetch_once() -> dict:
+    """
+    Job bersama (interval 150s) -- SATU panggilan yf.download utk union
+    ticker yg dibutuhkan REBOUND+ENTRY PAGI+FF DAYTRADE+BSJP monitor,
+    disimpan di cache modul supaya ke-4 lane tinggal baca (_get_shared_1m_
+    bars), bukan masing2 fetch sendiri. Lihat catatan insiden 2026-09-11
+    di atas _shared_1m_cache.
+    """
+    summary = {"skipped_reason": None, "tickers": 0}
+    tickers = _collect_active_monitor_tickers()
+    if not tickers:
+        summary["skipped_reason"] = "no_active_tickers"
+        return summary
+    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+    if data is None or (hasattr(data, "empty") and data.empty):
+        summary["skipped_reason"] = "fetch_empty"
+        return summary
+    _shared_1m_cache["data"] = data
+    _shared_1m_cache["fetched_at"] = datetime.datetime.now(core.WIB)
+    _shared_1m_cache["tickers"] = frozenset(tickers)
+    summary["tickers"] = len(tickers)
+    return summary
+
+
+async def _get_shared_1m_bars(tickers: list[str]) -> pd.DataFrame:
+    """
+    Baca dari cache bersama kalau masih fresh (<=SHARED_1M_CACHE_MAX_AGE_
+    SEC) DAN mencakup semua ticker yg diminta -- kalau tidak (cache
+    kosong/basi/ticker baru yg belum ke-cover), fallback fetch LANGSUNG
+    utk ticker itu saja (jaring pengaman, supaya satu lane tidak macet
+    total kalau job bersama kebetulan gagal/telat satu siklus).
+    """
+    fetched_at = _shared_1m_cache.get("fetched_at")
+    cached_tickers = _shared_1m_cache.get("tickers") or frozenset()
+    if fetched_at is not None:
+        age_sec = (datetime.datetime.now(core.WIB) - fetched_at).total_seconds()
+        if age_sec <= SHARED_1M_CACHE_MAX_AGE_SEC and set(tickers).issubset(cached_tickers):
+            return _shared_1m_cache["data"]
+    return await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
 
 
 def _compute_current_session_vwap(bars: pd.DataFrame) -> float | None:
@@ -4626,7 +4728,7 @@ async def run_entry_pagi_monitor_once() -> dict:
         return summary
 
     tickers = [p["ticker"] for p in open_picks]
-    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+    data = await _get_shared_1m_bars(tickers)  # 2026-09-11: shared-fetch cache, lihat catatan di _shared_1m_cache
     if data is None or (hasattr(data, "empty") and data.empty):
         summary["skipped_reason"] = "no_intraday_data"
         return summary
@@ -4709,7 +4811,7 @@ async def run_entry_pagi_d2_once() -> dict:
         return summary
 
     tickers = [p["ticker"] for p in open_picks]
-    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+    data = await _get_shared_1m_bars(tickers)  # 2026-09-11: shared-fetch cache, lihat catatan di _shared_1m_cache
     if data is None or (hasattr(data, "empty") and data.empty):
         summary["skipped_reason"] = "no_intraday_data"
         return summary
@@ -5125,7 +5227,7 @@ async def run_rebound_live_once() -> dict:
 
     # --- (1) cek entry (gaya limit order) utk kandidat yg BELUM fire hari ini ---
     if pending:
-        data = await _fetch_with_timeout(_fetch_today_1m, pending, default=pd.DataFrame())
+        data = await _get_shared_1m_bars(pending)  # 2026-09-11: shared-fetch cache, lihat catatan di _shared_1m_cache
         if data is not None and not (hasattr(data, "empty") and data.empty):
             for t in pending:
                 sym = t + ".JK"
@@ -5207,7 +5309,7 @@ async def run_rebound_live_once() -> dict:
     # --- (2) monitor posisi OPEN: SL keras, avg-down sekali, tiered trailing TP ---
     open_positions = [t for t, p in picks.items() if p["status"] == "OPEN"]
     if open_positions:
-        data2 = await _fetch_with_timeout(_fetch_today_1m, open_positions, default=pd.DataFrame())
+        data2 = await _get_shared_1m_bars(open_positions)  # 2026-09-11: shared-fetch cache, lihat catatan di _shared_1m_cache
         if data2 is not None and not (hasattr(data2, "empty") and data2.empty):
             for t in open_positions:
                 p = picks[t]
@@ -5538,7 +5640,7 @@ async def run_ff_daytrade_scan_once(force: bool = False) -> dict:
         return summary
 
     tickers = [r["ticker"] for r in picks_raw]
-    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+    data = await _get_shared_1m_bars(tickers)  # 2026-09-11: shared-fetch cache (fallback ke fetch langsung kalau belum ke-cover), lihat catatan di _shared_1m_cache
 
     picks_state = []
     for r in picks_raw:
@@ -5610,7 +5712,7 @@ async def run_ff_daytrade_monitor_once() -> dict:
         return summary
 
     tickers = [p["ticker"] for p in open_picks]
-    data = await _fetch_with_timeout(_fetch_today_1m, tickers, default=pd.DataFrame())
+    data = await _get_shared_1m_bars(tickers)  # 2026-09-11: shared-fetch cache, lihat catatan di _shared_1m_cache
     if data is None or (hasattr(data, "empty") and data.empty):
         summary["skipped_reason"] = "no_intraday_data"
         return summary

@@ -7684,6 +7684,22 @@ async def run_bsjp_pyramid_d1_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ Entry Sore pyramid D+1 job gagal: {e}")
 
 
+async def run_shared_1m_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback -- fetch 1m BERSAMA (2026-09-11, live incident: user
+    report REBOUND & ENTRY PAGI tidak ada alert sama sekali hari itu,
+    root cause 6 job berbeda masing2 fetch 1m independen ke Yahoo dalam
+    jendela waktu yg saling berdekatan, memicu blokir batch spt insiden
+    "248 Failed downloads" 2026-08-27. Lihat catatan lengkap di
+    engine/scanalert.py _shared_1m_cache). SATU panggilan di sini melayani
+    REBOUND/ENTRY PAGI(monitor D1/D2)/FF DAYTRADE/BSJP pyramid sekaligus.
+    """
+    try:
+        await scanalert_engine.run_shared_1m_monitor_fetch_once()
+    except Exception as e:
+        print(f"⚠️ Shared 1m monitor fetch job gagal: {e}")
+
+
 async def run_rebound_live_job(context: ContextTypes.DEFAULT_TYPE):
     """
     JobQueue callback TERPISAH -- DAY TRADE REBOUND live (scan Top-5 D-1 +
@@ -8001,6 +8017,12 @@ def build_app():
         # 200-140=60(!). 60 mod 60 = 0 -- TABRAKAN dgn validation_job tiap
         # 900s (kelipatan 180 & 300). Geser first ke 205 utk hindari itu.
         app.job_queue.run_repeating(run_rebound_live_job, interval=300, first=205)
+        # MBSS v2 (2026-09-11): job bersama fetch 1m, lihat docstring
+        # run_shared_1m_monitor_job. interval=150s (lebih ketat dari 180s
+        # yg dipakai sebagian besar lane di atas, supaya tidak ada yg jadi
+        # kurang fresh dari sebelumnya) & first=30 (JAUH lebih awal dari
+        # job lain) -- cache sudah terisi sebelum lane manapun butuh baca.
+        app.job_queue.run_repeating(run_shared_1m_monitor_job, interval=150, first=30)
         # MBSS v2 (2026-09-09 -- lane FF DAYTRADE baru, lihat blok "FF
         # DAYTRADE" di engine/scanalert.py): DUA job TERPISAH, interval=180s
         # sama cadence dgn ENTRY PAGI (jendela scan sempit 09:00-09:15,
