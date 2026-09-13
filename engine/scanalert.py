@@ -90,6 +90,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import math
 import os
 import pickle
 import time
@@ -857,6 +858,37 @@ BSJP_TP1_MEDIAN_GAP_PCT = 3.1  # dipakai _build_bsjp_message (alert live), TIDAK
 # sama krn instruksi eksplisit utk tidak reuse buta -- treat sbg direksional,
 # bukan final-tuned spt REBOUND/ENTRY PAGI.
 BSJP_CEILING_TOLERANCE_PCT = 1.0
+# MBSS v2 (user request 2026-09-13 -- partial bar & delay yfinance): bar harian
+# yfinance yang dipakai _fetch_bsjp_live_bar TERTINGGAL ~10-15 menit dari harga
+# pasar riil (pengamatan user). Konsekuensi desain:
+#   1. "current_price" yg tampil = harga per data, BUKAN harga detik ini --
+#      message WAJIB menampilkan as-of time + peringatan delay.
+#   2. Ceiling entry "sehat" TIDAK boleh cuma toleransi statis -- saham
+#      momentum bisa sudah lari >1% dalam 10-15 menit. Toleransi dibuat
+#      adaptif thd volatilitas: drift ~ N(0, atr_pct * sqrt(delay/session)),
+#      dipakai BSJP_DELAY_DRIFT_SIGMA sigma. Lihat _bsjp_entry_ceiling.
+BSJP_YF_DELAY_MINUTES = 12  # midpoint pengamatan 10-15 menit
+BSJP_DELAY_DRIFT_SIGMA = 1.5
+# MBSS v2 (user request 2026-09-13 -- tag HIGH-CONVICTION / hc di ENTRY SORE):
+# riset breakout_1_5d_bsjp_hc_fidelity_v1.py + hc_early_v1.py -> tag hc
+# (dist_high50>=-1 & cmf20>=0.1 & macd_hist>0) yang dihitung SAME-DAY (pakai
+# close parsial) memangkas fade dari ~50% ke 6-13% dan menaikkan next-open
+# 4-6x. PENTING: versi lag D-1 TIDAK ada edge (fade ~65%) -- jadi hc HARUS
+# dihitung dgn data hari berjalan, di checkpoint sore. Fidelity parsial vs
+# EOD ~62% (15:00) s.d 69% (15:30). Titik terbaik = 15:00-15:15 (fade 6%,
+# next-open +5.0%), makanya dipasang di window ENTRY SORE 15:00-15:30.
+BSJP_HC_DIST_HIGH50_MIN = -1.0
+BSJP_HC_CMF_MIN = 0.1
+# Range entry valid di checkpoint hc (data telat ~12m -> harga riil bisa beda):
+# toleransi chasing +0.5% (user 2026-09-13); batas bawah -0.5% sbg penanda
+# setup melemah kalau harga sudah turun lebih dari itu dari acuan.
+BSJP_HC_CHASE_TOL_PCT = 0.5
+BSJP_HC_BAND_DOWN_PCT = 0.5
+# Alert hc paling cepat 15:10 -- supaya data yg dipakai (telat ~12 mnt) sudah
+# represent kondisi 15:00 (bukan 14:48 kalau job jalan tepat 15:00). Window
+# tutup tetap BSJP_PYRAMID_WINDOW_END (15:30).
+BSJP_HC_ALERT_EARLIEST = datetime.time(15, 10)
+BSJP_BASE_CACHE_VERSION = 2  # bump tiap kali field base berubah (v2 = + hc fields)
 BSJP_RECHECK_WINDOW_START = datetime.time(9, 30)
 BSJP_RECHECK_WINDOW_END = datetime.time(15, 50)
 # MBSS v2 (user request 2026-09-02): 900s->300s -- alasan LANGSUNG terkait
@@ -1019,9 +1051,35 @@ def _fetch_bsjp_historical_base(tickers: list[str]) -> dict:
             # Tier 2 "BSJP WATCH" dipensiunkan 2026-09-03, TIDAK dipakai gate
             # manapun lagi, tapi murah dihitung & tetap tersimpan di snap.
             sma50 = float(prior["Close"].tail(50).mean()) if len(prior) >= 50 else None
+            # ATR14 (Wilder) dari bar SEBELUM hari ini -- dipakai _bsjp_entry_
+            # ceiling utk toleransi delay adaptif thd volatilitas. Causal,
+            # tidak ikut bar hari berjalan yg belum final.
+            atr_pct = None
+            if len(prior) >= 15:
+                _pc = prior["Close"]
+                _tr = pd.concat([
+                    prior["High"] - prior["Low"],
+                    (prior["High"] - _pc.shift(1)).abs(),
+                    (prior["Low"] - _pc.shift(1)).abs(),
+                ], axis=1).max(axis=1)
+                _atr = _tr.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1]
+                if prev_close > 0 and pd.notna(_atr):
+                    atr_pct = float(_atr / prev_close * 100)
             if prev_close <= 0:
                 continue
-            base[t] = {"prev_close": prev_close, "prev_volume": prev_volume, "vol_ma200": vol_ma200, "sma50": sma50}
+            # Tag hc (2026-09-13): high50 SEBELUM hari ini (dist_high50 versi
+            # parquet = rolling(50).max() TERMASUK hari ini, jadi parsial pakai
+            # max(high50_prior, high_so_far)) + window pendek utk cmf20/macd
+            # parsial. Disimpan sbg list kecil (bukan Series) supaya cache JSON
+            # tetap ringan.
+            high50_prior = float(prior["High"].tail(50).max()) if len(prior) >= 50 else None
+            hc_closes = [float(x) for x in prior["Close"].tail(60)]
+            hc_highs = [float(x) for x in prior["High"].tail(20)]
+            hc_lows = [float(x) for x in prior["Low"].tail(20)]
+            hc_vols = [float(x) for x in prior["Volume"].tail(20)]
+            base[t] = {"prev_close": prev_close, "prev_volume": prev_volume, "vol_ma200": vol_ma200,
+                       "sma50": sma50, "atr_pct": atr_pct, "high50_prior": high50_prior,
+                       "hc_closes": hc_closes, "hc_highs": hc_highs, "hc_lows": hc_lows, "hc_vols": hc_vols}
         if i + _BSJP_FETCH_BATCH < len(tickers):
             time.sleep(0.5)
     return base
@@ -1055,6 +1113,8 @@ def _fetch_bsjp_live_bar(tickers: list[str]) -> dict:
             live[t] = {
                 "current_price": float(today["Close"]),
                 "high_so_far": float(today["High"]),
+                "low_so_far": float(today["Low"]) if not pd.isna(today["Low"]) else None,
+                "open_so_far": float(today["Open"]) if not pd.isna(today["Open"]) else None,
                 "volume_so_far": float(today["Volume"]) if not pd.isna(today["Volume"]) else 0.0,
             }
         if i + _BSJP_FETCH_BATCH < len(tickers):
@@ -1154,6 +1214,55 @@ def _trading_minutes_elapsed(now_time: datetime.time) -> int:
     return TOTAL_DAY_BARS  # sesi 2 sudah tutup, hari bursa penuh
 
 
+def _bsjp_hc_partial(b: dict, l: dict) -> dict:
+    """
+    Tag hc (2026-09-13) dihitung dari close PARSIAL hari berjalan + histori
+    harian -- lihat catatan panjang di atas BSJP_HC_DIST_HIGH50_MIN. Return
+    {dist_high50_partial, cmf20_partial, macd_hist_partial, hc_tag}, semua
+    None-safe (data kurang -> hc_tag False, TIDAK pernah error).
+    """
+    price = l.get("current_price")
+    high_so_far = l.get("high_so_far")
+    low_so_far = l.get("low_so_far")
+    vol_so_far = l.get("volume_so_far") or 0.0
+    h50p = b.get("high50_prior")
+    dist = None
+    if price and (h50p or high_so_far):
+        base_high = max(h50p or 0.0, high_so_far or 0.0)
+        if base_high > 0:
+            dist = (price - base_high) / base_high * 100
+
+    cmf = None
+    hs = b.get("hc_highs") or []
+    ls = b.get("hc_lows") or []
+    cs = b.get("hc_closes") or []
+    vs = b.get("hc_vols") or []
+    if len(hs) >= 19 and len(ls) >= 19 and len(cs) >= 19 and len(vs) >= 19 \
+            and low_so_far is not None and high_so_far is not None and price:
+        ph = list(hs[-19:]) + [high_so_far]
+        pl = list(ls[-19:]) + [low_so_far]
+        pc = list(cs[-19:]) + [price]
+        pv = list(vs[-19:]) + [vol_so_far]
+        mfm = [((c - lo) - (h - c)) / (h - lo + 1e-9) for h, lo, c in zip(ph, pl, pc)]
+        mfv = [m * v for m, v in zip(mfm, pv)]
+        cmf = sum(mfv) / (sum(pv) + 1e-9)
+
+    macd_h = None
+    closes = (list(b.get("hc_closes") or []) + [price]) if price else list(b.get("hc_closes") or [])
+    if len(closes) >= 27:
+        s = pd.Series(closes, dtype=float)
+        macd = s.rolling(12).mean() - s.rolling(26).mean()
+        sig = macd.ewm(span=9, adjust=False).mean()
+        v = (macd - sig).iloc[-1]
+        macd_h = float(v) if pd.notna(v) else None
+
+    hc = bool(dist is not None and dist >= BSJP_HC_DIST_HIGH50_MIN
+              and cmf is not None and cmf >= BSJP_HC_CMF_MIN
+              and macd_h is not None and macd_h > 0)
+    return {"dist_high50_partial": dist, "cmf20_partial": cmf,
+            "macd_hist_partial": macd_h, "hc_tag": hc}
+
+
 def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
     """
     MBSS v2 (user request 2026-08-31, live case: panggilan KEDUA /bsjp di
@@ -1169,9 +1278,13 @@ def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
     """
     today = _today_str()
     base_cache = _load_bsjp_base_cache()
-    if base_cache.get("trading_day_marker") != today or not base_cache.get("base"):
+    # Bump versi kalau field base berubah (2026-09-13: + high50_prior/hc_* utk
+    # tag hc) -- tanpa ini, cache hari yg sama (format lama) tetap dipakai dan
+    # hc_tag selalu False sampai cache rebuild besok.
+    if (base_cache.get("trading_day_marker") != today or not base_cache.get("base")
+            or base_cache.get("base_version") != BSJP_BASE_CACHE_VERSION):
         base = _fetch_bsjp_historical_base(tickers)
-        base_cache = {"trading_day_marker": today, "base": base}
+        base_cache = {"trading_day_marker": today, "base_version": BSJP_BASE_CACHE_VERSION, "base": base}
         _save_bsjp_base_cache(base_cache)
     else:
         base = base_cache["base"]
@@ -1187,8 +1300,13 @@ def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
     # Pace-adjustment (2026-09-03) -- lihat catatan panjang di atas
     # TOTAL_DAY_BARS. bars_elapsed dihitung SEKALI per panggilan (SAMA utk
     # semua ticker, krn semua di-cek pada jam yg SAMA saat ini).
-    bars_elapsed = max(_trading_minutes_elapsed(datetime.datetime.now(core.WIB).time()), 1)
+    now_wib = datetime.datetime.now(core.WIB)
+    bars_elapsed = max(_trading_minutes_elapsed(now_wib.time()), 1)
     pace_factor = TOTAL_DAY_BARS / bars_elapsed
+    # Partial-bar & delay yfinance (2026-09-13): estimasi waktu DATA (bukan
+    # waktu fetch) = sekarang - BSJP_YF_DELAY_MINUTES, utk ditampilkan di
+    # message. Satu nilai utk semua ticker (semua di-fetch pada waktu sama).
+    data_asof = (now_wib - datetime.timedelta(minutes=BSJP_YF_DELAY_MINUTES)).strftime("%H:%M")
 
     snap = {}
     for t in tickers:
@@ -1202,12 +1320,29 @@ def _fetch_bsjp_universe_snapshot(tickers: list[str]) -> dict:
         volume_so_far = l["volume_so_far"]
         vol_vs_prev_fair = (volume_so_far / prev_volume) * pace_factor if prev_volume else None
         vol_vs_ma200_fair = (volume_so_far / vol_ma200) * pace_factor if vol_ma200 else None
+        # Partial-bar (2026-09-13): close_pos dari rentang HARI INI sejauh ini
+        # + gap dari open hari ini -- dipakai utk konteks entry alert & validasi
+        # kekuatan closing parsial (versi EOD-nya sudah divalidasi di riset).
+        low_so_far = l.get("low_so_far")
+        open_so_far = l.get("open_so_far")
+        _rng = (l["high_so_far"] - low_so_far) if (low_so_far is not None) else 0.0
+        close_pos_partial = (
+            max(0.0, min(1.0, (l["current_price"] - low_so_far) / _rng)) if _rng and _rng > 0 else None
+        )
+        gap_from_open_pct = (
+            (l["current_price"] / open_so_far - 1) * 100 if open_so_far else None
+        )
+        hc = _bsjp_hc_partial(b, l)
         snap[t] = {
             "current_price": l["current_price"], "high_so_far": l["high_so_far"], "volume_so_far": volume_so_far,
+            "low_so_far": low_so_far, "open_so_far": open_so_far,
+            "close_pos_partial": close_pos_partial, "gap_from_open_pct": gap_from_open_pct,
             "prev_close": b["prev_close"], "prev_volume": prev_volume, "vol_ma200": vol_ma200,
+            "atr_pct": b.get("atr_pct"), "data_asof": data_asof,
             "ret_1d_pct": (l["current_price"] / b["prev_close"] - 1) * 100,
             "above_sma50": (l["current_price"] > sma50) if sma50 else None,
             "vol_vs_prev_fair": vol_vs_prev_fair, "vol_vs_ma200_fair": vol_vs_ma200_fair,
+            **hc,
         }
     return snap
 
@@ -1260,22 +1395,111 @@ def _bsjp_tier(snap: dict) -> int:
     return 1
 
 
+def _bsjp_entry_ceiling(snap: dict) -> tuple[float, float]:
+    """
+    Batas harga entry yg masih "sehat" mengingat data yfinance telat
+    BSJP_YF_DELAY_MINUTES (lihat catatan di atas BSJP_YF_DELAY_MINUTES).
+    Return (ceiling_price, tol_pct). Toleransi = max(statis, sigma * atr_pct *
+    sqrt(delay/session)) -- adaptif thd volatilitas; saham ATR tinggi dapat
+    allowance lebih lebar krn wajar bergerak >1% dalam 10-15 menit. Kalau
+    atr_pct tak tersedia (data kurang), fallback ke toleransi statis.
+    """
+    price = snap.get("current_price")
+    if not price:
+        return 0.0, BSJP_CEILING_TOLERANCE_PCT
+    atr_pct = snap.get("atr_pct")
+    tol = BSJP_CEILING_TOLERANCE_PCT
+    if atr_pct:
+        drift = BSJP_DELAY_DRIFT_SIGMA * atr_pct * ((BSJP_YF_DELAY_MINUTES / TOTAL_DAY_BARS) ** 0.5)
+        tol = max(tol, drift)
+    return price * (1 + tol / 100.0), tol
+
+
 def _build_bsjp_message(ticker: str, snap: dict, tier: int) -> str:
-    current_price = _idx_round_tick(snap["current_price"])
-    ceiling = _idx_round_tick(snap["current_price"] * (1 + BSJP_CEILING_TOLERANCE_PCT / 100.0))
-    tp1_price = _idx_round_tick(snap["current_price"] * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0))
+    price_raw = snap["current_price"]
+    current_price = _idx_round_tick(price_raw)
+    ceiling_raw, tol = _bsjp_entry_ceiling(snap)
+    ceiling = _idx_round_tick(ceiling_raw)
+    tp1_price = _idx_round_tick(price_raw * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0))
     vol_vs_prev = snap["vol_vs_prev_fair"]
     vol_vs_ma200 = snap["vol_vs_ma200_fair"]
+    cpp = snap.get("close_pos_partial")
+    gapo = snap.get("gap_from_open_pct")
+    asof = snap.get("data_asof") or "-"
     fire = "🔥" * tier
     label = "BUY POWER >=10x" if tier > 1 else "BUY POWER KUAT"
-    return (
-        f"BSJP\n"
-        f"{fire} {ticker} {label} — vol {vol_vs_prev:.1f}x kemarin, {vol_vs_ma200:.1f}x avg 200hr, harga dekat high hari ini\n"
-        f"Harga sekarang: {current_price:,.0f}\n"
-        f"Beli HANYA JIKA harga masih <= {ceiling:,.0f}. Sudah tembus? SKIP, jangan dikejar.\n"
-        f"TP1 (estimasi): {tp1_price:,.0f}\n"
-        f"BELI SORE INI. Jual besok pagi begitu TP1 tersentuh."
-    )
+    lines = [
+        "BSJP",
+        f"{fire} {ticker} {label} — vol {vol_vs_prev:.1f}x kemarin, {vol_vs_ma200:.1f}x avg 200hr, harga dekat high hari ini",
+        f"⚠️ Data per {asof} WIB (yfinance telat ~10-15 mnt — harga riil bisa sudah beda).",
+        f"Harga (data): {current_price:,.0f}",
+    ]
+    ctx = []
+    if cpp is not None:
+        ctx.append(f"posisi closing parsial {cpp*100:.0f}% rentang hari")
+    if gapo is not None:
+        ctx.append(f"{gapo:+.1f}% dari open")
+    if ctx:
+        lines.append("Konteks: " + ", ".join(ctx) + ".")
+    lines += [
+        f"Batas entry SEHAT: <= {ceiling:,.0f} (+{tol:.1f}%, sudah termasuk allowance delay).",
+        "Harga riil di atas batas itu? SKIP, jangan dikejar.",
+        f"TP1 (estimasi): {tp1_price:,.0f}",
+        "BELI SORE INI. Jual besok pagi begitu TP1 tersentuh.",
+    ]
+    return "\n".join(lines)
+
+
+def _bsjp_hc_entry_band(snap: dict) -> tuple[float, float]:
+    """
+    Range harga entry yang masih valid di checkpoint hc (2026-09-13). Acuan =
+    current_price DATA (telat ~12 mnt); ceiling = +BSJP_HC_CHASE_TOL_PCT
+    (toleransi chasing, user request 0.5%), floor = -BSJP_HC_BAND_DOWN_PCT
+    (kalau harga sudah turun lebih dari ini dari acuan -> setup melemah).
+    """
+    price = snap.get("current_price") or 0.0
+    return (price * (1 - BSJP_HC_BAND_DOWN_PCT / 100.0),
+            price * (1 + BSJP_HC_CHASE_TOL_PCT / 100.0))
+
+
+def _build_bsjp_hc_entry_message(ticker: str, snap: dict) -> str:
+    """
+    Alert ENTRY SORE -- HIGH CONVICTION (tag hc, 2026-09-13). Dikirim di window
+    ENTRY SORE 15:00-15:30 (titik terbaik 15:00-15:15; alert paling cepat
+    ~15:10-15:12 krn yfinance telat ~12 mnt). Range entry ditegaskan dgn
+    toleransi chasing +BSJP_HC_CHASE_TOL_PCT.
+    """
+    price_raw = snap.get("current_price") or 0.0
+    price = _idx_round_tick(price_raw)
+    floor_raw, ceil_raw = _bsjp_hc_entry_band(snap)
+    floor = _idx_round_tick_floor(floor_raw)
+    ceil = _idx_round_tick_ceil(ceil_raw)
+    tp1 = _idx_round_tick(price_raw * (1 + BSJP_TP1_MEDIAN_GAP_PCT / 100.0))
+    asof = snap.get("data_asof") or "-"
+    d = snap.get("dist_high50_partial")
+    cmf = snap.get("cmf20_partial")
+    macd = snap.get("macd_hist_partial")
+    parts = [
+        "⚡ ENTRY SORE — HIGH CONVICTION",
+        f"{ticker} — dekat high 50hr + money-flow & MACD positif (hari ini)",
+        f"⚠️ Data per {asof} WIB (yfinance telat ~10-15 mnt).",
+        f"Harga acuan (data): {price:,.0f}",
+        f"Range entry valid: {floor:,.0f} – {ceil:,.0f} "
+        f"(chasing maks +{BSJP_HC_CHASE_TOL_PCT:.1f}%, setup melemah kalau < {floor:,.0f})",
+        "Harga riil di ATAS range? SKIP, jangan dikejar.",
+        f"TP1 (estimasi): {tp1:,.0f}",
+        "BELI SORE INI. Jual besok pagi begitu TP1 tersentuh.",
+    ]
+    comp = []
+    if d is not None:
+        comp.append(f"dist high50 {d:+.1f}%")
+    if cmf is not None:
+        comp.append(f"CMF {cmf:+.2f}")
+    if macd is not None:
+        comp.append(f"MACD hist {macd:+.2f}")
+    if comp:
+        parts.insert(4, "Komponen hc: " + ", ".join(comp) + ".")
+    return "\n".join(parts)
 
 
 def _build_bsjp_fading_message(ticker: str, snap: dict, reasons: list[str]) -> str:
@@ -1874,7 +2098,7 @@ def _render_bsjp_pyramid_message(positions: list[dict]) -> str:
                 ceiling_line = f"Beli HANYA JIKA harga masih <= {ceiling:,.0f}. Sudah tembus? SKIP, jangan dikejar.\n"
             blocks.append(
                 f"TICK {i}\n"
-                f"{p['ticker']} — {p['tier']} ({_BSJP_TIER_LABEL.get(p['tier'], '')})\n"
+                f"{p['ticker']} — {p['tier']}{' ⚡HC' if p.get('hc') else ''} ({_BSJP_TIER_LABEL.get(p['tier'], '')})\n"
                 f"Harga keputusan (15:00): {decision_price:,.0f}\n"
                 f"{ceiling_line}"
                 f"TP : {tp:,.0f}\n"
@@ -1961,6 +2185,7 @@ async def run_bsjp_pyramid_validation_once() -> dict:
         pyramid_state["message_id"] = None
         pyramid_state["chat_id"] = None
         pyramid_state["final_summary_sent"] = False
+        pyramid_state["hc_alerted"] = []  # 2026-09-13 -- ticker yg sudah dapat alert hc hari ini
 
     bsjp_state = _load_bsjp_state()
     if bsjp_state.get("trading_day_marker") != today:
@@ -1969,6 +2194,7 @@ async def run_bsjp_pyramid_validation_once() -> dict:
     alerted = set(bsjp_state.get("alerted", [])) - set(bsjp_state.get("faded", []))
     entries = pyramid_state.get("entries", {})
     positions = pyramid_state.setdefault("positions", {})
+    hc_alerted = pyramid_state.setdefault("hc_alerted", [])
     already_resolved_today = {t for t, p in positions.items() if p.get("decision_date") == today}
     all_candidates_today = [t for t in alerted if entries.get(t, {}).get("date") == today]
     pending = [t for t in all_candidates_today if t not in already_resolved_today]
@@ -1982,12 +2208,33 @@ async def run_bsjp_pyramid_validation_once() -> dict:
         summary["skipped_reason"] = "no_candidates"
         _save_bsjp_pyramid_state(pyramid_state)
         return summary
+
+    # Fetch snapshot utk SEMUA kandidat hari ini (bukan cuma pending) supaya
+    # tag hc tetap bisa dialertkan utk kandidat yg sudah resolve tier lebih awal.
+    snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, all_candidates_today, timeout=150, default={})
+
+    # Alert hc (2026-09-13) -- independen dari tier, sekali per ticker, hanya
+    # setelah data sore representatif (>= BSJP_HC_ALERT_EARLIEST). hc = filter
+    # kualitas kandidat (fade 17%->0% di riset), bukan tier.
+    if now_wib.time() >= BSJP_HC_ALERT_EARLIEST:
+        bot_hc = _get_shared_bot()
+        for t in all_candidates_today:
+            snap = snapshot.get(t)
+            if not snap or t in hc_alerted or not snap.get("hc_tag"):
+                continue
+            hc_msg = _build_bsjp_hc_entry_message(t, snap)
+            if bot_hc is not None:
+                await core.safe_reply(bot_hc, hc_msg, chat_id=core.TELEGRAM_CHAT_ID)
+            else:
+                print(f"[NO TELEGRAM TOKEN] {hc_msg}")
+            hc_alerted.append(t)
+            summary["hc_alerted"] = summary.get("hc_alerted", 0) + 1
+
     if not pending:
         summary["skipped_reason"] = "all_resolved"
         _save_bsjp_pyramid_state(pyramid_state)
         return summary
 
-    snapshot = await _fetch_with_timeout(_fetch_bsjp_universe_snapshot, pending, timeout=150, default={})
     new_positions = []
     still_pending = []
     excluded_final = []  # HANYA diisi kalau is_final_call (utk ringkasan penutup)
@@ -2007,7 +2254,7 @@ async def run_bsjp_pyramid_validation_once() -> dict:
         positions[t] = {
             "ticker": t, "tier": tier, "decision_date": today, "decision_price": decision_price,
             "avg_cost": decision_price, "filled_tier2": False, "filled_tier3": False,
-            "status": "OPEN",
+            "status": "OPEN", "hc": bool(snap.get("hc_tag")),
             "tp": (_bsjp_d1_tp_sl_for_tier1(decision_price)[0] if tier == "TIER1"
                    else _bsjp_d1_tp_sl_for_tier23(decision_price, BSJP_D1_SESSION1_START)[0]),
             "sl": (_bsjp_d1_tp_sl_for_tier1(decision_price)[1] if tier == "TIER1"
@@ -5049,6 +5296,19 @@ REBOUND_S2_START, REBOUND_S2_END = datetime.time(13, 30), datetime.time(15, 50)
 STATE_FILE_REBOUND = os.path.join(core.PROJECT_ROOT, "rebound_state.json")
 
 
+def _idx_tick_size(price: float) -> float:
+    """Ukuran fraksi harga (tick) IDX utk rentang harga tertentu."""
+    if price < 200:
+        return 1
+    if price < 500:
+        return 2
+    if price < 2000:
+        return 5
+    if price < 5000:
+        return 10
+    return 25
+
+
 def _idx_round_tick(price: float) -> float:
     """
     Bulatkan ke fraksi harga (tick size) IDX TERDEKAT -- ditentukan oleh
@@ -5057,17 +5317,22 @@ def _idx_round_tick(price: float) -> float:
     melewati batas band. Tabel fraksi harga IDX (regulasi berlaku):
       <200: 1 | 200-<500: 2 | 500-<2000: 5 | 2000-<5000: 10 | >=5000: 25
     """
-    if price < 200:
-        tick = 1
-    elif price < 500:
-        tick = 2
-    elif price < 2000:
-        tick = 5
-    elif price < 5000:
-        tick = 10
-    else:
-        tick = 25
+    tick = _idx_tick_size(price)
     return round(price / tick) * tick
+
+
+def _idx_round_tick_floor(price: float) -> float:
+    """Bulatkan ke tick IDX ke BAWAH -- dipakai batas BAWAH range (jangan
+    mempersempit band krn pembulatan ke atas)."""
+    tick = _idx_tick_size(price)
+    return math.floor(price / tick) * tick
+
+
+def _idx_round_tick_ceil(price: float) -> float:
+    """Bulatkan ke tick IDX ke ATAS -- dipakai batas ATAS range (jangan
+    mempersempit band krn pembulatan ke bawah)."""
+    tick = _idx_tick_size(price)
+    return math.ceil(price / tick) * tick
 
 
 def _load_rebound_state() -> dict:
