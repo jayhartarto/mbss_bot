@@ -2388,10 +2388,79 @@ async def high_conviction_command(update, context):
         except Exception as e:
             print(f"⚠️ Gagal mengunci picks /hc pullback extended untuk /winrate: {e}")
 
+    # === SABAR (MBSS v2, user request 2026-09-13/14): lane profil risiko
+    # LEBIH KECIL, LEPAS dari MACD/lane manapun -- riset backtest terpisah
+    # (memory project_atr_low_consecutive_up_grind_2026_09_13.md + project_
+    # atr_squeeze_topcandidate_profile_2026_09_13.md). Gate SEMUA wajib (bukan
+    # OR): ATR%14 self-relative persentil <=20% (histori 120hr sendiri) +
+    # tidak beku (day_range_pct_10d>=3%, avg_volume_5d>=50rb, proksi
+    # trailing-10hr yg dipakai riset) + 3+ hari closing beruntun naik +
+    # Bollinger squeeze aktif. ABOVE_CENTERLINE MACD = TAG saja (booster
+    # hit-rate/magnitude, riset BUKTIKAN TIDAK mengecilkan drawdown -- jangan
+    # jadikan gate). Horizon dimaksud 15-20 hari bursa (BUKAN scalp), avg-down
+    # sekali -3% dlm 10hr bursa kalau turun, exit dinamis (bukan TP tetap) --
+    # exit begitu RSI14>=70 ATAU pct_b>=1.0 ATAU dist_sma20>=15% ATAU
+    # histogram MACD melandai SAAT SUDAH UNTUNG (fallback D20 kalau tak ada
+    # yg terpicu). Redundansi ticker yg sama muncul >1 hari SENGAJA dibiarkan
+    # (riset: hari-2 = penguatan valid, TAPI hari-3+ mulai memburuk -- jangan
+    # tambah entry baru kalau ticker sudah 3x+ berturut muncul di sini).
+    # BELUM live-validated -- holdout genuine (window yg tak pernah dipakai
+    # tuning) %pos exit-dinamis 75.3% (vs 82.7% window kalibrasi), jadi
+    # tampil sbg watchlist informational dulu, sama pola AKUMULASI/REBOUND di
+    # atas (snapshot + lock utk /winrate, baru dipertimbangkan jadi skor
+    # setelah 20-30 hari bursa forward).
+    MIN_STOCK_PRICE_SABAR = 55  # sama konvensi MIN_STOCK_PRICE proyek
+    sabar_excluded = (
+        extended_excluded
+        | {c["ticker"] for c in momentum_extended_candidates}
+        | {c["ticker"] for c in pullback_extended_candidates}
+    )
+    sabar_candidates = [
+        r for r in scored.values()
+        if r.get("ticker") not in sabar_excluded
+        and r.get("price") and r["price"] >= MIN_STOCK_PRICE_SABAR
+        and r.get("atr_pct14_percentile") is not None and r["atr_pct14_percentile"] <= 0.20
+        and r.get("day_range_pct_10d") is not None and r["day_range_pct_10d"] >= 3.0
+        and (r.get("avg_volume_5d") or 0) >= 50000
+        and r.get("consecutive_up_days") is not None and r["consecutive_up_days"] >= 3
+        and r.get("bollinger_squeeze") is True
+    ]
+    sabar_candidates.sort(key=lambda r: r["atr_pct14_percentile"])
+    sabar_candidates = sabar_candidates[:8]
+
+    if sabar_candidates:
+        lines.append(
+            f"\n🕊️ SABAR — {len(sabar_candidates)} kandidat (ATR rendah + squeeze + 3hr+ hijau beruntun, "
+            f"profil risiko kecil/gerak lambat, horizon 15-20 hari bursa) ⚠️ BELUM live-validated\n"
+        )
+        for r in sabar_candidates:
+            entry_ref = r.get("price")
+            avgdown_price = round(entry_ref * 0.97) if entry_ref else None
+            above_tag = " | 📈 ABOVE_CENTERLINE" if r.get("macd_regime") == "ABOVE_CENTERLINE" else ""
+            lines.append(
+                f"• {r['ticker']} — {entry_ref}, {r['consecutive_up_days']}hr hijau beruntun, "
+                f"ATR persentil {r['atr_pct14_percentile']*100:.0f}%{above_tag}\n"
+                f"   Avg-down (sekali) jika turun ke {avgdown_price:,.0f} dlm 10hr bursa | "
+                f"Exit saat untung: RSI>=70 / tembus band atas / >15% dari SMA20 / histogram MACD melandai"
+                f"{broker_engine.format_smart_money_tag(r['ticker'], broksum_data)}"
+            )
+        lines.append(
+            "⚠️ Backtest holdout genuine: %pos exit-dinamis 75-83%, expectancy/hari ~0.30 -- "
+            "belum ada data live/forward, treat sbg watchlist, bukan sinyal terkalibrasi penuh."
+        )
+        try:
+            await asyncio.to_thread(
+                core.lock_daily_daytrade_picks, sabar_candidates, "hc_sabar",
+                (backbone_result or {}).get("all_scored", {})
+            )
+        except Exception as e:
+            print(f"⚠️ Gagal mengunci picks /hc sabar untuk /winrate: {e}")
+
     all_tickers = (
         [r["ticker"] for r in top10] + [r["ticker"] for r in accumulation_candidates]
         + [r["ticker"] for r in continuation_candidates] + [r["ticker"] for r in validation_candidates]
         + [r["ticker"] for r in momentum_extended_candidates] + [r["ticker"] for r in pullback_extended_candidates]
+        + [r["ticker"] for r in sabar_candidates]
     )
     buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)

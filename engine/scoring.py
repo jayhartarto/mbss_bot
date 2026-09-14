@@ -1634,6 +1634,51 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
     if is_weak_trend:
         momentum_score = 5.0 + (momentum_score - 5.0) * 0.5
 
+    # MBSS v2 (user request 2026-09-13/14, lane SABAR — riset ATR-rendah
+    # LEPAS dari MACD sama sekali, lihat memory project_atr_low_consecutive_
+    # up_grind_2026_09_13.md): ATR%14 self-relative percentile (KONVENSI
+    # ADAPTIF sama seperti bollinger_bandwidth_percentile/macd_slope_
+    # percentile -- percentile vs 120hr histori TICKER SENDIRI, bukan ambang
+    # absolut). Backtest unconditional (research/atr_baseline_explore_v1.py,
+    # 192.380 ticker-hari, frozen dikeluarkan): kuartil ATR TERENDAH
+    # mengalahkan kuartil lain di return DAN drawdown horizon D10/D20 (mean
+    # +2.02%/+4.63% vs kuartil tertinggi +0.81%/+1.81%, MAE separuhnya) --
+    # temuan genuinely independen dari MACD/lane manapun.
+    atr_pct14 = None
+    atr_pct14_percentile = None
+    if len(close_prices) >= 15:
+        _prev_close_atr = close_prices.shift(1)
+        _tr_series = pd.concat([
+            high_prices - low_prices,
+            (high_prices - _prev_close_atr).abs(),
+            (low_prices - _prev_close_atr).abs(),
+        ], axis=1).max(axis=1)
+        _atr_series = _tr_series.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+        _atr_pct_series = _atr_series / close_prices.replace(0, pd.NA) * 100
+        if pd.notna(_atr_pct_series.iloc[-1]):
+            atr_pct14 = round(float(_atr_pct_series.iloc[-1]), 3)
+            _atr_pct_history = _atr_pct_series.dropna().tail(core.MIN_HISTORY_FOR_ADAPTIVE)
+            if len(_atr_pct_history) >= 20:
+                atr_pct14_percentile = round(
+                    core.percentile_rank(_atr_pct_history.iloc[:-1], _atr_pct_history.iloc[-1]), 4
+                )
+
+    # MBSS v2 (lane SABAR): berapa hari closing beruntun NAIK sampai hari
+    # ini (0 kalau hari ini turun/flat/sama). Entry trigger SABAR = >=3 --
+    # riset research/atr_entry_trigger_sweep_v1.py: monoton bersih (2hr->
+    # 3hr->4hr->5hr makin kuat), divalidasi cross-window 2026-09-13
+    # (discovery & validation window terpisah, urutan konsisten di
+    # keduanya). RSI-recovery/volume-pickup DITOLAK sbg trigger (riset sama)
+    # -- jangan tambah kondisi lain di sini tanpa bukti baru.
+    consecutive_up_days = 0
+    if len(close_prices) >= 2:
+        _closes_list = close_prices.tolist()
+        for _k in range(len(_closes_list) - 1, 0, -1):
+            if _closes_list[_k] > _closes_list[_k - 1]:
+                consecutive_up_days += 1
+            else:
+                break
+
     # --- Breakout High 20 hari: harga tertinggi baru dalam 20 hari — sinyal
     # breakout klasik, beda dari resistance 10-hari yang sudah dipakai di
     # target harga (window lebih pendek, ini window lebih panjang khusus untuk
@@ -2431,6 +2476,9 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         "breakout_level": swing_analysis["breakout_level"],
         "adaptive_scoring_used": has_adaptive_baseline,
         "day_range_pct_10d": round(price_range_pct, 1),  # transparency: how much this stock actually moved
+        "atr_pct14": atr_pct14,  # ATR(14)/close*100 -- lihat catatan lane SABAR di atas
+        "atr_pct14_percentile": atr_pct14_percentile,  # 0-1, self-relative vs 120hr histori sendiri -- makin RENDAH makin "tenang" (lane SABAR pakai <=0.20)
+        "consecutive_up_days": consecutive_up_days,  # hari closing beruntun naik sampai hari ini -- lane SABAR pakai >=3
         "targets": {
             "buy_range": f"{int(target_buy_min)} - {int(target_buy_max)}",
             "tp_1": int(tp_1),
