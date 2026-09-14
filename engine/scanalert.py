@@ -2613,6 +2613,35 @@ def _fetch_today_1m(tickers: list[str]):
     return data
 
 
+# MBSS v2 (live incident 2026-09-14: ENTRY PAGI once-daily full-universe scan,
+# 511 ticker dlm SATU yf.download() call, kena "Timeout 90s: _fetch_today_1m
+# (511 item) -- skip siklus ini" -- _fetch_with_timeout MEMBUANG SELURUH hasil
+# begitu timeout, walau sebagian ticker sudah sukses ke-download sebelum batas
+# waktu. Root cause sebenarnya batch besar (200+ ticker, lihat catatan insiden
+# 2026-08-31 di atas JOB_FETCH_TIMEOUT_SEC) + individual "Failed download"
+# (Yahoo throttle per-ticker, retry internal yfinance) yg bikin durasi total
+# membengkak). FIX: pecah universe jadi chunk lebih kecil, fetch SEQUENTIAL --
+# kalau 1 chunk lambat/gagal, chunk lain yg sudah selesai tetap masuk hasil
+# gabungan, drpd all-or-nothing.
+ENTRY_PAGI_FETCH_CHUNK_SIZE = 150
+
+
+def _fetch_today_1m_chunked(tickers: list[str], chunk_size: int = ENTRY_PAGI_FETCH_CHUNK_SIZE) -> pd.DataFrame:
+    chunks = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
+    frames = []
+    for chunk in chunks:
+        try:
+            part = _fetch_today_1m(chunk)
+        except Exception as e:
+            print(f"⚠️ Scan-alert: chunk fetch bar 1m gagal ({len(chunk)} ticker): {e}")
+            continue
+        if part is not None and not part.empty:
+            frames.append(part)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, axis=1)
+
+
 # MBSS v2 (2026-09-11, live incident -- user report "REBOUND & ENTRY PAGI
 # tidak ada alert sama sekali, cuma BSJP"): root cause investigation found
 # REBOUND's Top-10 WAS locked correctly, but its monitor never saw a single
@@ -2696,6 +2725,23 @@ async def run_shared_1m_monitor_fetch_once() -> dict:
     _shared_1m_cache["tickers"] = frozenset(tickers)
     summary["tickers"] = len(tickers)
     return summary
+
+
+def _seed_shared_1m_cache(tickers: list[str], data: pd.DataFrame) -> None:
+    """
+    Write-through ke shared cache dari fetch full-universe (ENTRY PAGI scan)
+    -- MBSS v2 2026-09-14: universe full (~511 ticker) sudah pasti superset
+    ticker yg dibutuhkan monitor lane lain (REBOUND/FF DAYTRADE/BSJP/ENTRY
+    PAGI sendiri) di jendela waktu yg sama, jadi hasilnya dipakai bareng
+    lewat _get_shared_1m_bars drpd tiap lane fetch ULANG independen ke
+    Yahoo dlm ~200s berikutnya (lihat catatan insiden 2026-09-11 di atas
+    _shared_1m_cache -- inilah kelas masalah yg sama, sumbernya beda job).
+    """
+    if data is None or (hasattr(data, "empty") and data.empty):
+        return
+    _shared_1m_cache["data"] = data
+    _shared_1m_cache["fetched_at"] = datetime.datetime.now(core.WIB)
+    _shared_1m_cache["tickers"] = frozenset(tickers)
 
 
 async def _get_shared_1m_bars(tickers: list[str]) -> pd.DataFrame:
@@ -4864,10 +4910,11 @@ async def run_entry_pagi_scan_once(force: bool = False) -> dict:
         return summary
 
     universe = sorted(scored.keys())
-    data = await _fetch_with_timeout(_fetch_today_1m, universe, default=pd.DataFrame())
+    data = await _fetch_with_timeout(_fetch_today_1m_chunked, universe, timeout=240, default=pd.DataFrame())
     if data is None or (hasattr(data, "empty") and data.empty):
         summary["skipped_reason"] = "no_intraday_data"
         return summary
+    _seed_shared_1m_cache(universe, data)
 
     # MBSS v2 (user request 2026-09-08, live case Yahoo block ~09:04-09:10):
     # kalau baru berhasil fetch SETELAH ENTRY_PAGI_OR_DELAY_FALLBACK_AFTER
