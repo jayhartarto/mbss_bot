@@ -3097,7 +3097,7 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
 # new factors, etc). This makes it visible when a score difference between two runs is
 # due to a real formula change vs. genuine day-to-day market movement — comparing scores
 # across different versions isn't apples-to-apples.
-SCORING_FORMULA_VERSION = "3.17.22"  # v3.17.22 (BUGFIX, user report 2026-08-28): tambah field pct_b (posisi
+SCORING_FORMULA_VERSION = "3.17.23"  # v3.17.23: tambah field dist_to_50d_high_pct (informational, dipakai screen DAYTRADE-2D A/B/C di /screendaytrade). v3.17.22 (BUGFIX, user report 2026-08-28): tambah field pct_b (posisi
 # relatif Bollinger Band, engine/scoring.py compute_factor_scoring) TANPA bump versi saat pertama
 # ditambahkan -- cache /eodscan lama TIDAK terdeteksi basi oleh load_daily_scan_cache's formula_version
 # check, jadi semua lane MACD (FCM/ABOVE_MOMENTUM/CONTINUATION/VALIDATION/MOMENTUM_EXTENDED) di

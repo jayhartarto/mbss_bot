@@ -2465,6 +2465,11 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         "value_traded": int(float(current_price * current_vol)),
         "price_vs_sma20_pct": round(float(sma_dist_pct), 2),
         "dist_to_20d_high_pct": round(float((high_20d - current_price) / max(current_price, 1e-9) * 100), 2) if len(high_prices) >= 20 else None,
+        # MBSS v2 (2026-09-14): dist ke HIGH 50 hari (positif = di bawah high), sama
+        # pola dgn dist_to_20d_high_pct. Dipakai screen DAYTRADE-2D (/screendaytrade
+        # A/B/C) -- A/C tervalidasi pakai high 50 hari (research/daytrade_2d_mfe_
+        # screen_2026_09_14.md), produksi cuma punya 20 hari sebelumnya. Informational.
+        "dist_to_50d_high_pct": round(float((high_prices.tail(50).max() - current_price) / max(current_price, 1e-9) * 100), 2) if len(high_prices) >= 50 else None,
         "obv_slope_5_pct": round(float((obv_series.iloc[-1] - obv_series.iloc[-6]) / max(abs(obv_series.iloc[-6]), 1e-9) * 100), 2) if len(obv_series) >= 6 else None,
         "vol_ratio": round(vol_ratio, 2),
         "cmf": round(current_cmf, 2) if current_cmf is not None else "N/A",

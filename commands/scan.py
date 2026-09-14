@@ -56,6 +56,7 @@ import engine.lane_confidence as lane_confidence
 import engine.scanalert as scanalert_engine
 import engine.swing_horizon_confidence as swing_horizon_confidence
 import engine.daytrade_hc_confidence as daytrade_hc_confidence
+import engine.daytrade_2d_screen as daytrade_2d_screen
 
 
 # MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker, boleh
@@ -739,6 +740,7 @@ async def screen_daytrade(update, context):
     # ini di-deploy) — tidak pernah hard-block.
     backbone_result, backbone_staleness = nightly_engine.load_backbone_daily_allow_stale()
     results_before_gate = len(results)
+    results_full = list(results)  # pra-Danger-Gate, dipakai screen DAYTRADE-2D (riset-nya di universe penuh)
     results = backbone_engine.filter_to_gate_survivors(results, backbone_result)
     if backbone_result:
         print(f"🧱 /screendaytrade: {len(results)}/{results_before_gate} lolos Danger Gate ({(backbone_result or {}).get('market_regime', '?')}).")
@@ -1060,6 +1062,59 @@ async def screen_daytrade(update, context):
             (backbone_result or {}).get("all_scored", {})
         )
 
+    # MBSS v2 (user request 2026-09-14): screen DAYTRADE 2-HARI A/B/C — riset
+    # research/daytrade_2d_mfe_screen_2026_09_14.md. Entry = open sesi berikutnya,
+    # hold MAKS 2 hari, gain = MFE_2d (target +3%), risk = close_2d (<2%, BUKAN
+    # MAE). 3 screen INDEPENDEN (ticker bisa muncul di >1): A stabil / B broad /
+    # C conviction. Dipakai pool PRA-Danger-Gate (results_full) supaya populasi
+    # tetap sama dgn yg divalidasi (screen ini sudah punya risk filter sendiri:
+    # foreign net-buy + dist-high + ATR).
+    dt2d = daytrade_2d_screen.select_daytrade_2d_candidates(results_full)
+    dt2d_ff_ok = daytrade_2d_screen.any_foreign_flow_available(results_full)
+    lines.append(
+        "\n🎯 DAYTRADE 2-HARI (A/B/C) — entry open besok, hold maks 2 hari | "
+        "gain = MFE 2hr (TP +3%), risk = close D+2 (SL -2%, BUKAN MAE)\n"
+    )
+    if not dt2d_ff_ok:
+        lines.append(
+            "   ⚠️ Foreign flow (net-buy asing) belum tersedia di cache malam ini — "
+            "screen A/B/C semuanya butuh ini. Jalankan /eodscan setelah nightly FF sweep.\n"
+        )
+    for _key in ("A", "B", "C"):
+        _meta = daytrade_2d_screen.SCREEN_META[_key]
+        _picks = dt2d[_key]
+        lines.append(
+            f"\n  ▸ {_meta['label']} — {_meta['rule']}\n"
+            f"    {_meta['note']}\n"
+            f"    Riset TEST (n~{_meta['n_per_day']:.1f}/hari): MFE {_meta['mfe']:.1f}%, "
+            f"P(MFE≥3%) {_meta['p_mfe3']:.0f}%, win-close {_meta['win_close']:.0f}% "
+            f"(capture {_meta['win_cap']:.0f}%), exp {_meta['exp_cap']:+.2f}%/trade | "
+            f"RR {daytrade_2d_screen.RR_NOMINAL:.2f} (real ~{_meta['rr_real']:.2f})"
+        )
+        if not _picks:
+            lines.append("    (tidak ada kandidat)")
+            continue
+        for _r in _picks[:8]:
+            _t = _r["ticker"]
+            _ent = scanalert_engine._idx_round_tick(_r["entry_ref"])
+            _ad = scanalert_engine._idx_round_tick(_r["avg_down"])
+            _tp = scanalert_engine._idx_round_tick(_r["tp"])
+            _sl = scanalert_engine._idx_round_tick(_r["sl"])
+            _ff = _r.get("foreign_net_ratio_1d")
+            _ff_str = f" | FF {_ff*100:+.0f}%" if _ff is not None else ""
+            lines.append(
+                f"    • {_t} — entry ~{_ent:,.0f} (ref open besok), avg down {_ad:,.0f} "
+                f"| TP {_tp:,.0f} (+3%) | SL {_sl:,.0f} (-2%) | RR {_r['rr']:.2f}{_ff_str}"
+                f"{market_engine.format_sector_tag(_r.get('sector'))}"
+                f"{broker_engine.format_smart_money_tag(_t, broksum_data)}"
+            )
+        if len(_picks) > 8:
+            lines.append(f"    … +{len(_picks) - 8} kandidat lain (lihat /check per ticker)")
+        await asyncio.to_thread(
+            core.lock_daily_daytrade_picks, _picks, f"screendaytrade_2d_{_key}",
+            (backbone_result or {}).get("all_scored", {})
+        )
+
     # MBSS v2 (user request — "yang aku maksud validation itu relate dengan
     # riset stage D1/D2 yang sudah bergerak naik, probability naik >60%"):
     # REPLIKASI PERSIS metodologi research/brights_imminent_cross_backtest_
@@ -1118,6 +1173,7 @@ async def screen_daytrade(update, context):
     buttons = core.build_check_buttons(
         [r["ticker"] for r in lane_candidates] + [p["ticker"] for p in recent_lane_picks]
         + [r["ticker"] for r in fresh_cross_momentum_candidates]
+        + [r["ticker"] for _k in ("A", "B", "C") for r in dt2d[_k]]
     )
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
