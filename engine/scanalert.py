@@ -4895,6 +4895,7 @@ async def run_entry_pagi_scan_once(force: bool = False) -> dict:
         return summary
     if await asyncio.to_thread(core.is_idx_market_holiday_today):
         summary["skipped_reason"] = "holiday"
+        print(f"ℹ️ Entry Pagi: skip hari ini (libur bursa), jam {now_wib.strftime('%H:%M')}.")
         return summary
 
     today = _today_str()
@@ -4903,16 +4904,27 @@ async def run_entry_pagi_scan_once(force: bool = False) -> dict:
         summary["skipped_reason"] = "already_fired_today"
         return summary
 
+    # MBSS v2 (2026-09-15, live incident -- user report "tidak pernah ada
+    # alert intraday", investigasi menemukan SEMUA skip-path di jendela
+    # 09:05-09:30 ini SILENT [tidak ada print sama sekali] -- kalau scan
+    # skip diam2 tiap siklus krn no_cache/no_intraday_data, bot.log user
+    # 0 baris "Entry Pagi" SEHARIAN, mustahil didiagnosis. Skip-path DI
+    # LUAR jendela [weekend/outside_window/toggled_off] SENGAJA TIDAK
+    # di-log -- itu terjadi ratusan kali/hari (siklus 180s sepanjang jam
+    # non-bursa), akan membanjiri log tanpa nilai diagnostik. Hanya
+    # skip-path DI DALAM jendela [~8 siklus/hari] yang di-log di sini.
     import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
     scored = nightly_engine.load_daily_scan_cache()
     if not scored:
         summary["skipped_reason"] = "no_cache"
+        print(f"⚠️ Entry Pagi: skip jam {now_wib.strftime('%H:%M')} -- daily_scan_cache kosong/basi (cek apakah /eodscan semalam sukses & trading_day_marker cocok).")
         return summary
 
     universe = sorted(scored.keys())
     data = await _fetch_with_timeout(_fetch_today_1m_chunked, universe, timeout=240, default=pd.DataFrame())
     if data is None or (hasattr(data, "empty") and data.empty):
         summary["skipped_reason"] = "no_intraday_data"
+        print(f"⚠️ Entry Pagi: skip jam {now_wib.strftime('%H:%M')} -- fetch bar 1m ({len(universe)} ticker) kosong total setelah retry/chunking.")
         return summary
     _seed_shared_1m_cache(universe, data)
 
@@ -5484,9 +5496,11 @@ async def run_rebound_live_once() -> dict:
         return summary
     if await asyncio.to_thread(core.is_idx_market_holiday_today):
         summary["skipped_reason"] = "holiday"
+        print(f"ℹ️ Rebound: skip hari ini (libur bursa), jam {now_wib.strftime('%H:%M')}.")
         return summary
     if not is_scan_alert_enabled():
         summary["skipped_reason"] = "toggled_off"
+        print(f"ℹ️ Rebound: skip jam {now_wib.strftime('%H:%M')} -- scan-alert toggled off.")
         return summary
 
     today = _today_str()
@@ -5500,6 +5514,14 @@ async def run_rebound_live_once() -> dict:
         scored = nightly_engine.load_daily_scan_cache()
         if not scored:
             summary["skipped_reason"] = "no_cache"
+            # MBSS v2 (2026-09-15, live incident -- lihat catatan sama di
+            # run_entry_pagi_scan_once): skip-path DALAM jendela 09:00-15:50
+            # ini sebelumnya SILENT, jadi "no alert seharian" tidak bisa
+            # dibedakan dari "top5 terkunci tapi tidak ada trigger" tanpa
+            # ini. Window REBOUND lebar (~82 siklus/hari @300s) tapi top5
+            # cuma di-retry selama masih None, jadi log ini otomatis
+            # berhenti begitu top5 berhasil terkunci sekali.
+            print(f"⚠️ Rebound: skip jam {now_wib.strftime('%H:%M')} -- daily_scan_cache kosong/basi (cek apakah /eodscan semalam sukses & trading_day_marker cocok).")
             return summary
         top5 = rank_rebound_top5_candidates(scored)
         state["top5"] = top5
