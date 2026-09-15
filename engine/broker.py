@@ -2523,10 +2523,20 @@ FOREIGN_FLOW_DAILY_DIR = os.path.join(core.PROJECT_ROOT, "foreign_flow_daily")
 def _idx_ff_target_date(date: datetime.date | None = None) -> datetime.date:
     """Same D-1 default used by fetch_idx_foreign_flow_net_ratio -- kept as
     its own helper so the pushed-file loader stays in sync with the live
-    fetch's date convention."""
-    if date is None:
-        return datetime.date.today() - datetime.timedelta(days=1)
-    return date
+    fetch's date convention.
+
+    BUGFIX (2026-09-15, user report "di live server belum ada ff padahal sudah
+    eodscan"): D-1 kalender mentah bisa jatuh di weekend (Senin -> Minggu) ->
+    IDX balikin KOSONG -> foreign_net_ratio_1d hilang sehari penuh. Sekarang
+    mundur sampai hari bursa (weekday). Libur bursa belum di-handle di sini,
+    ditutupi oleh fallback file terbaru di load_pushed_foreign_flow_net_ratio.
+    """
+    if date is not None:
+        return date
+    d = datetime.date.today() - datetime.timedelta(days=1)
+    while d.weekday() >= 5:  # 5=Sabtu, 6=Minggu
+        d -= datetime.timedelta(days=1)
+    return d
 
 
 def load_pushed_foreign_flow_net_ratio(date: datetime.date | None = None) -> dict | None:
@@ -2535,11 +2545,31 @@ def load_pushed_foreign_flow_net_ratio(date: datetime.date | None = None) -> dic
     (see push_foreign_flow.py) at foreign_flow_daily/{date}.json. Returns
     None (not {}) when the file doesn't exist, so callers can distinguish
     "nobody pushed today" from "pushed but genuinely empty."
+
+    BUGFIX (2026-09-15): kalau file utk tanggal target belum ada (telat push,
+    libur bursa, atau beda tanggal laptop vs VPS), pakai pushed file TERBARU
+    dalam 7 hari terakhir drpd langsung jatuh ke live-fetch yang Cloudflare-
+    blocked di VPS (-> FF kosong). Tanggal yang benar-benar dipakai di-log.
     """
     target = _idx_ff_target_date(date)
     path = os.path.join(FOREIGN_FLOW_DAILY_DIR, f"{target.isoformat()}.json")
     if not os.path.exists(path):
-        return None
+        latest = None
+        if os.path.isdir(FOREIGN_FLOW_DAILY_DIR):
+            for fn in os.listdir(FOREIGN_FLOW_DAILY_DIR):
+                if not fn.endswith(".json"):
+                    continue
+                try:
+                    d = datetime.date.fromisoformat(fn[:-5])
+                except ValueError:
+                    continue
+                if d <= target and (target - d).days <= 7 and (latest is None or d > latest[0]):
+                    latest = (d, os.path.join(FOREIGN_FLOW_DAILY_DIR, fn))
+        if latest is None:
+            return None
+        print(f"📥 IDX foreign flow: pushed file {target.isoformat()} tak ada, "
+              f"pakai yang terbaru {latest[0].isoformat()} (fallback).")
+        path = latest[1]
     try:
         with open(path) as f:
             return json.load(f)

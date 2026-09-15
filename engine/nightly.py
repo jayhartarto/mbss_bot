@@ -591,8 +591,21 @@ async def run_nightly_full_scan(context):
         # ulang) via marker terpisah, sama pola dgn _rapidapi_cache_fresh_
         # today di atas.
         try:
+            foreign_flow_ratios = None
             if _rapidapi_cache_fresh_today("idx_foreign_flow_marker"):
-                print("📋 IDX foreign flow: sudah jalan hari ini, skip (hemat request).")
+                # BUGFIX (2026-09-15, user report "di live server belum ada ff
+                # padahal sudah eodscan"): main scan di atas menulis ulang cache
+                # TANPA foreign_net_ratio_1d; kalau marker "sudah fetch hari ini"
+                # bikin step ini skip, FF yang tadinya ada HILANG dari cache baru
+                # (mudah ke-trigger oleh bump SCORING_FORMULA_VERSION yang paksa
+                # rescan di hari yang sama). Sekarang rasio yang sudah di-fetch
+                # hari ini disimpan di partisi terpisah & di-RE-ATTACH ke cache baru.
+                foreign_flow_ratios = cache_manager.get("idx_foreign_flow", default=None)
+                if foreign_flow_ratios:
+                    print(f"📋 IDX foreign flow: sudah di-fetch hari ini — re-attach "
+                          f"{len(foreign_flow_ratios)} ticker ke cache baru (hindari FF hilang saat rescan).")
+                else:
+                    print("📋 IDX foreign flow: marker hari ini ada tapi data tersimpan kosong — skip.")
             else:
                 # 2026-09-10: coba pakai file yang di-push manual dari laptop
                 # dulu (VPS kena Cloudflare challenge kalau fetch langsung —
@@ -604,18 +617,22 @@ async def run_nightly_full_scan(context):
                 else:
                     foreign_flow_ratios = await asyncio.to_thread(broker_engine.fetch_idx_foreign_flow_net_ratio)
                 if foreign_flow_ratios:
-                    n_matched = 0
-                    for r in results:
-                        ticker = r.get("ticker")
-                        ratio = foreign_flow_ratios.get(ticker)
-                        if ratio is not None:
-                            r["foreign_net_ratio_1d"] = ratio
-                            n_matched += 1
-                    save_daily_scan_cache(results)
-                    cache_manager.set("idx_foreign_flow_marker", True, meta={"trading_day_marker": core.get_current_calendar_date_marker()})
-                    print(f"🌊 IDX foreign flow: {n_matched}/{len(results)} ticker dpt net_ratio_1d, cache di-update ulang.")
-                else:
-                    print("⚠️ IDX foreign flow: fetch kosong/gagal, skip (ticker tanpa data tetap None -- missing=neutral, tidak dipenalti).")
+                    # simpan terpisah supaya re-run hari yang sama bisa re-attach
+                    cache_manager.set("idx_foreign_flow", foreign_flow_ratios,
+                                      meta={"trading_day_marker": core.get_current_calendar_date_marker()})
+                    cache_manager.set("idx_foreign_flow_marker", True,
+                                      meta={"trading_day_marker": core.get_current_calendar_date_marker()})
+            if foreign_flow_ratios:
+                n_matched = 0
+                for r in results:
+                    ratio = foreign_flow_ratios.get(r.get("ticker"))
+                    if ratio is not None:
+                        r["foreign_net_ratio_1d"] = ratio
+                        n_matched += 1
+                save_daily_scan_cache(results)
+                print(f"🌊 IDX foreign flow: {n_matched}/{len(results)} ticker dpt net_ratio_1d, cache di-update ulang.")
+            else:
+                print("⚠️ IDX foreign flow: fetch kosong/gagal, skip (ticker tanpa data tetap None -- missing=neutral, tidak dipenalti).")
         except Exception as e:
             print(f"⚠️ Gagal fetch IDX foreign flow: {e}")
 
