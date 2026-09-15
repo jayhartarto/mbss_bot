@@ -2624,12 +2624,25 @@ def _fetch_today_1m(tickers: list[str]):
 # kalau 1 chunk lambat/gagal, chunk lain yg sudah selesai tetap masuk hasil
 # gabungan, drpd all-or-nothing.
 ENTRY_PAGI_FETCH_CHUNK_SIZE = 150
+# MBSS v2 (2026-09-15, preventif -- live incident "alert intraday tidak
+# pernah fire", root cause pasti belum terkonfirmasi via log, tapi celah
+# nyata ditemukan saat review: loop chunk di bawah ini manggil yf.download
+# balik-balikan TANPA jeda sama sekali, beda dari research/fetch_intraday_
+# 1m.py punya CHUNK_PAUSE_SEC=2.0 justru utk menghindari pola block yang
+# SAMA persis dgn insiden 2026-08-27 ["248 Failed downloads" -- itu Yahoo
+# blokir 1 BATCH REQUEST krn reputasi IP shared/cloud, bukan 248 ticker
+# delisted serentak] & 2026-09-11 [burst request dari IP VPS yg sama bikin
+# REBOUND/ENTRY PAGI kosong seharian]. 5 chunk 150-ticker ditembak tanpa
+# jeda dari 1 IP = burst juga, walau per-chunk lebih kecil dari 1 batch
+# 511-ticker. Jeda kecil ini murni preventif (align konsistensi dgn script
+# lain yg sudah proven), TIDAK mengubah gating logic apapun.
+ENTRY_PAGI_CHUNK_PAUSE_SEC = 2.0
 
 
 def _fetch_today_1m_chunked(tickers: list[str], chunk_size: int = ENTRY_PAGI_FETCH_CHUNK_SIZE) -> pd.DataFrame:
     chunks = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
     frames = []
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
         try:
             part = _fetch_today_1m(chunk)
         except Exception as e:
@@ -2637,6 +2650,8 @@ def _fetch_today_1m_chunked(tickers: list[str], chunk_size: int = ENTRY_PAGI_FET
             continue
         if part is not None and not part.empty:
             frames.append(part)
+        if i < len(chunks) - 1:
+            time.sleep(ENTRY_PAGI_CHUNK_PAUSE_SEC)
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, axis=1)
