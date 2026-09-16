@@ -60,6 +60,7 @@ import engine.scoring as scoring_engine
 import engine.broker as broker_engine
 import engine.backbone as backbone_engine
 import engine.news_catalyst as news_catalyst_engine
+import engine.buy_on_weakness as buy_on_weakness_engine
 
 
 # ---------------------------------------------------------------------
@@ -440,6 +441,23 @@ async def run_nightly_full_scan(context):
         # harian Index Alpha (5 panggilan batch x 50 = 250 ticker, persis
         # pas). /broksum siang/sore TINGGAL baca cache ini, TIDAK fetch
         # live sama sekali.
+        # MBSS v2 (user request 2026-09-16 — BUY ON WEAKNESS, swing-lane):
+        # EOD-driven pullback-in-uptrend screen, runs here (not as a
+        # separate live/intraday scan like BSJP/ENTRY PAGI/REBOUND above)
+        # since it only needs today's closed bar, not an opening-range
+        # window. Reuses `results` already fetched this run — no extra
+        # OHLCV fetch. See engine/buy_on_weakness.py docstring + memory
+        # project_buy_on_weak_pullback_sweep_2026_09_16.md for the full
+        # research trail behind every threshold.
+        try:
+            bow_candidates = await asyncio.to_thread(
+                buy_on_weakness_engine.compute_buy_on_weakness_candidates, list(results.keys())
+            )
+            buy_on_weakness_engine.update_and_save_picks(bow_candidates)
+            print(f"🪶 Buy on Weakness: {len(bow_candidates)} kandidat baru hari ini.")
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan Buy on Weakness: {e}")
+
         trading_night_index = _get_and_increment_trading_night_index()
 
         broksum_250_data = {}

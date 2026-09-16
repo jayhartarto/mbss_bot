@@ -59,6 +59,32 @@ import engine.nightly as nightly_engine
 # invoked once per ticker inside compute_factor_scoring, so an uncached
 # version would mean one extra Yahoo Finance call per ticker in every scan.
 _ihsg_cache = {"date": None, "return_today": None}
+_ihsg_nd_cache: dict[int, dict] = {}
+
+
+def get_ihsg_return_nd(n: int = 20):
+    """
+    IHSG's N-trading-day return (close today vs close N bars back). Added
+    for BUY ON WEAKNESS's relative-strength-vs-IHSG filter (RS_Nd = a
+    stock's own Nd return minus this) — same cached-per-calendar-day
+    convention as get_ihsg_return_today() above, keyed by `n` since more
+    than one lookback could plausibly be needed later.
+    """
+    today_str = datetime.datetime.now(core.WIB).strftime("%Y-%m-%d")
+    cached = _ihsg_nd_cache.get(n)
+    if cached and cached.get("date") == today_str and cached.get("return_nd") is not None:
+        return cached["return_nd"]
+
+    try:
+        hist = core.get_yf_ticker("^JKSE").history(period="3mo", timeout=15)
+        if len(hist) < n + 1:
+            return None
+        ihsg_return = ((hist["Close"].iloc[-1] - hist["Close"].iloc[-(n + 1)]) / hist["Close"].iloc[-(n + 1)]) * 100
+        _ihsg_nd_cache[n] = {"date": today_str, "return_nd": ihsg_return}
+        return ihsg_return
+    except Exception as e:
+        print(f"⚠️ Gagal fetch IHSG {n}d return untuk Buy on Weakness RS filter: {e}")
+        return None
 
 
 def get_ihsg_return_today():

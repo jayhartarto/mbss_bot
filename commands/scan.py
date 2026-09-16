@@ -57,6 +57,7 @@ import engine.scanalert as scanalert_engine
 import engine.swing_horizon_confidence as swing_horizon_confidence
 import engine.daytrade_hc_confidence as daytrade_hc_confidence
 import engine.daytrade_2d_screen as daytrade_2d_screen
+import engine.buy_on_weakness as buy_on_weakness_engine
 
 
 # MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker, boleh
@@ -4038,3 +4039,51 @@ async def broker_discovery_command(update, context):
         "kalau memang relevan — tidak ada yang otomatis di sini."
     )
     await core.safe_reply(update.message, "\n".join(lines))
+
+
+async def buy_on_weakness_command(update, context):
+    """
+    /buyonweakness (alias /bow) — MBSS v2 (2026-09-16). "Buy the quiet dip
+    inside a confirmed long-term uptrend", tiered 1 (best) - 3 (broadest),
+    fire-emoji count reversed to match the /bsjp convention (more fire =
+    better). Full filter/exit rules + research trail in
+    engine/buy_on_weakness.py's docstring and memory
+    project_buy_on_weak_pullback_sweep_2026_09_16.md.
+
+    Reads the picks history the nightly job already maintains (see
+    engine/nightly.py hook) — no live scan here, same "cache-only" pattern
+    as /broksum.
+    """
+    picks = buy_on_weakness_engine.load_buy_on_weakness_picks()
+    active = [p for p in picks if p.get("status") == "ALIVE"]
+    if not active:
+        await core.safe_reply(
+            update.message,
+            "🪶 BUY ON WEAKNESS — belum ada sinyal aktif saat ini. "
+            "Lane ini jalan otomatis tiap malam via /eodscan, cek lagi besok."
+        )
+        return
+
+    active.sort(key=lambda p: (p["tier"], -p["age_days"]))
+
+    lines = [f"🪶 BUY ON WEAKNESS — {len(active)} sinyal aktif\n"]
+    for p in active:
+        fire = "🔥" * (4 - p["tier"])  # Tier 1 = 3 fire (best), Tier 3 = 1 fire
+        age = p["age_days"]
+        age_label = f"NEW (Day {age}/5)" if age <= 1 else f"AGING (Day {age}/5) — ALIVE"
+        tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
+        lines.append(
+            f"{fire} {p['ticker']} — Tier {p['tier']}\n"
+            f"{age_label}\n\n"
+            f"Entry: {p['entry_low']:,.0f} - {p['entry_high']:,.0f}\n"
+            f"SL: {p['sl_price']:,.0f}\n"
+            f"TP1: {p['tp1_price']:,.0f} (+{p['tp1_pct']:.2f}%){tp1_note}\n"
+            f"TP2: {p['tp2_price_latest']:,.0f}\n"
+            f"Swing Length: ~{p['swing_length_days_typical']} hari."
+        )
+    lines.append(
+        "\n⚠️ Backtest 2-tahun, regime-sensitive (lemah saat IHSG crash "
+        "sistemik, lihat catatan riset) — bukan jaminan forward. SL wajib "
+        "dipakai, bukan opsional."
+    )
+    await core.safe_reply(update.message, "\n\n".join(lines))

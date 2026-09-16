@@ -2718,6 +2718,10 @@ def _collect_active_monitor_tickers() -> list[str]:
     return sorted(tickers)
 
 
+SHARED_1M_MONITOR_WINDOW_START = datetime.time(9, 0)
+SHARED_1M_MONITOR_WINDOW_END = datetime.time(15, 50)  # matches REBOUND_SCAN_WINDOW_END, the widest consumer of this cache
+
+
 async def run_shared_1m_monitor_fetch_once() -> dict:
     """
     Job bersama (interval 150s) -- SATU panggilan yf.download utk union
@@ -2725,8 +2729,30 @@ async def run_shared_1m_monitor_fetch_once() -> dict:
     disimpan di cache modul supaya ke-4 lane tinggal baca (_get_shared_1m_
     bars), bukan masing2 fetch sendiri. Lihat catatan insiden 2026-09-11
     di atas _shared_1m_cache.
+
+    BUGFIX (2026-09-16, live incident -- eodscan tampak macet/lambat,
+    diagnosis user: "perlu matikan autoscan diluar jam open market"):
+    fungsi ini TIDAK PUNYA guard jam bursa sama sekali, beda dari SEMUA job
+    intraday lain di file ini (run_rebound_live_once/run_ff_daytrade_scan_
+    once/run_bsjp_pyramid_validation_once semua sudah punya window check).
+    _collect_active_monitor_tickers() murni cek STATE (posisi OPEN/WAITING/
+    CARRY_D2 lintas lane), TIDAK peduli jam berapa sekarang -- kalau ada
+    posisi yg masih terbuka semalaman (mis. BSJP pyramid OPEN/SESSION2),
+    job ini tetap fetch 1m bars ke Yahoo tiap 150 detik SEPANJANG MALAM,
+    percuma (market tutup, tidak ada bar baru) dan kemungkinan besar ikut
+    berkontribusi ke kontensi/slowdown eodscan yg jalan bersamaan (kelas
+    masalah PERSIS sama dengan insiden 2026-09-11 yg jadi alasan job ini
+    dibuat -- cuma sekarang eodscan yg jadi korban, bukan lane intraday
+    lain). Tambahkan window guard yg sama dgn job lain.
     """
     summary = {"skipped_reason": None, "tickers": 0}
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (SHARED_1M_MONITOR_WINDOW_START <= now_wib.time() <= SHARED_1M_MONITOR_WINDOW_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
     tickers = _collect_active_monitor_tickers()
     if not tickers:
         summary["skipped_reason"] = "no_active_tickers"

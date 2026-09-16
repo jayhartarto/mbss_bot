@@ -7868,6 +7868,7 @@ def build_app():
     app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
     app.add_handler(CommandHandler("brokerdiscovery", commands_scan.broker_discovery_command))
     app.add_handler(CommandHandler("bsjp", commands_scan.bsjp_screening_command))
+    app.add_handler(CommandHandler(["buyonweakness", "bow"], commands_scan.buy_on_weakness_command))
     app.add_handler(CommandHandler("entrypagi", commands_scan.entry_pagi_manual_command))
     app.add_handler(CommandHandler("ffdaytrade", commands_scan.ff_daytrade_manual_command))
     app.add_handler(CommandHandler(["eodscan", "nightlyscan"], commands_scan.eodscan_command))
