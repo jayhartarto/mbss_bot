@@ -2610,6 +2610,22 @@ def _fetch_today_1m(tickers: list[str]):
         data = yf.download(symbols, period="1d", interval="1m", group_by="ticker", threads=True, progress=False)
         if data.empty:
             print("⚠️ Scan-alert: retry jg kosong total -- genuinely gagal siklus ini, coba lagi siklus berikutnya.")
+    # MBSS v2 BUGFIX (2026-09-17, live incident -- "REBOUND & ENTRY PAGI
+    # tidak pernah fire selain top10 kandidat"): yf.download mengembalikan
+    # index UTC-aware, tapi SEMUA filter jendela waktu di file ini (session
+    # mask REBOUND, cutoff opening-range ENTRY PAGI, session VWAP, dst)
+    # membandingkan `.time()` dari index itu langsung terhadap konstanta
+    # WIB tanpa konversi -- akibatnya REBOUND's session mask SELALU False
+    # (jam UTC bursa ~02:00-08:50 tidak pernah masuk window WIB 09:00-12:00/
+    # 13:30-15:50) sehingga last_checked tidak pernah terisi & REBOUND
+    # TIDAK PERNAH bisa fire; ENTRY PAGI's OR-window cutoff pun SELALU True
+    # (kebalikannya -- kebetulan angka, jam UTC bursa numerically <= 09:05)
+    # sehingga opening range yg dihitung memakai SEMUA bar yg sudah
+    # ke-fetch, bukan cuma 09:00-09:05 asli. Fix di SATU titik sumber ini
+    # (bukan tiap call site) supaya seluruh downstream `.time()` comparison
+    # otomatis benar.
+    if not data.empty and getattr(data.index, "tz", None) is not None:
+        data.index = data.index.tz_convert(core.WIB)
     return data
 
 
