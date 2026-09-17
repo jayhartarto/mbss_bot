@@ -56,6 +56,27 @@ def _make_truncated_fetcher(real_fetch, as_of_date):
     return _fetcher
 
 
+def _trading_dates_from_db(min_date: str) -> list:
+    """Distinct trading dates across the WHOLE ohlcv_daily table, not one
+    sample ticker. BUGFIX (2026-09-17, live incident): the original version
+    used a single hardcoded ticker (BBCA) to read the available date range
+    -- turned out BBCA itself had stale data (stuck at 2026-08-21, a
+    pre-existing eodscan "already up to date" staleness-detection bug
+    unrelated to this script) even though the DB as a whole was current
+    to 2026-09-16, so the backfill wrongly reported "no trading days
+    available." Querying the date column directly is robust to any single
+    ticker's staleness."""
+    import sqlite3
+    conn = sqlite3.connect(core.OHLCV_DB_FILE)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT date FROM ohlcv_daily WHERE date >= ? ORDER BY date", (min_date,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [pd.Timestamp(r[0]).date() for r in rows]
+
+
 def main():
     with open(core.WHITELIST_CACHE_FILE) as f:
         import json
@@ -63,10 +84,9 @@ def main():
     print(f"Universe: {len(universe)} ticker (ticker_whitelist.json)")
 
     real_get_ohlcv_daily_from_db = core.get_ohlcv_daily_from_db
-    sample_hist = real_get_ohlcv_daily_from_db("BBCA", limit=30)
-    if sample_hist is None or sample_hist.empty:
-        raise SystemExit("Gagal ambil histori sample (BBCA) -- cek mbss_ohlcv.db.")
-    trading_dates = sorted(set(pd.to_datetime(sample_hist.index).date))
+    trading_dates = _trading_dates_from_db(BACKFILL_START)
+    if not trading_dates:
+        raise SystemExit(f"Tidak ada baris di ohlcv_daily >= {BACKFILL_START} -- cek mbss_ohlcv.db sudah ter-update (lihat diagnose_ohlcv_db.py).")
 
     backfill_start_date = pd.Timestamp(BACKFILL_START).date()
     backfill_dates = [d for d in trading_dates if d >= backfill_start_date]
