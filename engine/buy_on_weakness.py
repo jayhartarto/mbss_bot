@@ -382,7 +382,10 @@ def update_and_save_picks(new_candidates: list[dict]) -> list:
     active_tickers = set()
     for pick in history:
         if pick.get("status") == "ALIVE":
-            pick = _resolve_active_pick(pick)
+            try:
+                pick = _resolve_active_pick(pick)
+            except Exception as e:
+                print(f"⚠️ Buy on Weakness: gagal resolve pick {pick.get('ticker')}: {e}")
             active_tickers.add(pick["ticker"])
 
     for cand in new_candidates:

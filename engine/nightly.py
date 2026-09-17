@@ -450,8 +450,9 @@ async def run_nightly_full_scan(context):
         # project_buy_on_weak_pullback_sweep_2026_09_16.md for the full
         # research trail behind every threshold.
         try:
+            bow_tickers = [r["ticker"] for r in results if r and r.get("ticker")]
             bow_candidates = await asyncio.to_thread(
-                buy_on_weakness_engine.compute_buy_on_weakness_candidates, list(results.keys())
+                buy_on_weakness_engine.compute_buy_on_weakness_candidates, bow_tickers
             )
             buy_on_weakness_engine.update_and_save_picks(bow_candidates)
             print(f"🪶 Buy on Weakness: {len(bow_candidates)} kandidat baru hari ini.")
