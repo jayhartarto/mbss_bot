@@ -58,6 +58,7 @@ import engine.swing_horizon_confidence as swing_horizon_confidence
 import engine.daytrade_hc_confidence as daytrade_hc_confidence
 import engine.daytrade_2d_screen as daytrade_2d_screen
 import engine.buy_on_weakness as buy_on_weakness_engine
+import engine.bsjp2 as bsjp2_engine
 
 
 # MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker, boleh
@@ -2523,118 +2524,47 @@ async def high_conviction_command(update, context):
     await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
 
 
-
-
 # ==========================================
-# BSJP SCREENING (MBSS v2, user request 2026-08-29 -- REVISI TOTAL:
-# unified 4-kriteria, blend ARA/second-wave/6-kriteria-lama/pullback jadi
-# SATU sinyal "Beli Sore Jual Pagi". Full parameter sweep (162 kombinasi,
-# close-based/exit-efficiency validation, daily_2y_issi_raw.pkl) -- lihat
-# catatan lengkap di engine/scanalert.py run_bsjp_shortlist_scan/run_bsjp_
-# recheck_once. Command ini = FASE 1 (scan penuh universe akhir sesi 1,
-# simpan shortlist) -- FASE 2 (recheck live tiap 5 menit 09:30-15:50 --
-# dipercepat dari 15 menit 2026-09-02, lihat catatan lengkap di atas
-# BSJP_RECHECK_INTERVAL_SEC engine/scanalert.py, kirim alert final) jalan
-# otomatis via JobQueue, lihat engine/legacy_core.py run_bsjp_recheck_job.
+# BSJP SCREENING v2 -- Stage-1/Stage-2/rocket system (2026-09-20, replaces
+# the old Fase1/Fase2/pyramid command -- see
+# archive/bsjp_legacy_fase1_fase2_pyramid_2026_09_20.py and memory
+# project_bsjp_derisk_revisit_2026_09_17.md). Formulas/thresholds all live
+# in engine/bsjp2.py, this command just renders whichever state is current.
 # ==========================================
 
 
-async def bsjp_screening_command(update, context):
+async def bsjp2_screening_command(update, context):
     """
-    /bsjp -- FASE 1 unified BSJP: scan SELURUH universe ISSI thd 4 kriteria
-    wajib (AND, REDESIGN 2026-09-03, lihat engine/scanalert.py utk detail &
-    sumber angka lengkap -- BSJP_SHORTLIST_RET1D_MIN_PCT dkk):
-      1. ret_1d > 12%
-      2. Volume hari ini > 3x volume kemarin (pace-adjusted, lihat TOTAL_DAY_BARS)
-      3. High hari ini < 1.15x harga sekarang ("clean close", wide net)
-      4. Volume hari ini > 3x rata-rata volume 200 hari (pace-adjusted)
-    Simpan yg lolos sbg shortlist (dipakai FASE 2 -- recheck live otomatis
-    tiap 5 menit 09:30-15:50 WIB, ret_1d>12% & vol>4x & clean_close<1.025,
-    lihat run_bsjp_recheck_job).
-
-    MBSS v2 (user request 2026-08-31 -- "harusnya tetap bisa di running
-    ketika istirahat, kan hanya untuk jaring kandidat awal?"): jendela
-    DIPERLEBAR dari get_current_idx_session() (yg return None saat istirahat
-    siang 12:00-13:30/11:30-14:00 Jumat) ke SELURUH hari bursa 09:00-16:00 --
-    BEDA dgn command lain yg genuinely butuh sesi AKTIF (harga bergerak
-    detik-ini). BSJP Fase 1 cuma butuh data HARI INI SEJAUH INI (ret_1d,
-    volume-so-far, high-so-far via yf.download partial-day bar) -- data itu
-    SUDAH final/beku begitu sesi 1 tutup, TIDAK berubah lagi selama istirahat
-    (baru update lagi begitu sesi 2 buka), jadi genuinely valid dicek kapan
-    pun 09:00-16:00, termasuk pas istirahat. Sebelum 09:00 TETAP ditolak
-    (belum ada data hari ini SAMA SEKALI, bukan cuma beku).
+    /bsjp -- shows tonight's Stage-1 watchlist (D0, built right after
+    /eodscan) if D1 hasn't opened yet, or the live D1 tracking status
+    (trigger/fading, fire-icon tier, rocket tag) once the JobQueue's
+    run_bsjp2_intraday_tick has sent/edited a message today.
+    /bsjp tp -- TP1/TP2/TP3+SL recommendation for tonight's finalized
+    Stage-1 confirmations (engine/bsjp2.build_bsjp2_tp_message), meant to be
+    read tonight or before D2's open tomorrow.
     """
-    import engine.scanalert as scanalert_engine  # import lokal -- hindari circular import di level modul
-
-    # MBSS v2 (user request 2026-09-02): /bsjp tp -- panduan jual pre-open
-    # esok pagi (TP1/TP2 dari CLOSING hari alert, lihat catatan lengkap di
-    # atas build_bsjp_tp_plan_message), TIDAK dibatasi jendela 09:00-16:00
-    # spt scan Fase 1 di bawah -- justru dipakai MALAM hari yg sama atau
-    # PAGI besok SEBELUM market buka. Sekarang fetch closing LIVE (blocking
-    # I/O) -- wrap _fetch_with_timeout spt fetch BSJP lain di file ini.
     if context.args and context.args[0].lower() == "tp":
-        # MBSS v2 (user request 2026-09-06 -- ENTRY SORE full redesign):
-        # prioritaskan pesan pyramid LIVE (avg-down/TP/SL dari validasi
-        # 15:00) kalau sudah ada posisi -- fallback ke pesan closing lama
-        # (build_bsjp_tp_plan_message) kalau belum ada posisi pyramid sama
-        # sekali (mis. belum ada ticker yg lolos validasi 15:00 hari itu).
-        pyramid_msg = scanalert_engine.build_bsjp_pyramid_tp_message()
-        if pyramid_msg is not None:
-            await core.safe_reply(update.message, pyramid_msg)
-            return
-        msg = await scanalert_engine._fetch_with_timeout(
-            scanalert_engine.build_bsjp_tp_plan_message, timeout=60,
-            default="⚠️ Gagal ambil harga closing (timeout/Yahoo error) -- coba lagi.",
-        )
-        await core.safe_reply(update.message, msg)
+        await core.safe_reply(update.message, bsjp2_engine.build_bsjp2_tp_message())
         return
 
     now_wib = datetime.datetime.now(core.WIB)
-    bsjp_window_start = datetime.time(9, 0)
-    bsjp_window_end = datetime.time(16, 0)  # akhir pra-penutupan, sama batas atas semua sesi IDX
     is_holiday = await asyncio.to_thread(core.is_idx_market_holiday_today)
-    if now_wib.weekday() >= 5 or is_holiday or not (bsjp_window_start <= now_wib.time() < bsjp_window_end):
-        await core.safe_reply(
-            update.message,
-            "⚠️ /bsjp cuma berguna selama hari bursa berjalan (09:00-16:00 WIB) -- di luar itu belum/tidak ada data hari ini utk dicek."
-        )
+    if now_wib.weekday() >= 5 or is_holiday:
+        await core.safe_reply(update.message, "⚠️ /bsjp cuma relevan hari bursa -- di luar itu tidak ada watchlist/live tracking baru.")
         return
 
-    scored = nightly_engine.load_daily_scan_cache()
-    if not scored:
-        await core.safe_reply(update.message, "⚠️ Cache /eodscan belum ada/basi -- jalankan /eodscan dulu (dari kemarin sore, bukan hari ini).")
-        return
-    universe = sorted(scored.keys())
-
-    await core.safe_reply(update.message, f"🌆 Scan BSJP (4 kriteria unified) dari {len(universe)} ticker universe, mengecek data live...")
-
-    try:
-        passed = await scanalert_engine.run_bsjp_shortlist_scan(universe)
-    except Exception as e:
-        await core.safe_reply(update.message, f"⚠️ Scan BSJP gagal: {e}")
+    live_state = bsjp2_engine._load_json_state("bsjp2_live_state.json")
+    if live_state.get("trading_day_marker") == bsjp2_engine._today_str() and live_state.get("tickers"):
+        active = [
+            (ticker, (bsjp2_engine._load_json_state("bsjp2_watchlist_state.json").get("candidates") or {}).get(ticker, {}), t_state)
+            for ticker, t_state in live_state["tickers"].items()
+        ]
+        await core.safe_reply(update.message, bsjp2_engine._render_bsjp2_intraday_message(active))
         return
 
-    if not passed:
-        await core.safe_reply(
-            update.message,
-            "📋 Tidak ada kandidat yang lolos SEMUA 4 kriteria BSJP saat ini (formula ketat -- wajar kalau kosong, itu justru tujuannya). "
-            "Kalau ada shortlist tersimpan dari /bsjp sebelumnya hari ini, itu TETAP dipantau (tidak dihapus)."
-        )
-        return
-
-    passed.sort(key=lambda r: r["ret_1d_pct"], reverse=True)
-    lines = [f"🌆 BSJP SHORTLIST — {len(passed)} kandidat lolos SEMUA 4 kriteria (akan di-recheck live tiap 5 menit 09:30-15:50)\n"]
-    for i, r in enumerate(passed, 1):
-        vol_vs_prev = r["volume_so_far"] / max(r["prev_volume"], 1.0)
-        vol_vs_ma200 = r["volume_so_far"] / max(r["vol_ma200"], 1.0)
-        lines.append(
-            f"{i}. {r['ticker']} — {r['current_price']:,.0f} ({r['ret_1d_pct']:+.1f}%)\n"
-            f"   Vol {vol_vs_prev:.1f}x kemarin | {vol_vs_ma200:.1f}x MA200"
-        )
-    lines.append("\n⚠️ Ini shortlist FASE 1, BUKAN alert entry -- alert final (dgn TP1) dikirim otomatis kalau kandidat MASIH lolos semua kriteria saat recheck 09:30-15:50 WIB.")
-
-    buttons = core.build_check_buttons([r["ticker"] for r in passed])
-    await core.safe_reply(update.message, "\n\n".join(lines), reply_markup=buttons)
+    watchlist_state = bsjp2_engine._load_json_state("bsjp2_watchlist_state.json")
+    candidates = list((watchlist_state.get("candidates") or {}).values())
+    await core.safe_reply(update.message, bsjp2_engine.build_bsjp2_watchlist_message(candidates))
 
 
 async def entry_pagi_manual_command(update, context):

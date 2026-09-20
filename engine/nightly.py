@@ -61,6 +61,7 @@ import engine.broker as broker_engine
 import engine.backbone as backbone_engine
 import engine.news_catalyst as news_catalyst_engine
 import engine.buy_on_weakness as buy_on_weakness_engine
+import engine.bsjp2 as bsjp2_engine
 
 
 # ---------------------------------------------------------------------
@@ -429,12 +430,26 @@ async def run_nightly_full_scan(context):
         core.update_scan_metadata(len(results), len(skip_reasons), latest_marker, universe_name=universe_label)
         print(f"🌙 Nightly full scan selesai: {len(results)} berhasil, {len(skip_reasons)} gagal/dikecualikan.")
 
-        # MBSS v2 (user request 2026-08-29, REVISI): BSJP-ARA/second-wave
-        # nightly pre-build DIHAPUS -- diganti unified live 2-fase (Phase1
-        # /bsjp scan penuh universe akhir sesi 1, Phase2 recheck live tiap
-        # 30 menit 14:00-15:50, lihat engine/scanalert.py run_bsjp_
-        # shortlist_scan/run_bsjp_recheck_once) -- tidak perlu apa pun
-        # dibangun di eodscan lagi utk BSJP.
+        # BSJP v2 (2026-09-20, replaces the old Fase1/Fase2/pyramid mechanism
+        # -- see archive/bsjp_legacy_fase1_fase2_pyramid_2026_09_20.py and
+        # memory project_bsjp_derisk_revisit_2026_09_17.md): two nightly
+        # steps reusing `results` already fetched above, zero extra I/O.
+        # (1) build_bsjp2_watchlist -- D0-static Stage-1 union for TONIGHT's
+        #     freshly-scored tickers (tonight = D0 for a brand new signal),
+        #     stored as tomorrow's (D1's) live-tracking list.
+        # (2) finalize_bsjp2_confirmations -- uses TONIGHT's results as D1's
+        #     close for whatever was on YESTERDAY's watchlist, confirms
+        #     Stage-1 (ret_2d_cum>=2%), assigns the Stage-2 tier/rocket tag,
+        #     and computes the dynamic TP1/TP2/TP3+SL recommendation that
+        #     `/bsjp tp` reads. Order matters: finalize reads yesterday's
+        #     watchlist file BEFORE build overwrites it with tonight's.
+        try:
+            results_by_ticker = {r["ticker"]: r for r in results if r and r.get("ticker")}
+            bsjp2_confirmed = bsjp2_engine.finalize_bsjp2_confirmations(results_by_ticker)
+            bsjp2_watchlist = bsjp2_engine.build_bsjp2_watchlist(results_by_ticker)
+            print(f"🌆 BSJP v2: {len(bsjp2_confirmed)} pick terkonfirmasi hari ini, {len(bsjp2_watchlist)} watchlist baru buat besok.")
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan BSJP v2 nightly step: {e}")
 
         # MBSS v2 (user request — /broksum): fetch broker-summary batch buat
         # 250 ticker berskor tertinggi SEKALI di sini, pakai HABIS kuota

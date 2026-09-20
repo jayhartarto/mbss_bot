@@ -2331,7 +2331,18 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
     if len({int(target_buy_min), int(target_buy_max), int(tp_1), int(cut_loss)}) == 1:
         return _excluded(ticker, f"target harga semuanya sama ({int(tp_1)}) — data terlalu tipis/tidak likuid untuk dihitung wajar")
 
+    # BSJP v2 (2026-09-20): causal Stage-1/Stage-2/rocket feature set, reuses
+    # the `hist` DataFrame already fetched above -- zero extra cost. Wrapped
+    # defensively so a bug in the new module can never break core scoring for
+    # every other command. See engine/bsjp2.py for the formulas.
+    try:
+        import engine.bsjp2 as bsjp2_engine
+        bsjp2_fields = bsjp2_engine.compute_bsjp2_features(hist) or {}
+    except Exception:
+        bsjp2_fields = {}
+
     result = {
+        **bsjp2_fields,
         "ticker": ticker,
         "name": company_name,
         "sector": sector,

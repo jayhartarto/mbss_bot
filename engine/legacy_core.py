@@ -417,6 +417,7 @@ import engine.nightly as nightly_engine
 import engine.market as market_engine
 import engine.broker as broker_engine
 import engine.scanalert as scanalert_engine
+import engine.bsjp2 as bsjp2_engine
 # NOTE (MBSS v2 refactor, Phase 5a): first Command Layer module. build_app()
 # below needs these handler functions to register them; commands/scan.py
 # needs core.xxx for the deep scoring/ranking helpers it calls. Same
@@ -7580,42 +7581,24 @@ async def run_conviction_sweep_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ Conviction-sweep job gagal: {e}")
 
 
-async def run_bsjp_recheck_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    JobQueue callback TERPISAH (MBSS v2, user request 2026-08-29 --
-    unified BSJP "Beli Sore Jual Pagi", 2-fase): Fase 2 -- re-cek live
-    shortlist yang disimpan /bsjp (Fase 1, akhir sesi 1) tiap
-    BSJP_RECHECK_INTERVAL_SEC (30 menit), kirim alert final ke ticker yg
-    MASIH lolos semua 4 kriteria saat itu (engine/scanalert.py
-    run_bsjp_recheck_once). State file terpisah (bsjp_shortlist_state.json)
-    -- no-op murah di luar jendela BSJP_RECHECK_WINDOW_START-END
-    (14:00-15:50 WIB) ATAU kalau belum ada shortlist hari ini (/bsjp belum
-    dijalankan), aman didaftarkan interval rapat sama seperti conviction
-    sweep di atas.
-    """
-    try:
-        await scanalert_engine.run_bsjp_recheck_once()
-    except Exception as e:
-        print(f"⚠️ BSJP recheck job gagal: {e}")
+# BSJP Fase1/Fase2 JobQueue jobs (run_bsjp_recheck_job/run_bsjp_shortlist_
+# scan_job) retired 2026-09-20 along with the rest of the old system -- see
+# archive/bsjp_legacy_fase1_fase2_pyramid_2026_09_20.py and memory
+# project_bsjp_derisk_revisit_2026_09_17.md. BSJP v2's intraday job lives in
+# engine/bsjp2.py, registered near the bottom of this file's job-queue setup.
 
 
-async def run_bsjp_shortlist_scan_job(context: ContextTypes.DEFAULT_TYPE):
+async def run_bsjp2_intraday_tick_job(context: ContextTypes.DEFAULT_TYPE):
     """
-    JobQueue callback TERPISAH (MBSS v2, user request 2026-08-31, live case
-    BALI/KICI lolos shortlist tapi sudah +25%/+24.4% -- practically ARA,
-    sudah tidak bisa dibeli): Fase 1 OTOMATIS -- SEBELUMNYA Fase 1 CUMA
-    manual-trigger (/bsjp), jadi kandidat yg nembus threshold pagi2 bisa
-    sudah lanjut lari ke ARA sebelum sempat ketahuan kalau user baru cek
-    siang/sore. Scan tiap BSJP_SHORTLIST_SCAN_INTERVAL_SEC (15 menit),
-    no-op murah di luar jendela 09:00-15:50 WIB (engine/scanalert.py
-    run_bsjp_shortlist_scan_auto) -- aman didaftarkan interval rapat sama
-    spt job lain di atas. /bsjp manual TETAP ada, dua cara ini saling
-    melengkapi (union shortlist yg sama, bukan duplikat state terpisah).
+    JobQueue callback TERPISAH -- BSJP v2 Stage-1/Stage-2/rocket live D1
+    tracking (engine/bsjp2.py run_bsjp2_intraday_tick). No-op murah di luar
+    jendela 09:00-15:50 WIB atau kalau belum ada watchlist hari ini (/eodscan
+    belum jalan / build_bsjp2_watchlist tidak menghasilkan kandidat semalam).
     """
     try:
-        await scanalert_engine.run_bsjp_shortlist_scan_auto()
+        await bsjp2_engine.run_bsjp2_intraday_tick()
     except Exception as e:
-        print(f"⚠️ BSJP shortlist scan (auto) job gagal: {e}")
+        print(f"⚠️ BSJP v2 intraday tick job gagal: {e}")
 
 
 async def run_entry_pagi_scan_job(context: ContextTypes.DEFAULT_TYPE):
@@ -7660,28 +7643,10 @@ async def run_entry_pagi_d2_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ Entry Pagi D+2 job gagal: {e}")
 
 
-async def run_bsjp_pyramid_validation_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    JobQueue callback TERPISAH -- ENTRY SORE Sequential Tier1-3 @ 15:00
-    (full redesign, user request 2026-09-06), engine/scanalert.py
-    run_bsjp_pyramid_validation_once. State file SENDIRI (bsjp_pyramid_
-    state.json) -- TIDAK menyentuh mekanisme Fase2 live yg sudah ada.
-    """
-    try:
-        await scanalert_engine.run_bsjp_pyramid_validation_once()
-    except Exception as e:
-        print(f"⚠️ Entry Sore pyramid validation job gagal: {e}")
-
-
-async def run_bsjp_pyramid_d1_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    JobQueue callback TERPISAH -- ENTRY SORE D+1 exit (avg-down tier2/3,
-    TP/SL per tier), engine/scanalert.py run_bsjp_pyramid_d1_once.
-    """
-    try:
-        await scanalert_engine.run_bsjp_pyramid_d1_once()
-    except Exception as e:
-        print(f"⚠️ Entry Sore pyramid D+1 job gagal: {e}")
+# ENTRY SORE pyramid jobs (run_bsjp_pyramid_validation_job/run_bsjp_
+# pyramid_d1_job) retired 2026-09-20 along with the rest of the old BSJP
+# system -- see archive/bsjp_legacy_fase1_fase2_pyramid_2026_09_20.py and
+# memory project_bsjp_derisk_revisit_2026_09_17.md.
 
 
 async def run_shared_1m_monitor_job(context: ContextTypes.DEFAULT_TYPE):
@@ -7867,7 +7832,7 @@ def build_app():
     app.add_handler(CommandHandler("fastscan", commands_scan.fast_scan_command))
     app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
     app.add_handler(CommandHandler("brokerdiscovery", commands_scan.broker_discovery_command))
-    app.add_handler(CommandHandler("bsjp", commands_scan.bsjp_screening_command))
+    app.add_handler(CommandHandler("bsjp", commands_scan.bsjp2_screening_command))
     app.add_handler(CommandHandler(["buyonweakness", "bow"], commands_scan.buy_on_weakness_command))
     app.add_handler(CommandHandler("entrypagi", commands_scan.entry_pagi_manual_command))
     app.add_handler(CommandHandler("ffdaytrade", commands_scan.ff_daytrade_manual_command))
@@ -7946,41 +7911,17 @@ def build_app():
         # app.job_queue.run_repeating(run_scanalert_job, interval=180, first=10)
         # app.job_queue.run_repeating(run_gap_rebound_scan_job, interval=60, first=25)
         # app.job_queue.run_repeating(run_conviction_sweep_job, interval=900, first=100)
-        # MBSS v2 (user request 2026-08-29 -- unified BSJP "Beli Sore Jual
-        # Pagi" Fase 2, engine/scanalert.py run_bsjp_recheck_once): interval=
-        # BSJP_RECHECK_INTERVAL_SEC -- job ini sendiri no-op murah di luar
-        # jendela BSJP_RECHECK_WINDOW_START-END atau kalau belum ada
-        # shortlist /bsjp hari ini, aman didaftarkan 24/7 spt job lain di
-        # atas. UPDATE 2026-09-01: window dimajukan 14:00->09:30 (live case
-        # ARA terjadi sejak sesi 1) & interval dipercepat 1800s->900s.
-        # UPDATE 2026-09-02: interval dipercepat LAGI 900s->300s, SENGAJA
-        # TIDAK LAGI disamakan dgn Fase 1 (BSJP_SHORTLIST_SCAN_INTERVAL_SEC
-        # tetap 900s) -- lihat catatan lengkap di atas BSJP_RECHECK_INTERVAL_
-        # SEC (engine/scanalert.py) knp presisi timing Fase 2 lebih penting.
-        # first=250 TETAP aman -- gcd(300,900)=300, (250-460) & (250-100)
-        # tidak habis dibagi 300, jadi TIDAK PERNAH align dgn bsjp_shortlist_
-        # scan (first=460/900s) ATAU conviction_sweep (first=100/900s).
-        app.job_queue.run_repeating(run_bsjp_recheck_job, interval=scanalert_engine.BSJP_RECHECK_INTERVAL_SEC, first=250)
-        # MBSS v2 (user request 2026-08-31 -- BSJP Fase 1 OTOMATIS, engine/
-        # scanalert.py run_bsjp_shortlist_scan_auto/run_bsjp_shortlist_scan_
-        # job DI ATAS): SEBELUMNYA sengaja belum didaftarkan sampai user
-        # validasi manual /bsjp (skema cache baru) beberapa kali dulu.
-        # DIAKTIFKAN 2026-09-01 -- validasi manual hari ini sukses (beberapa
-        # run /bsjp lancar, live alert KKES terkirim, tanpa hang), DAN live
-        # case GTRA/PTSP/NZIA hari ini konfirmasi langsung: logic scanner
-        # (dgn toleransi Fase 1) SEBENARNYA capture kandidat dlm hitungan
-        # menit sejak qualify, tapi TANPA polling otomatis, tidak ada yg
-        # mendeteksi sampai jauh lebih telat (user cek manual, GTRA/PTSP
-        # sudah dekat ARA). Risiko overload dicek: fetch BSJP (yf.download
-        # batched, historical-base di-cache 1x/hari) SAMA SEKALI tidak
-        # menyentuh compute_factor_scoring/.info (akar insiden alert-stall
-        # 2026-09-01 pagi, sudah diperbaiki terpisah) -- independen dari
-        # insiden itu, aman didaftarkan.
-        app.job_queue.run_repeating(
-            run_bsjp_shortlist_scan_job,
-            interval=scanalert_engine.BSJP_SHORTLIST_SCAN_INTERVAL_SEC,
-            first=460,  # offset ~setengah interval dari conviction_sweep (900s, first=100) -- hindari tabrakan tiap siklus
-        )
+        # BSJP Fase1/Fase2 job registrations retired 2026-09-20 along with the
+        # rest of the old system -- see
+        # archive/bsjp_legacy_fase1_fase2_pyramid_2026_09_20.py and memory
+        # project_bsjp_derisk_revisit_2026_09_17.md. BSJP v2 (Stage-1/Stage-2/
+        # rocket, engine/bsjp2.py): ONE intraday job, 300s cadence (same
+        # cadence the old Fase2 recheck settled on) -- run_bsjp2_intraday_tick
+        # itself no-ops outside 09:00-15:50 WIB or with no watchlist tonight,
+        # safe to register tightly like every other job here. first=280
+        # avoids aligning with conviction_sweep (first=100/900s) or
+        # entry_pagi jobs (70/95/115/180s) at the same modulus.
+        app.job_queue.run_repeating(run_bsjp2_intraday_tick_job, interval=300, first=280)
         # MBSS v2 (user request 2026-09-06 -- lane ENTRY PAGI baru, lihat
         # blok panjang "ENTRY PAGI" di engine/scanalert.py utk mekanisme
         # lengkap): TIGA job TERPISAH, semua interval=180s (sama cadence dgn
@@ -7995,16 +7936,9 @@ def build_app():
         app.job_queue.run_repeating(run_entry_pagi_scan_job, interval=180, first=70)
         app.job_queue.run_repeating(run_entry_pagi_monitor_job, interval=180, first=95)
         app.job_queue.run_repeating(run_entry_pagi_d2_job, interval=180, first=115)
-        # MBSS v2 (user request 2026-09-06 -- ENTRY SORE full redesign, lihat
-        # blok "ENTRY SORE -- Sequential Tier1-3" di engine/scanalert.py):
-        # DUA job TERPISAH LAGI, DI ATAS mekanisme Fase2 live yg sudah ada
-        # (run_bsjp_recheck_job dkk, TIDAK diubah). Validation job fire
-        # sekali/hari (guard internal) jendela sempit 15:00-15:15 -- interval
-        # 180s cukup rapat. D1 job (monitor avg-down/TP/SL D+1) interval 180s
-        # jg, sepanjang jendela D+1 09:00-15:49. first= (140/160) beda dari
-        # job lain di atas.
-        app.job_queue.run_repeating(run_bsjp_pyramid_validation_job, interval=180, first=140)
-        app.job_queue.run_repeating(run_bsjp_pyramid_d1_job, interval=180, first=160)
+        # ENTRY SORE pyramid job registrations retired 2026-09-20 along with
+        # the rest of the old BSJP system -- see
+        # archive/bsjp_legacy_fase1_fase2_pyramid_2026_09_20.py.
         # MBSS v2 (user request 2026-09-07 -- DAY TRADE REBOUND live, lihat
         # blok "REBOUND LIVE" di engine/scanalert.py): SATU job gabungan
         # (scan kandidat baru + monitor posisi OPEN), interval=300s (5
