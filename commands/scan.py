@@ -2547,12 +2547,17 @@ async def bsjp2_screening_command(update, context):
         await core.safe_reply(update.message, bsjp2_engine.build_bsjp2_tp_message())
         return
 
-    now_wib = datetime.datetime.now(core.WIB)
-    is_holiday = await asyncio.to_thread(core.is_idx_market_holiday_today)
-    if now_wib.weekday() >= 5 or is_holiday:
-        await core.safe_reply(update.message, "⚠️ /bsjp cuma relevan hari bursa -- di luar itu tidak ada watchlist/live tracking baru.")
-        return
-
+    # No weekday/holiday gate here (bugfix 2026-09-20, live case: user ran
+    # /bsjp on a Sunday right after eodscan and got hard-rejected even though
+    # a real watchlist had just been built) -- unlike the OLD Fase1 command,
+    # this branch never fetches anything live, it only reads state files
+    # build_bsjp2_watchlist/run_bsjp2_intraday_tick already wrote. Blocking
+    # the read on weekday/holiday makes no sense: eodscan can run (or be
+    # re-run manually) any day, and the watchlist it produces stays valid to
+    # inspect until the next one overwrites it. run_bsjp2_intraday_tick
+    # itself already refuses to populate bsjp2_live_state.json outside
+    # trading hours, so falling through to the watchlist branch below is
+    # automatically correct on a non-trading day -- no separate guard needed.
     live_state = bsjp2_engine._load_json_state("bsjp2_live_state.json")
     if live_state.get("trading_day_marker") == bsjp2_engine._today_str() and live_state.get("tickers"):
         active = [
