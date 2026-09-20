@@ -284,15 +284,27 @@ def build_bsjp2_watchlist(results: dict) -> list[dict]:
     per-ticker dict from compute_factor_scoring (tonight = D0). Computes the
     D0-static half of Stage-1 REVISED and stores the passing tickers as
     tomorrow's (D1's) tracking list."""
+    have_features = [r for r in results.values() if r.get("bsjp2_gap_pct") is not None]
     liquidity_values = sorted(
-        float(r["value_traded_20d_avg"]) for r in results.values()
-        if r.get("value_traded_20d_avg") is not None and r.get("bsjp2_gap_pct") is not None
+        float(r["value_traded_20d_avg"]) for r in have_features
+        if r.get("value_traded_20d_avg") is not None
+    )
+    # Diagnostic (2026-09-20, live case: first deploy night's watchlist came
+    # back empty with no way to tell "genuinely 0 candidates" from "the
+    # feature computation broke for everyone" -- see the matching bugfix note
+    # in engine/scoring.py compute_factor_scoring) -- always print the funnel
+    # counts, this is one line/night, not per-ticker spam.
+    print(
+        f"🌙 BSJP v2 watchlist funnel: {len(results)} ticker total, "
+        f"{len(have_features)} punya bsjp2 features (0 di sini = compute_bsjp2_features gagal sistemik, cek log di atas), "
+        f"{len(liquidity_values)} punya liquidity juga."
     )
     if not liquidity_values:
         return []
     q25_idx = max(0, int(len(liquidity_values) * STAGE1_LIQUIDITY_PERCENTILE) - 1)
     liquidity_q25 = liquidity_values[q25_idx]
 
+    union_pass, macd_reject = 0, 0
     candidates = []
     for ticker, r in results.items():
         gap_pct = r.get("bsjp2_gap_pct")
@@ -303,7 +315,11 @@ def build_bsjp2_watchlist(results: dict) -> list[dict]:
         liquidity = r.get("value_traded_20d_avg") or 0.0
         gap_leg = (STAGE1_GAP_MIN_PCT <= gap_pct < STAGE1_GAP_MAX_PCT) and liquidity >= liquidity_q25
         union = gap_leg or bool(is_first_high252)
-        if not (union and macd_hist_prior >= 0):
+        if not union:
+            continue
+        union_pass += 1
+        if not macd_hist_prior >= 0:
+            macd_reject += 1
             continue
         candidates.append({
             "ticker": ticker,
@@ -319,6 +335,11 @@ def build_bsjp2_watchlist(results: dict) -> list[dict]:
             "close_history_20": r.get("bsjp2_close_history_20") or [],
         })
 
+    print(
+        f"🌙 BSJP v2 watchlist funnel: liquidity_q25={liquidity_q25:,.0f}, "
+        f"{union_pass} lolos union (gap+liq OR is_first_high252), {macd_reject} kena reject macd_hist_prior<0, "
+        f"{len(candidates)} final candidate."
+    )
     today = _today_str()
     _save_json_state("bsjp2_watchlist_state.json", {
         "trading_day_marker": today,

@@ -62,6 +62,8 @@ from engine import legacy_core as core
 import engine.market as market_engine
 import engine.broker as broker_engine
 
+_bsjp2_error_logged = False  # reset per process restart -- see compute_bsjp2_features call below
+
 # MBSS v2 (user request — log /eodscan terlalu berisik): PB/PE anomali dari
 # yfinance (lihat PB_SANITY_MAX/PE_SANITY_MAX di compute_factor_scoring) itu
 # masalah yfinance yang KRONIS untuk ticker YANG SAMA tiap malam (bukan
@@ -2335,11 +2337,25 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
     # the `hist` DataFrame already fetched above -- zero extra cost. Wrapped
     # defensively so a bug in the new module can never break core scoring for
     # every other command. See engine/bsjp2.py for the formulas.
+    #
+    # BUGFIX (2026-09-20, live case: first deploy night's /bsjp watchlist came
+    # back empty with zero trace anywhere -- a bare `except Exception: pass`
+    # here means ANY failure silently gives every ticker empty bsjp2 fields,
+    # which build_bsjp2_watchlist can't tell apart from "genuinely zero
+    # candidates tonight". Log the traceback ONCE per process (not once per
+    # ticker -- this runs 500+ times a night, would flood the log) so a real
+    # bug is actually visible instead of masquerading as an empty watchlist.
+    global _bsjp2_error_logged
     try:
         import engine.bsjp2 as bsjp2_engine
         bsjp2_fields = bsjp2_engine.compute_bsjp2_features(hist) or {}
-    except Exception:
+    except Exception as e:
         bsjp2_fields = {}
+        if not _bsjp2_error_logged:
+            import traceback
+            print(f"⚠️ BSJP v2 compute_bsjp2_features gagal (ticker {ticker}, akan diam2 kosong utk SEMUA ticker malam ini kalau ini bug sistemik, bukan cuma ticker ini): {e}")
+            traceback.print_exc()
+            _bsjp2_error_logged = True
 
     result = {
         **bsjp2_fields,
