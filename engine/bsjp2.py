@@ -174,10 +174,21 @@ HOLD_CUT_GUIDANCE = (
 # =====================================================================
 
 def compute_bsjp2_features(hist: pd.DataFrame) -> dict | None:
-    """Causal Stage-1/Stage-2/rocket feature set. Returns None if history is
-    too short (mirrors BSJP_MIN_HISTORY_DAYS from the old system -- need
-    enough for a 252d high plus warmup)."""
-    if hist is None or len(hist) < 260 or "Close" not in hist.columns:
+    """Causal Stage-1/Stage-2/rocket feature set. Returns None only when
+    there's not even enough history for the CHEAPEST field (gap_pct/
+    pct_b_prior, ~20 rows).
+
+    BUGFIX (2026-09-20, live case: first deploy night's watchlist funnel
+    showed only 1/508 tickers with ANY bsjp2 feature): this used to gate the
+    WHOLE dict on >=260 rows (mirroring the old system's BSJP_MIN_HISTORY_
+    DAYS, needed for is_first_high252's 252d lookback) -- but that throws
+    away gap_pct/pct_b_prior/atr_pct_prior (need ~20 rows) and
+    macd_hist_prior (~35 rows) for every ticker whose local OHLCV history
+    doesn't happen to reach 260 rows yet, even though those fields are
+    individually computable with far less data. Each field below already
+    has its own length check -- only `is_first_high252` needs 254+ rows and
+    silently stays False when there isn't enough, same as intended."""
+    if hist is None or len(hist) < 20 or "Close" not in hist.columns:
         return None
 
     closes = hist["Close"]
