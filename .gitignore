@@ -4,6 +4,7 @@
 cache/
 daytrade_picks_history.json
 buy_on_weakness_picks.json
+vcp_pillar_picks.json
 news_catalyst_log.json
 brokersum_cache.json
 brokersum_history.json

@@ -2688,7 +2688,10 @@ async def run_conviction_sweep_once() -> dict:
 # produksi>0): n=39 (3.25/hari, 12 hari bursa), mean=3.34%, median=6.00%,
 # win=84.6%. D1-only: n=21, win=95.2%. D+2 (carryover): n=18, mean=0.91%,
 # median=2.00%, win=72.2%.
-ENTRY_PAGI_ENABLED = True  # feature-toggle terisolasi -- set False kalau perlu mematikan cepat TANPA menyentuh lane lain
+ENTRY_PAGI_ENABLED = False  # MBSS v2 (user request 2026-09-21): dinonaktifkan -- profitable 46.5%
+# (di bawah 50%!), mean cuma +0.71%, tidak lolos bar "profitable meyakinkan" utk daytrade
+# family (lihat memory project_daytrade_family_audit_2026_09_21). feature-toggle terisolasi
+# -- set True lagi kalau mau diaktifkan, TANPA menyentuh lane lain.
 
 ENTRY_PAGI_OR_WINDOW_END = datetime.time(9, 5)  # jendela opening-range: buka s.d. 09:05 WIB
 ENTRY_PAGI_SCAN_WINDOW_START = datetime.time(9, 5)

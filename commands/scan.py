@@ -58,6 +58,7 @@ import engine.swing_horizon_confidence as swing_horizon_confidence
 import engine.daytrade_hc_confidence as daytrade_hc_confidence
 import engine.daytrade_2d_screen as daytrade_2d_screen
 import engine.buy_on_weakness as buy_on_weakness_engine
+import engine.vcp_pillar as vcp_pillar_engine
 import engine.bsjp2 as bsjp2_engine
 
 
@@ -2876,8 +2877,6 @@ async def pingpong_watchlist_command(update, context):
             tags.append("FF DAYTRADE")
         if r["rsi"] is not None and r["macd_hist"] is not None and r["rsi"] >= scanalert_engine.ENTRY_PAGI_RSI_MIN and r["macd_hist"] > scanalert_engine.ENTRY_PAGI_MACD_MIN:
             tags.append("ENTRY PAGI")
-        if r["ticker"] in sdt_selected:
-            tags.append("SDT")
         if r["ticker"] in hc_selected:
             tags.append("HC")
         r["cross_tags"] = tags
@@ -2921,7 +2920,6 @@ def compute_consensus_candidates(scored: dict, broksum_data: dict, market_regime
       tickers net-bought by >1 whitelist broker AND tagged by >=1 other tool,
       sorted by net value descending.
     """
-    GOOD_SDT_LANES = {"PRIORITY FRESH", "PRIORITY CONT"}  # SECONDARY WATCH/LOW EDGE sengaja TIDAK dihitung (lihat revisi minggu lalu)
     GPTPICK_MIN_SCORE = 65  # kira-kira ambang bawah yang biasanya masuk top 3-5 nyata
 
     qualifying = []
@@ -2950,12 +2948,13 @@ def compute_consensus_candidates(scored: dict, broksum_data: dict, market_regime
         if r.get("action_id") == "STRONG_BUY":
             tools.append("STRONG_BUY")
 
-        try:
-            bias = core.compute_screendaytrade_positive_bias(r, market_regime)
-            if bias.get("lane") in GOOD_SDT_LANES:
-                tools.append(f"SCREENDAYTRADE ({bias['lane']})")
-        except Exception:
-            pass
+        # MBSS v2 (user request 2026-09-21): tag "SCREENDAYTRADE (lane)"
+        # DIHAPUS -- compute_screendaytrade_positive_bias TIDAK PERNAH
+        # divalidasi backtest (butuh rekonstruksi penuh compute_factor_
+        # scoring), dan sinyal MACD-lane pendukungnya (macd_approach_tier
+        # dkk, sumber /screendaytrade yg sudah dinonaktifkan) sudah terbukti
+        # gagal honest backtest hari ini -- lihat memory
+        # project_screendaytrade_9lane_honest_retest_2026_09_21.
 
         try:
             if _gptpick_candidate_filter(r):
@@ -3041,14 +3040,21 @@ def _consensus_sdt_hc_selected(pool: list, market_regime: str | None = None) -> 
     the /screendaytrade command itself is for precision entry timing
     display, not the core categorization used here.
     """
-    GOOD_SDT_LANES = {"PRIORITY FRESH", "PRIORITY CONT"}
+    # MBSS v2 (user request 2026-09-21): SDT tag DICABUT dari sini --
+    # compute_screendaytrade_positive_bias's PRIORITY FRESH/PRIORITY CONT
+    # lanes (yang jadi sumber tag "SDT" ini) TIDAK PERNAH divalidasi dengan
+    # backtest apa pun, dan sinyal MACD pendukung sejenisnya (macd_approach_
+    # tier + 8 lane MACD lain di /screendaytrade) SUDAH terbukti gagal uji
+    # metodologi honest-SL: profitable% ambruk dari klaim touch 55-65% jadi
+    # 25-47% riil, median return negatif di hampir semua lane -- lihat
+    # [[project_sdt_macd_approach_honest_retest_2026_09_21]] dan
+    # [[project_screendaytrade_9lane_honest_retest_2026_09_21]]. sdt_selected
+    # SENGAJA selalu kosong (bukan dihapus dari signature -- semua caller di
+    # file ini otomatis degradasi anggun jadi tidak pernah dapat tag "SDT"
+    # tanpa perlu diubah satu-satu) sampai ada pengganti yang tervalidasi
+    # (lihat [[project_swing_pillar_deep_drawdown_2026_09_20]]).
     sdt_selected, hc_selected = set(), set()
     for r in pool:
-        try:
-            if core.compute_screendaytrade_positive_bias(r, market_regime).get("lane") in GOOD_SDT_LANES:
-                sdt_selected.add(r["ticker"])
-        except Exception:
-            pass
         # MBSS v2 (user request 2026-08-30): is_high_conviction GANTI TOTAL ke
         # _daytrade_wr_tp1 -- Consensus Prime's HC leg sekarang = lolos floor
         # likuiditas + floor WR 60% model (bukan lagi Minervini 5-6 kriteria).
@@ -3274,8 +3280,14 @@ def _compute_consensus_prime_candidates(
 
     Returns (list ticker lolos, {ticker: [tag,...]}).
     """
+    # MBSS v2 (user request 2026-09-21): SDT tag DICABUT dari tag-count --
+    # lihat catatan di _consensus_sdt_hc_selected. sdt_selected parameter
+    # DIPERTAHANKAN (bukan dihapus dari signature) supaya semua caller tidak
+    # perlu diubah, tapi TIDAK dimasukkan ke tag_sets lagi -- consensus
+    # sekarang minimal 2 dari 5 tag (bukan 6): HC/ENTRY PAGI/SMART-MONEY/
+    # REBOUND/FF DAYTRADE.
     tag_sets = {
-        "SDT": sdt_selected, "HC": hc_selected, "ENTRY PAGI": entry_pagi_tickers,
+        "HC": hc_selected, "ENTRY PAGI": entry_pagi_tickers,
         "SMART-MONEY": smartmoney_tickers, "REBOUND": rebound_top5_tickers,
         "FF DAYTRADE": ff_daytrade_tickers,
     }
@@ -3347,7 +3359,6 @@ async def fast_candidates_command(update, context):
         t = r["ticker"]
         info = backbone_result.get("all_scored", {}).get(t, {}) or {}
         also = []
-        if t in sdt_selected: also.append("SDT")
         if t in hc_selected: also.append("HC")
         also_str = f" | {', '.join(also)}" if also else ""
         lines.append(
@@ -3585,7 +3596,7 @@ async def consensus_command(update, context):
     backbone_engine.save_consensus_position_state(position_state)
     prime_tickers = [t for t, _ in prime_display]  # dipakai section SMART-MONEY WATCH/LONG-HORIZON di bawah, exclude cooldown-blocked
 
-    lines.append(f"🏆 CONSENSUS PRIME — {len(prime_display)} saham (minimal 2 dari 5 tag: SDT/HC/ENTRY PAGI/SMART-MONEY/REBOUND)")
+    lines.append(f"🏆 CONSENSUS PRIME — {len(prime_display)} saham (minimal 2 dari 5 tag: HC/ENTRY PAGI/SMART-MONEY/REBOUND/FF DAYTRADE)")
     if not prime_display:
         lines.append("Tidak ada ticker dengan minimal 2 irisan tag hari ini. Kualitas terbatas, bukan dipaksakan.")
     for i, (t, status) in enumerate(prime_display, 1):
@@ -3684,20 +3695,21 @@ async def consensus_command(update, context):
     # ditampilkan eksplisit.
     # entry_pagi_state/entry_pagi_tickers REUSE dari yg sudah dihitung early
     # (utk CONSENSUS PRIME) -- TIDAK fetch ulang.
+    # MBSS v2 (user request 2026-09-21): "allsetup" dulu = union HC ∪ SDT --
+    # SDT dicabut (lihat catatan di _consensus_sdt_hc_selected), sekarang
+    # murni ENTRY PAGI ∩ HC. Label section dipertahankan "HC/allsetup" biar
+    # histori pesan lama tetap konsisten, tapi isinya cuma HC.
     if not entry_pagi_state.get("fired_today"):
         lines.append("\n🌅 ENTRY PAGI ∩ HC/allsetup — belum fire hari ini (scan 09:05-09:20 WIB belum jalan, atau /consensus dipanggil sebelum itu)")
     else:
         if not entry_pagi_tickers:
             lines.append("\n🌅 ENTRY PAGI ∩ HC/allsetup — 0 saham (Entry Pagi sudah scan hari ini, tapi 0 kandidat lolos filter RSI/MACD -- wajar, bukan error)")
         else:
-            entry_pagi_cross = sorted(entry_pagi_tickers & (hc_selected | sdt_selected))
+            entry_pagi_cross = sorted(entry_pagi_tickers & hc_selected)
             lines.append(f"\n🌅 ENTRY PAGI ∩ HC/allsetup — {len(entry_pagi_cross)} saham (dari {len(entry_pagi_tickers)} kandidat Entry Pagi hari ini)")
             if entry_pagi_cross:
                 for t in entry_pagi_cross:
-                    tags = []
-                    if t in hc_selected: tags.append("HC")
-                    if t in sdt_selected: tags.append("SDT/allsetup")
-                    lines.append(f"• {t} — juga lolos: {', '.join(tags)}")
+                    lines.append(f"• {t} — juga lolos: HC")
             else:
                 lines.append("Tidak ada irisan hari ini.")
 
@@ -3782,14 +3794,14 @@ async def consensus_live_command(update, context):
         pool_by_ticker, sdt_selected, hc_selected, entry_pagi_tickers, smartmoney_qualifying, rebound_top5, ff_daytrade_tickers
     )
 
-    # MBSS v2 (user request — Explosive Lane diganti sistem baru, dipakai
-    # KONSISTEN dengan SDT: lane FAST_RECOVERY/EARLY_RECOVERY, macd_approach_
-    # tier baru — lihat screen_daytrade()). _explosive_score (formula lama)
-    # sudah tidak dipakai di mana pun lagi.
-    explosive_tickers = [
-        r["ticker"] for r in pool
-        if r["ticker"] not in prime_tickers and r.get("macd_approach_tier") in ("FAST_RECOVERY", "EARLY_RECOVERY")
-    ][:EXPLOSIVE_MAX_NAMES]
+    # MBSS v2 (user request 2026-09-21): Explosive Lane DIHAPUS -- lane
+    # FAST_RECOVERY/EARLY_RECOVERY (macd_approach_tier, sama sinyal dgn
+    # /screendaytrade yg sudah dinonaktifkan) terbukti gagal honest backtest
+    # (lihat memory project_sdt_macd_approach_honest_retest_2026_09_21).
+    # explosive_tickers DIPERTAHANKAN sbg list KOSONG (bukan dihapus
+    # variabelnya) supaya `watchlist` di bawah tidak perlu diubah -- tinggal
+    # jadi prime_tickers saja sampai ada pengganti tervalidasi (mis. VCP).
+    explosive_tickers = []
 
     watchlist = list(dict.fromkeys(prime_tickers + explosive_tickers))  # dedup, preserve order
 
@@ -4020,5 +4032,83 @@ async def buy_on_weakness_command(update, context):
         "\n⚠️ Backtest 2-tahun, regime-sensitive (lemah saat IHSG crash "
         "sistemik, lihat catatan riset) — bukan jaminan forward. SL wajib "
         "dipakai, bukan opsional."
+    )
+    await core.safe_reply(update.message, "\n\n".join(lines))
+
+
+async def swing_command(update, context):
+    """
+    /swing — MBSS v2 (2026-09-21). Unified swing-trade signal, replaces the
+    old /buyonweakness (/bow) command. Shows BOW ("buy the quiet dip in an
+    uptrend") and VCP ("buy the breakout after a volatility squeeze") as two
+    SEPARATE labeled sections, NOT merged into one score/list — confirmed
+    0% day-level overlap between the two (see memory
+    project_bow_vcp_overlap_2026_09_21.md), so a merge would just be
+    misleading. Both read the picks history each nightly job already
+    maintains (see engine/nightly.py hooks) — no live scan here, same
+    "cache-only" pattern as /broksum.
+    """
+    bow_picks = buy_on_weakness_engine.load_buy_on_weakness_picks()
+    bow_active = [p for p in bow_picks if p.get("status") == "ALIVE"]
+    bow_active.sort(key=lambda p: (p["tier"], -p["age_days"]))
+
+    vcp_picks = vcp_pillar_engine.load_vcp_picks()
+    vcp_active = [p for p in vcp_picks if p.get("status") == "ALIVE"]
+    vcp_active.sort(key=lambda p: -p["age_days"])
+
+    if not bow_active and not vcp_active:
+        await core.safe_reply(
+            update.message,
+            "🧭 SWING — belum ada sinyal aktif saat ini (BOW maupun VCP). "
+            "Lane ini jalan otomatis tiap malam via /eodscan, cek lagi besok."
+        )
+        return
+
+    lines = [f"🧭 SWING — {len(bow_active)} BOW + {len(vcp_active)} VCP sinyal aktif"]
+
+    lines.append(f"\n🪶 BUY ON WEAKNESS ({len(bow_active)})")
+    if not bow_active:
+        lines.append("— tidak ada sinyal aktif.")
+    for p in bow_active:
+        fire = "🔥" * (4 - p["tier"])  # Tier 1 = 3 fire (best), Tier 3 = 1 fire
+        age = p["age_days"]
+        age_label = f"NEW (Day {age}/5)" if age <= 1 else f"AGING (Day {age}/5) — ALIVE"
+        tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
+        lines.append(
+            f"{fire} {p['ticker']} — Tier {p['tier']}\n"
+            f"{age_label}\n"
+            f"Entry: {p['entry_low']:,.0f} - {p['entry_high']:,.0f}\n"
+            f"SL: {p['sl_price']:,.0f}\n"
+            f"TP1: {p['tp1_price']:,.0f} (+{p['tp1_pct']:.2f}%){tp1_note}\n"
+            f"TP2: {p['tp2_price_latest']:,.0f}\n"
+            f"Swing Length: ~{p['swing_length_days_typical']} hari."
+        )
+
+    lines.append(f"\n📐 VCP BREAKOUT ({len(vcp_active)})")
+    if not vcp_active:
+        lines.append("— tidak ada sinyal aktif.")
+    for p in vcp_active:
+        age = p["age_days"]
+        age_label = f"NEW (Day {age}/{vcp_pillar_engine.ALERT_MAX_AGE_DAYS})" if age <= 1 else f"AGING (Day {age}/{vcp_pillar_engine.ALERT_MAX_AGE_DAYS}) — ALIVE"
+        bonus = []
+        if p.get("tp2_touched"):
+            bonus.append("TP2")
+        if p.get("tp3_touched"):
+            bonus.append("TP3")
+        bonus_note = f" ✅ {'+'.join(bonus)} juga tersentuh (upside bonus)" if bonus else ""
+        lines.append(
+            f"{p['ticker']} (entry ref {p['entry_ref_price']:,.0f})\n"
+            f"{age_label}\n"
+            f"SL: {p['sl_price']:,.0f} (-{vcp_pillar_engine.SL_PCT:.0f}%)\n"
+            f"TP1: {p['tp1_price']:,.0f} (+{vcp_pillar_engine.TP1_PCT:.1f}%, ~{p['tp1_touch_rate']:.0f}% historical touch-rate) — resolusi utama\n"
+            f"TP2: {p['tp2_price']:,.0f} (+{vcp_pillar_engine.TP2_PCT:.1f}%, ~{p['tp2_touch_rate']:.0f}% touch-rate)\n"
+            f"TP3: {p['tp3_price']:,.0f} (+{vcp_pillar_engine.TP3_PCT:.1f}%, ~{p['tp3_touch_rate']:.0f}% touch-rate){bonus_note}"
+        )
+
+    lines.append(
+        "\n⚠️ BOW & VCP dua pilar terpisah (overlap 0%, JANGAN digabung jadi "
+        "satu skor). BOW: winrate tinggi, gain stabil. VCP: TP1 cepat & "
+        "reliable, TP2/TP3 upside tapi tail-driven (persentase touch-rate "
+        "BUKAN jaminan, lihat catatan riset). SL wajib dipakai, bukan opsional."
     )
     await core.safe_reply(update.message, "\n\n".join(lines))

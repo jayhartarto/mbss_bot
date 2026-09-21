@@ -7817,14 +7817,25 @@ def build_app():
     app.add_handler(CommandHandler("order", commands_portfolio.order_command))
     app.add_handler(CommandHandler(["myportfolio", "portofolio"], commands_portfolio.my_portfolio))
     app.add_handler(CommandHandler("testbrief", commands_misc.test_morning_brief))
-    app.add_handler(CommandHandler("screendaytrade", commands_scan.screen_daytrade))
+    # MBSS v2 (user request 2026-09-21): /screendaytrade DINONAKTIFKAN --
+    # semua 9 lane MACD-nya terbukti gagal honest backtest (touch-metric
+    # overstatement, lihat memory project_screendaytrade_9lane_honest_
+    # retest_2026_09_21). Fungsi screen_daytrade() TIDAK dihapus dari
+    # commands/scan.py (masih ada, cuma tidak lagi didaftarkan sbg command)
+    # -- gampang dikembalikan kalau perlu, per konvensi arsip project ini.
+    # app.add_handler(CommandHandler("screendaytrade", commands_scan.screen_daytrade))
     app.add_handler(CommandHandler("gptpick", commands_scan.gptpick_command))
     app.add_handler(CommandHandler(["hc", "highconviction"], commands_scan.high_conviction_command))
     app.add_handler(CommandHandler(["allsetup", "allsetups"], commands_scan.all_setup_candidates_command))
-    # MBSS v2 (Lane Lifecycle Redesign, user request 2026-08-29/30): /go --
-    # dashboard gabungan DAY TRADE + SWING TRADE, lihat docstring commands/
-    # scan.py go_command utk detail lengkap.
-    app.add_handler(CommandHandler(["go"], commands_scan.go_command))
+    # MBSS v2 (user request 2026-09-21): /go DIRETIRE SEPENUHNYA -- kedua
+    # bagiannya (DAY TRADE section = EOD-HC model, SWING TRADE section =
+    # 9-lane MACD yg sama dgn /screendaytrade) sudah terbukti gagal honest
+    # backtest (lihat memory project_daytrade_family_audit_2026_09_21,
+    # project_screendaytrade_9lane_honest_retest_2026_09_21). Sinyal utama
+    # sekarang /bsjp (daytrade) dan /swing (BOW+VCP gabungan, gantikan /bow).
+    # go_command() TIDAK dihapus dari commands/scan.py, cuma tidak lagi
+    # didaftarkan.
+    # app.add_handler(CommandHandler(["go"], commands_scan.go_command))
     app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.strong_buy_command))
     app.add_handler(CommandHandler("pingpong", commands_scan.pingpong_watchlist_command))
     app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
@@ -7833,8 +7844,20 @@ def build_app():
     app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
     app.add_handler(CommandHandler("brokerdiscovery", commands_scan.broker_discovery_command))
     app.add_handler(CommandHandler("bsjp", commands_scan.bsjp2_screening_command))
-    app.add_handler(CommandHandler(["buyonweakness", "bow"], commands_scan.buy_on_weakness_command))
-    app.add_handler(CommandHandler("entrypagi", commands_scan.entry_pagi_manual_command))
+    # MBSS v2 (user request 2026-09-21): /bow (dan alias /buyonweakness)
+    # DIGANTI /swing -- BOW digabung dgn VCP (0% overlap sinyal, keduanya
+    # genuinely melengkapi, lihat memory project_bow_vcp_overlap_2026_09_21)
+    # jadi satu command "SWING SIGNAL". buy_on_weakness_command() TIDAK
+    # dihapus dari commands/scan.py, dipanggil dari dalam swing_command()
+    # yg baru sbg salah satu cabang.
+    # app.add_handler(CommandHandler(["buyonweakness", "bow"], commands_scan.buy_on_weakness_command))
+    app.add_handler(CommandHandler(["swing"], commands_scan.swing_command))
+    # MBSS v2 (user request 2026-09-21): /entrypagi DINONAKTIFKAN --
+    # profitable 46.5% (di bawah 50%!), mean cuma +0.71%, tidak lolos bar
+    # "profitable meyakinkan" utk daytrade family (lihat memory
+    # project_daytrade_family_audit_2026_09_21). entry_pagi_manual_command()
+    # TIDAK dihapus, cuma tidak lagi didaftarkan.
+    # app.add_handler(CommandHandler("entrypagi", commands_scan.entry_pagi_manual_command))
     app.add_handler(CommandHandler("ffdaytrade", commands_scan.ff_daytrade_manual_command))
     app.add_handler(CommandHandler(["eodscan", "nightlyscan"], commands_scan.eodscan_command))
     app.add_handler(CallbackQueryHandler(commands_scan.gptpick_callback, pattern="^gptpick:(3|5)$"))

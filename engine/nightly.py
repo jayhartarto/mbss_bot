@@ -61,6 +61,7 @@ import engine.broker as broker_engine
 import engine.backbone as backbone_engine
 import engine.news_catalyst as news_catalyst_engine
 import engine.buy_on_weakness as buy_on_weakness_engine
+import engine.vcp_pillar as vcp_pillar_engine
 import engine.bsjp2 as bsjp2_engine
 
 
@@ -473,6 +474,24 @@ async def run_nightly_full_scan(context):
             print(f"🪶 Buy on Weakness: {len(bow_candidates)} kandidat baru hari ini.")
         except Exception as e:
             print(f"⚠️ Gagal menjalankan Buy on Weakness: {e}")
+
+        # MBSS v2 (user request 2026-09-21 -- VCP, second swing pillar):
+        # breakout-after-squeeze screen, confirmed 0% day-level overlap
+        # with BOW above (structurally near-mutually-exclusive: BOW wants
+        # %B<=0.35 near the lower band, VCP wants near-high). Same
+        # reuse-of-`results` pattern as BOW, same nightly call shape. See
+        # engine/vcp_pillar.py docstring + memory
+        # project_vcp_tp1_tp2_tp3_sl_2026_09_21.md for the full research
+        # trail behind every threshold.
+        try:
+            vcp_tickers = [r["ticker"] for r in results if r and r.get("ticker")]
+            vcp_candidates = await asyncio.to_thread(
+                vcp_pillar_engine.compute_vcp_candidates, vcp_tickers
+            )
+            vcp_pillar_engine.update_and_save_picks(vcp_candidates)
+            print(f"📐 VCP: {len(vcp_candidates)} kandidat baru hari ini.")
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan VCP: {e}")
 
         trading_night_index = _get_and_increment_trading_night_index()
 

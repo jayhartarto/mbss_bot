@@ -486,6 +486,25 @@ async def run_bsjp2_intraday_tick() -> dict:
         t_state["price_now"] = price_now
         t_state["ret_2d_cum_live"] = ret_2d_cum_live
 
+        # BUGFIX (user report 2026-09-21): TP1/TP2/TP3 used to be recomputed
+        # from the live, constantly-moving `price_now` on EVERY tick -- this
+        # made displayed targets drift tick-to-tick (TP3 could silently
+        # appear/disappear as TP1/TP2 floated past it) and meant the "target"
+        # shown had no fixed relationship to the price the position was
+        # actually opened at. Lock the entry-price reference ONCE, the first
+        # tick this ticker is confirmed (not fading) -- rocket entries use
+        # D1's own open (known as soon as the rocket tag fires), non-rocket
+        # entries use price_now AT THAT FIRST CONFIRMED TICK as the working
+        # entry estimate (true entry is D1's close per this module's own
+        # convention, not known yet intraday -- this is the best available
+        # proxy until then). All subsequent ticks reuse this locked price,
+        # never recompute it.
+        if not t_state["fading"] and t_state.get("entry_price_locked") is None:
+            if t_state.get("rocket") and t_state["rocket"] != "none" and bar.get("open_so_far"):
+                t_state["entry_price_locked"] = bar["open_so_far"]
+            else:
+                t_state["entry_price_locked"] = price_now
+
         if not t_state["fading"]:
             # Live RSI(14) approximation for the 3-api (TIER-EXTREME) upgrade
             # -- appends today's live price onto the trailing closes captured
@@ -507,13 +526,16 @@ async def run_bsjp2_intraday_tick() -> dict:
     bot = scanalert_engine._get_shared_bot()
     if bot is not None:
         try:
-            if live_state.get("message_id"):
-                await bot.edit_message_text(chat_id=core_engine.TELEGRAM_CHAT_ID, message_id=live_state["message_id"], text=text)
-            else:
-                sent = await bot.send_message(chat_id=core_engine.TELEGRAM_CHAT_ID, text=text)
-                live_state["message_id"] = sent.message_id
+            # BUGFIX (user report 2026-09-21): this used to edit_message_text
+            # the SAME message in place every ~5min tick, so the user had no
+            # way to tell "just refreshed" from "been sitting here 20 minutes
+            # unchanged". Always send a NEW message instead -- the timestamp
+            # in the header (see _render_bsjp2_intraday_message) makes each
+            # update visibly distinguishable in the chat history.
+            sent = await bot.send_message(chat_id=core_engine.TELEGRAM_CHAT_ID, text=text)
+            live_state["message_id"] = sent.message_id
         except Exception as e:
-            print(f"⚠️ BSJP v2 intraday tick: gagal kirim/edit pesan: {e}")
+            print(f"⚠️ BSJP v2 intraday tick: gagal kirim pesan: {e}")
 
     _save_json_state("bsjp2_live_state.json", live_state)
     summary["tracked"] = len(active)
@@ -553,8 +575,10 @@ def _tp_tier_and_display(tier: str, rocket: str | None) -> tuple[str, str]:
 
 
 def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
+    import engine.legacy_core as core_engine
     import engine.scanalert as scanalert_engine
-    lines = ["🔥 BSJP LIVE — status D+1\n"]
+    now_wib = datetime.datetime.now(core_engine.WIB)
+    lines = [f"🔥 BSJP LIVE — status D+1 (update {now_wib.strftime('%H:%M:%S')} WIB)\n"]
     for ticker, c, t_state in active:
         price_now = t_state.get("price_now")
         trigger = scanalert_engine._idx_round_tick_ceil(c["prev_close"] * (1 + STAGE1_RET2D_MIN_PCT / 100.0))
@@ -562,27 +586,36 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
             lines.append(f"{ticker} — belum ada data live siklus ini")
             continue
         if t_state.get("fading"):
-            lines.append(f"{ticker} Now {price_now:,.0f} (di bawah {trigger:,.0f}) -> Status: FADING, tinggalkan")
+            lines.append(f"{ticker} Now {price_now:,.0f} (di bawah trigger/fading {trigger:,.0f}) -> Status: FADING, tinggalkan")
             continue
         rocket = t_state.get("rocket")
         rocket = rocket if rocket and rocket != "none" else None
         tier = t_state.get("tier") or "STAGE1_BASE"
         tp_tier, display_tag = _tp_tier_and_display(tier, rocket)
+        # BUGFIX (user report 2026-09-21): TP1/TP2/TP3 now computed from the
+        # LOCKED entry price (set once, see run_bsjp2_intraday_tick), NOT the
+        # live price_now -- targets stay fixed for the rest of the session
+        # instead of drifting (and TP3 silently appearing/disappearing) as
+        # price moves tick-to-tick.
+        entry_price = t_state.get("entry_price_locked") or price_now
         # Live BB-upper-in-progress isn't computed intraday (would need a full
         # OHLCV refetch, not just the cheap live bar) -- TP3 intraday uses
         # only the swing-high leg; finalize_bsjp2_confirmations adds the
         # BB-upper leg once tonight's full close is available.
-        tp_sl = _dynamic_tp_sl(tp_tier, price_now, trigger, c.get("swing_high_60d_prior"), None)
-        block = [f"{ticker} Now {price_now:,.0f} | {display_tag}"]
-        block.append(f"TP1 {tp_sl['tp1']:,.0f} (+{(tp_sl['tp1']/price_now-1)*100:.1f}%)")
-        block.append(f"TP2 {tp_sl['tp2']:,.0f} (+{(tp_sl['tp2']/price_now-1)*100:.1f}%)")
+        tp_sl = _dynamic_tp_sl(tp_tier, entry_price, trigger, c.get("swing_high_60d_prior"), None)
+        block = [f"{ticker} Now {price_now:,.0f} (entry {entry_price:,.0f}) | {display_tag}"]
+        block.append(f"TP1 {tp_sl['tp1']:,.0f} (+{(tp_sl['tp1']/price_now-1)*100:.1f}% dari now)")
+        block.append(f"TP2 {tp_sl['tp2']:,.0f} (+{(tp_sl['tp2']/price_now-1)*100:.1f}% dari now)")
         if tp_sl["tp3"] is not None:
-            block.append(f"TP3 {tp_sl['tp3']:,.0f} (+{(tp_sl['tp3']/price_now-1)*100:.1f}%)*")
-        block.append(f"SL {tp_sl['sl']:,.0f} ({(tp_sl['sl']/price_now-1)*100:.1f}%)")
+            block.append(f"TP3 {tp_sl['tp3']:,.0f} (+{(tp_sl['tp3']/price_now-1)*100:.1f}% dari now)*")
+        block.append(f"SL {tp_sl['sl']:,.0f} ({(tp_sl['sl']/price_now-1)*100:.1f}% dari now)")
+        block.append(f"Trigger/fading: {trigger:,.0f}")
         lines.append("\n".join(block))
     lines.append(
         "\n· = confirmed Stage-1 tapi belum capai TIER1 (konviksi lebih tinggi) -- tetap valid, "
-        "TP pakai angka dasar.\n*TP3 cuma tampil kalau targetnya genuinely di atas TP2."
+        "TP pakai angka dasar.\n*TP3 cuma tampil kalau targetnya genuinely di atas TP2.\n"
+        "TP1/TP2/TP3/SL dikunci di harga saat pertama terkonfirmasi -- TIDAK berubah lagi sepanjang sesi "
+        "biar tidak jadi target bergerak; \"dari now\" cuma menunjukkan jarak dari harga saat ini."
     )
     return "\n\n".join(lines)
 
