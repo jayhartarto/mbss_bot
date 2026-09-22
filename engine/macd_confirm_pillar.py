@@ -5,11 +5,21 @@ engine/macd_confirm_pillar.py — MBSS v2 (2026-09-22, 3rd swing-trade lane)
 pillar alongside engine/buy_on_weakness.py and engine/vcp_pillar.py. Full
 research trail (10d MACD-centerline consistency baseline, ATR%/liquidity-
 band/std_ret_10d Stage-1 derivation, 3-lane split, D1-D5 magnitude-
-confirmation tiering, dozens of rejected candidate filters) lives in
-memory `project_macd_n10_stage1_locked_final_2026_09_22.md` and the
-sibling files it links (grind/deep-drawdown threads are a DIFFERENT,
-PARKED pillar — do not confuse). Do not re-derive the thresholds below
-without re-reading that trail first.
+confirmation tiering, SL/TP correction, dozens of rejected candidate
+filters) lives in memory `project_macd_n10_stage1_locked_final_2026_09_22.md`
+and `project_macd_confirm_pillar_shipped_2026_09_22.md` (the sibling files
+they link; grind/deep-drawdown threads are a DIFFERENT, PARKED pillar —
+do not confuse). Do not re-derive the thresholds below without re-reading
+that trail first.
+
+IMPORTANT framing, user-corrected 2026-09-22: the D1-D5 tag is an ENTRY-
+TIMING / watchlist signal, NOT a live-position exit-management tool. The
+candidate has NOT been bought yet during D1-D5 -- the trader watches the
+tag develop and only enters (at whatever the market price is when they
+act) if/once conviction looks good; if it shows FADING, they simply don't
+enter, they don't "exit" anything. `entry_ref_price` is the D0/D1 anchor
+price the whole tag ladder and TP/SL math is scaled from, not a claim
+that capital is already deployed.
 
 Entry gate (Stage-1, all features causal, from bars up to and including
 the trigger day):
@@ -53,21 +63,54 @@ tertile edges widen as more days pass):
 Historical OOS win-rate by final (day-5) tag: FADING ~27%, VALID ~64%,
 STRONG ~79%, VERY STRONG ~87% -- monotonic and clean in all 3 lanes.
 
-SL / TP display (informational, see caveat below):
-  - SL shown = entry_ref_price itself (the FADING trigger level, i.e. a
-    breakeven early-warning line) -- per explicit user design choice, NOT
-    the -10% hard stop used to compute the backtest's win/mean/SL-rate
-    metrics above. This is untested as an actual execution rule (the
-    validated result is the DECOMPOSITION "confirmed-positive trades end
-    up winning 74-87% of the time if held to D12", not a backtested
-    "exit at breakeven if fading" policy) -- treat as an early-warning
-    marker for the trader's own judgment, not a proven stop level.
-  - TP shown = entry_ref_price x (1 + t2 of the CURRENT age_day) -- "the
-    price needed to reach VERY STRONG today", a concrete, backtest-
-    grounded milestone, not a fixed exit rule. The validated exit is
-    CLOSE-ONLY at the D12 horizon (every TP-ladder variant tested traded
-    away mean for a higher win-rate illusion) -- do not wire this TP as
-    an actual sell trigger without re-reading the exit-rule research.
+SL / TP1 / TP2 (revised 2026-09-22 after two mistakes were caught and
+fixed -- read this before touching any of the three):
+
+  MISTAKE #1 (caught by user, verified with data, RETRACTED): SL was
+  first set to entry_ref_price itself ("the FADING trigger level").
+  Directly tested what happens if that's enforced as a REAL every-day
+  stop (exit the moment low<=entry on ANY day 1-12): **100% of trades
+  get stopped at exactly 0% return** -- virtually every position dips to
+  its own entry price at some point during a 12-day window from normal
+  volatility, so a breakeven stop ALWAYS fires. Also tested "exit at the
+  Day-5 checkpoint if still fading" (matching the tag decomposition) --
+  that ALSO makes the aggregate population WORSE than doing nothing
+  (win 50.6%->33.8%, median flips negative), because ~19-29% of Day-5-
+  fading trades still recover to a winner by D12 if left alone, and an
+  early cut throws that away. **Conclusion: do not use any tag-derived
+  price as a real stop-execution level. The tag is for the ENTRY
+  decision (enter or don't), never for deciding to exit something
+  already held.**
+
+  FIX: SL = entry_ref_price x (1 - SL_PCT/100), SL_PCT=10.0 -- this is
+  NOT a new number, it's exactly SL_SWING=-10% that every single win/
+  mean/SL-rate statistic in the whole research thread was already
+  computed with. Going back to it is undoing an unvalidated detour, not
+  adding a new untested rule.
+
+  MISTAKE #2 (also corrected): TP was framed as "price needed to reach
+  VERY STRONG today" (a tier-upgrade milestone). Kept as a secondary
+  `next_tier_price()` helper (renamed from the old `tp_price()` /
+  `very_strong_milestone_price()`), but the PRIMARY TP1/TP2 shown to the
+  user are now real historical HIGH-touch-rate targets during the D1-D12
+  hold, same informational style as vcp_pillar.py's TP1/TP2/TP3 (touch-
+  rate, NOT a claim that this is the recommended sell point):
+    VALID:       TP1 +5% (~47-58% touch), TP2 +8%  (~29-41% touch)
+    STRONG:      TP1 +8% (~49-91% touch), TP2 +10% (~37-51% touch)
+    VERY STRONG: TP1 +10% (~90-97% touch), TP2 +15% (~67-90% touch)
+  (ranges reflect real lane-to-lane spread; one flat number per tag is
+  used for simplicity, matching the user's requested message layout).
+  The VALIDATED actual exit remains CLOSE-ONLY at the D12 horizon --
+  every TP-ladder variant tested in research traded away mean for a
+  higher win-rate illusion. TP1/TP2 are reference-only, never wired as
+  an actual sell trigger.
+
+Win-rate display: shown per candidate using the SMALLEST backtest bucket
+that actually matches its current (lane, tag, age_day) combination --
+NOT a single blended number. `WIN_RATE_TABLE[age_day][lane][tag]`, all
+cells sourced from the OOS TEST lane x tag matrices computed same session
+(see memory) at each of age_day 2/3/4/5 (age_day 1 reuses day-2's numbers
+as the closest available granularity -- day 1 itself wasn't matrix-tested).
 
 Horizon: EXPIRED after 12 trading days (matches the backtest's HOLD=12),
 close-based resolution, no laddered TP exit.
@@ -119,6 +162,43 @@ TAG_THRESHOLDS = {
 }
 MAX_TAG_DAY = 5          # tag stops updating after this age
 ALERT_MAX_AGE_DAYS = 12  # matches the backtest's HOLD -- expire at D12 regardless of tag
+
+# --- SL: back to the validated SL_SWING=-10% (see docstring MISTAKE #1) ---
+SL_PCT = 10.0
+
+# --- TP1/TP2: real historical HIGH-touch-rate targets, informational only,
+# see docstring MISTAKE #2. One flat pct per tag (lane-to-lane spread
+# noted in the docstring, simplified here). No TP shown for FADING
+# (no position exists yet -- nothing to target). ---
+TP1_PCT_BY_TAG = {"VALID": 5.0, "STRONG": 8.0, "VERY STRONG": 10.0}
+TP2_PCT_BY_TAG = {"VALID": 8.0, "STRONG": 10.0, "VERY STRONG": 15.0}
+
+# --- Win-rate lookup: WIN_RATE_TABLE[age_day][lane][tag] -> win% (float),
+# sourced from the OOS TEST lane x tag matrices (same research session,
+# see memory project_macd_confirm_pillar_shipped_2026_09_22.md). Day 1
+# reuses day 2's numbers (day 1 itself has no matrix, too little signal
+# by definition -- entry day only). ---
+_WIN_RATE_DAY2 = {
+    "Quality(D2)": {"FADING": 42.0, "VALID": 62.0, "STRONG": 56.0, "VERY STRONG": 70.0},
+    "Core/Neutral": {"FADING": 38.0, "VALID": 57.0, "STRONG": 67.0, "VERY STRONG": 83.0},
+    "HighRisk/Reward": {"FADING": 28.0, "VALID": 53.0, "STRONG": 61.0, "VERY STRONG": 71.0},
+}
+_WIN_RATE_DAY3 = {
+    "Quality(D2)": {"FADING": 36.0, "VALID": 60.0, "STRONG": 70.0, "VERY STRONG": 81.0},
+    "Core/Neutral": {"FADING": 34.0, "VALID": 65.0, "STRONG": 68.0, "VERY STRONG": 89.0},
+    "HighRisk/Reward": {"FADING": 25.0, "VALID": 62.0, "STRONG": 60.0, "VERY STRONG": 79.0},
+}
+_WIN_RATE_DAY4 = {
+    "Quality(D2)": {"FADING": 34.0, "VALID": 52.0, "STRONG": 83.0, "VERY STRONG": 82.0},
+    "Core/Neutral": {"FADING": 31.0, "VALID": 65.0, "STRONG": 74.0, "VERY STRONG": 88.0},
+    "HighRisk/Reward": {"FADING": 21.0, "VALID": 63.0, "STRONG": 65.0, "VERY STRONG": 79.0},
+}
+_WIN_RATE_DAY5 = {
+    "Quality(D2)": {"FADING": 26.0, "VALID": 71.0, "STRONG": 78.0, "VERY STRONG": 83.0},
+    "Core/Neutral": {"FADING": 29.0, "VALID": 64.0, "STRONG": 81.0, "VERY STRONG": 88.0},
+    "HighRisk/Reward": {"FADING": 19.0, "VALID": 62.0, "STRONG": 72.0, "VERY STRONG": 84.0},
+}
+WIN_RATE_TABLE = {1: _WIN_RATE_DAY2, 2: _WIN_RATE_DAY2, 3: _WIN_RATE_DAY3, 4: _WIN_RATE_DAY4, 5: _WIN_RATE_DAY5}
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +314,7 @@ def evaluate_ticker(ticker: str) -> dict | None:
         "lane": lane,
         "age_days": 1,
         "entry_ref_price": entry_ref,
-        "sl_price": entry_ref,  # FADING trigger level = entry_ref itself, already a real
-                                 # traded close price so already tick-valid (no rounding needed,
-                                 # unlike TP below which is a COMPUTED price)
+        "sl_price": scanalert_engine._idx_round_tick_floor(entry_ref * (1 - SL_PCT / 100)),
         "tag": "VALID" if 1 in TAG_THRESHOLDS else "FADING",  # placeholder, resolved tomorrow onward
         "ret_so_far_pct": None,
         "resolved_date": None,
@@ -357,17 +435,45 @@ def format_age_label(pick: dict) -> str:
 
 
 TAG_ICONS = {"FADING": "🔴", "VALID": "🟡", "STRONG": "🟠", "VERY STRONG": "🟢"}
+_NEXT_TAG = {"FADING": "VALID", "VALID": "STRONG", "STRONG": "VERY STRONG"}  # VERY STRONG has no next
 
 
-def very_strong_milestone_price(pick: dict) -> float | None:
-    """NOT a sell target -- see module docstring. This is the price the
-    candidate needs to reach TODAY to be upgraded to VERY STRONG in
-    tonight's tag update (or the day-5, locked milestone once past day
-    5). Rounded UP to the nearest valid IDX tick (same convention as
+def next_tier_price(pick: dict) -> tuple[str, float] | None:
+    """NOT a sell target -- see module docstring MISTAKE #2. Returns
+    (next_tag_name, price) needed to upgrade to the NEXT tag TODAY (e.g.
+    VALID->STRONG uses t1, STRONG->VERY STRONG uses t2), or None if
+    already VERY STRONG (nothing further to show) or tag not yet
+    resolved. Rounded UP to the nearest valid IDX tick (matches
     engine/bsjp2.py's TP rounding) so it doesn't undershoot."""
-    if pick.get("tag") is None:
+    tag = pick.get("tag")
+    if tag is None or tag == "VERY STRONG":
         return None
     day = min(pick.get("age_days", 1), MAX_TAG_DAY)
-    _, t2 = TAG_THRESHOLDS[day]
-    raw = pick["entry_ref_price"] * (1 + t2)
-    return scanalert_engine._idx_round_tick_ceil(raw)
+    t1, t2 = TAG_THRESHOLDS[day]
+    threshold = t1 if tag in ("FADING", "VALID") else t2
+    raw = pick["entry_ref_price"] * (1 + threshold)
+    return _NEXT_TAG[tag], scanalert_engine._idx_round_tick_ceil(raw)
+
+
+def tp_prices(pick: dict) -> tuple[float, float] | None:
+    """TP1/TP2 = real historical HIGH-touch-rate targets for this tag
+    (informational reference, NOT an exit trigger -- see module
+    docstring MISTAKE #2; validated exit is close-only at D12). None for
+    FADING (no position exists yet)."""
+    tag = pick.get("tag")
+    if tag is None or tag == "FADING" or tag not in TP1_PCT_BY_TAG:
+        return None
+    entry = pick["entry_ref_price"]
+    tp1 = scanalert_engine._idx_round_tick_ceil(entry * (1 + TP1_PCT_BY_TAG[tag] / 100))
+    tp2 = scanalert_engine._idx_round_tick_ceil(entry * (1 + TP2_PCT_BY_TAG[tag] / 100))
+    return tp1, tp2
+
+
+def win_rate_of(pick: dict) -> float | None:
+    """Smallest matching backtest bucket for this candidate's CURRENT
+    (age_day, lane, tag) -- not a blended average. See WIN_RATE_TABLE."""
+    tag = pick.get("tag")
+    if tag is None:
+        return None
+    day = min(pick.get("age_days", 1), MAX_TAG_DAY)
+    return WIN_RATE_TABLE.get(day, {}).get(pick["lane"], {}).get(tag)

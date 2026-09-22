@@ -4120,27 +4120,45 @@ async def swing_command(update, context):
         tag = p.get("tag") or "VALID"
         tag_icon = macd_confirm_pillar_engine.TAG_ICONS.get(tag, "")
         age_label = macd_confirm_pillar_engine.format_age_label(p)
-        ret_note = f" ({p['ret_so_far_pct']:+.2f}% vs entry)" if p.get("ret_so_far_pct") is not None else ""
-        milestone = macd_confirm_pillar_engine.very_strong_milestone_price(p)
-        milestone_line = f"Level naik ke 🟢 VERY STRONG: {milestone:,.0f} (BUKAN target jual)\n" if milestone and tag != "VERY STRONG" else ""
+        ret_note = f" ({p['ret_so_far_pct']:+.2f}% vs entry ref)" if p.get("ret_so_far_pct") is not None else ""
+        win_rate = macd_confirm_pillar_engine.win_rate_of(p)
+        win_rate_line = f"Win Rate: ~{win_rate:.0f}%\n" if win_rate is not None else ""
+        upgrade = macd_confirm_pillar_engine.next_tier_price(p)
+        upgrade_line = f"Upgrade to {upgrade[0]}: {upgrade[1]:,.0f}\n" if upgrade else ""
+        tps = macd_confirm_pillar_engine.tp_prices(p)
+        entry_ref = p["entry_ref_price"]
+        if tps:
+            tp1, tp2 = tps
+            tp_lines = (f"TP 1: {tp1:,.0f} ({(tp1/entry_ref-1)*100:+.0f}%)\n"
+                        f"TP 2: {tp2:,.0f} ({(tp2/entry_ref-1)*100:+.0f}%)\n")
+        else:
+            tp_lines = ""
+        sl_pct = (p["sl_price"] / entry_ref - 1) * 100
         lines.append(
-            f"{lane_icon} {p['ticker']} — {p['lane']}\n"
+            f"{lane_icon} {p['ticker']}\n"
             f"{tag_icon} {tag}{ret_note}\n"
+            f"{win_rate_line}"
             f"{age_label}\n"
-            f"Entry ref: {p['entry_ref_price']:,.0f}\n"
-            f"SL (level early-warning fading): {p['sl_price']:,.0f}\n"
-            f"{milestone_line}"
-            f"Horizon: hold s/d D{macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS}, exit close-only (tidak ada TP jual)."
+            f"Entry ref: {entry_ref:,.0f}\n"
+            f"{upgrade_line}"
+            f"{tp_lines}"
+            f"SL: {p['sl_price']:,.0f} ({sl_pct:+.0f}%)\n"
+            f"Horizon: {macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS} hari"
         )
 
+    lines.append(
+        "\n⚠️ MACD-CONFIRM: sinyal D1-D5 untuk PERTIMBANGAN ENTRY (kalau fading, "
+        "jangan entry -- bukan alasan exit posisi yang sudah dibeli). TP1/TP2 "
+        "referensi historical touch-rate, BUKAN sinyal jual -- exit yang "
+        "tervalidasi tetap hold close-only s/d D12. SL -10% WAJIB dipakai "
+        "(sudah divalidasi di semua statistik di atas)."
+    )
     lines.append(
         "\n⚠️ BOW, VCP & MACD-CONFIRM tiga pilar terpisah (JANGAN digabung jadi "
         "satu skor). BOW: winrate tinggi, gain stabil. VCP: TP1 cepat & "
         "reliable, TP2/TP3 upside tapi tail-driven (persentase touch-rate "
         "BUKAN jaminan). MACD-CONFIRM: BARU, langsung produksi tanpa live-track "
         "2 minggu (keputusan eksplisit user, lihat memory) — tag VALID/STRONG/"
-        "VERY STRONG dikunci di Day 5, SL di sini cuma level early-warning "
-        "(harga entry), BUKAN hard stop -10% yang divalidasi backtest. "
-        "SL wajib dipakai, bukan opsional."
+        "VERY STRONG dikunci di Day 5. SL wajib dipakai, bukan opsional."
     )
     await core.safe_reply(update.message, "\n\n".join(lines))

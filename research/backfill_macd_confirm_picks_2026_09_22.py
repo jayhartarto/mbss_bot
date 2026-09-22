@@ -29,6 +29,7 @@ import sys
 sys.path.insert(0, ".")
 import engine.macd_confirm_pillar as pillar
 import engine.legacy_core as core
+import engine.scanalert as scanalert
 
 TICKER_LIST_SOURCE = "research/ohlcv_backtest_raw.csv"
 BACKFILL_WINDOW_DAYS = 8  # look back this many trading days for D0 candidates
@@ -186,7 +187,7 @@ def main():
             "lane": lane,
             "age_days": age_days,
             "entry_ref_price": entry_ref_price,
-            "sl_price": entry_ref_price,
+            "sl_price": scanalert._idx_round_tick_floor(entry_ref_price * (1 - pillar.SL_PCT / 100)),
             "tag": tag,
             "ret_so_far_pct": ret_so_far_pct,
             "resolved_date": None,
