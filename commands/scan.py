@@ -4058,7 +4058,17 @@ async def swing_command(update, context):
     vcp_active.sort(key=lambda p: -p["age_days"])
 
     macd_confirm_picks = macd_confirm_pillar_engine.load_macd_confirm_picks()
-    macd_confirm_active = [p for p in macd_confirm_picks if p.get("status") == "ALIVE"]
+    # FADING picks stay tracked/persisted (nightly resolve keeps re-checking
+    # them) but are hidden from the bot output per user request 2026-09-23 --
+    # a FADING tag means "don't enter today", not "gone forever": if price
+    # recovers on a later day, _tag_of() re-derives the tag fresh from
+    # ret_so_far vs entry_ref_price each night, so it naturally re-appears
+    # here the moment it's no longer FADING. Don't filter in the engine/
+    # persistence layer -- only at display time.
+    macd_confirm_active = [
+        p for p in macd_confirm_picks
+        if p.get("status") == "ALIVE" and p.get("tag") != "FADING"
+    ]
     tag_rank = {"VERY STRONG": 0, "STRONG": 1, "VALID": 2, "FADING": 3}
     macd_confirm_active.sort(key=lambda p: (tag_rank.get(p.get("tag"), 4), -p["age_days"]))
 
