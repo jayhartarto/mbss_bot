@@ -59,6 +59,7 @@ import engine.daytrade_hc_confidence as daytrade_hc_confidence
 import engine.daytrade_2d_screen as daytrade_2d_screen
 import engine.buy_on_weakness as buy_on_weakness_engine
 import engine.vcp_pillar as vcp_pillar_engine
+import engine.macd_confirm_pillar as macd_confirm_pillar_engine
 import engine.bsjp2 as bsjp2_engine
 
 
@@ -4056,15 +4057,21 @@ async def swing_command(update, context):
     vcp_active = [p for p in vcp_picks if p.get("status") == "ALIVE"]
     vcp_active.sort(key=lambda p: -p["age_days"])
 
-    if not bow_active and not vcp_active:
+    macd_confirm_picks = macd_confirm_pillar_engine.load_macd_confirm_picks()
+    macd_confirm_active = [p for p in macd_confirm_picks if p.get("status") == "ALIVE"]
+    tag_rank = {"VERY STRONG": 0, "STRONG": 1, "VALID": 2, "FADING": 3}
+    macd_confirm_active.sort(key=lambda p: (tag_rank.get(p.get("tag"), 4), -p["age_days"]))
+
+    if not bow_active and not vcp_active and not macd_confirm_active:
         await core.safe_reply(
             update.message,
-            "🧭 SWING — belum ada sinyal aktif saat ini (BOW maupun VCP). "
+            "🧭 SWING — belum ada sinyal aktif saat ini (BOW, VCP, maupun MACD-confirm). "
             "Lane ini jalan otomatis tiap malam via /eodscan, cek lagi besok."
         )
         return
 
-    lines = [f"🧭 SWING — {len(bow_active)} BOW + {len(vcp_active)} VCP sinyal aktif"]
+    lines = [f"🧭 SWING — {len(bow_active)} BOW + {len(vcp_active)} VCP + "
+             f"{len(macd_confirm_active)} MACD-confirm sinyal aktif"]
 
     lines.append(f"\n🪶 BUY ON WEAKNESS ({len(bow_active)})")
     if not bow_active:
@@ -4105,10 +4112,35 @@ async def swing_command(update, context):
             f"TP3: {p['tp3_price']:,.0f} (+{vcp_pillar_engine.TP3_PCT:.1f}%, ~{p['tp3_touch_rate']:.0f}% touch-rate){bonus_note}"
         )
 
+    lines.append(f"\n🌀 MACD-CONFIRM ({len(macd_confirm_active)})")
+    if not macd_confirm_active:
+        lines.append("— tidak ada sinyal aktif.")
+    for p in macd_confirm_active:
+        lane_icon = macd_confirm_pillar_engine.LANE_ICONS.get(p["lane"], "")
+        tag = p.get("tag") or "VALID"
+        tag_icon = macd_confirm_pillar_engine.TAG_ICONS.get(tag, "")
+        age_label = macd_confirm_pillar_engine.format_age_label(p)
+        ret_note = f" ({p['ret_so_far_pct']:+.2f}% vs entry)" if p.get("ret_so_far_pct") is not None else ""
+        tp = macd_confirm_pillar_engine.tp_price(p)
+        tp_line = f"TP (target hari ini): {tp:,.0f}\n" if tp else ""
+        lines.append(
+            f"{lane_icon} {p['ticker']} — {p['lane']}\n"
+            f"{tag_icon} {tag}{ret_note}\n"
+            f"{age_label}\n"
+            f"Entry ref: {p['entry_ref_price']:,.0f}\n"
+            f"SL (trigger fading): {p['sl_price']:,.0f}\n"
+            f"{tp_line}"
+            f"Horizon: hold s/d D{macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS} (close-only, TP di atas cuma referensi)."
+        )
+
     lines.append(
-        "\n⚠️ BOW & VCP dua pilar terpisah (overlap 0%, JANGAN digabung jadi "
+        "\n⚠️ BOW, VCP & MACD-CONFIRM tiga pilar terpisah (JANGAN digabung jadi "
         "satu skor). BOW: winrate tinggi, gain stabil. VCP: TP1 cepat & "
         "reliable, TP2/TP3 upside tapi tail-driven (persentase touch-rate "
-        "BUKAN jaminan, lihat catatan riset). SL wajib dipakai, bukan opsional."
+        "BUKAN jaminan). MACD-CONFIRM: BARU, langsung produksi tanpa live-track "
+        "2 minggu (keputusan eksplisit user, lihat memory) — tag VALID/STRONG/"
+        "VERY STRONG dikunci di Day 5, SL di sini cuma level early-warning "
+        "(harga entry), BUKAN hard stop -10% yang divalidasi backtest. "
+        "SL wajib dipakai, bukan opsional."
     )
     await core.safe_reply(update.message, "\n\n".join(lines))

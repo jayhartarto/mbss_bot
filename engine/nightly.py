@@ -62,6 +62,7 @@ import engine.backbone as backbone_engine
 import engine.news_catalyst as news_catalyst_engine
 import engine.buy_on_weakness as buy_on_weakness_engine
 import engine.vcp_pillar as vcp_pillar_engine
+import engine.macd_confirm_pillar as macd_confirm_pillar_engine
 import engine.bsjp2 as bsjp2_engine
 
 
@@ -492,6 +493,24 @@ async def run_nightly_full_scan(context):
             print(f"📐 VCP: {len(vcp_candidates)} kandidat baru hari ini.")
         except Exception as e:
             print(f"⚠️ Gagal menjalankan VCP: {e}")
+
+        # MBSS v2 (user request 2026-09-22 -- MACD-confirm, third swing
+        # pillar): 10d MACD-centerline-consistency grind, confirmed via its
+        # own D1-D5 follow-through magnitude (3 lanes: Quality/Core/
+        # HighRisk, 4 conviction tags: FADING/VALID/STRONG/VERY STRONG).
+        # Went straight to production without the usual 2-week live-track
+        # gate other pillars cleared first -- explicit user decision, see
+        # memory project_macd_n10_stage1_locked_final_2026_09_22.md. Same
+        # reuse-of-`results` pattern as BOW/VCP above.
+        try:
+            macd_confirm_tickers = [r["ticker"] for r in results if r and r.get("ticker")]
+            macd_confirm_candidates = await asyncio.to_thread(
+                macd_confirm_pillar_engine.compute_macd_confirm_candidates, macd_confirm_tickers
+            )
+            macd_confirm_pillar_engine.update_and_save_picks(macd_confirm_candidates)
+            print(f"🌀 MACD-confirm: {len(macd_confirm_candidates)} kandidat baru hari ini.")
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan MACD-confirm: {e}")
 
         trading_night_index = _get_and_increment_trading_night_index()
 
