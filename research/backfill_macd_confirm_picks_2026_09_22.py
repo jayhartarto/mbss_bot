@@ -7,13 +7,14 @@ picks instead of starting from zero.
 
 IMPORTANT: pulls historical OHLCV from the LIVE local DB (same
 engine.legacy_core.get_ohlcv_daily_from_db every other module reads from),
-NOT the static research CSV -- so this script gives a CORRECT backfill as
-of whenever it's actually run (dev laptop today, or the VPS after deploy),
-not a stale snapshot frozen at the research CSV's last date. The ticker
-UNIVERSE list itself is still sourced from research/ohlcv_backtest_raw.csv
-(the same ~645-ticker list used throughout this whole research thread) --
-only the price history comes from the live DB. Uses the identical Stage-1/
-lane/tag logic as engine/macd_confirm_pillar.py (imported directly, not
+NOT a static research CSV -- so this script gives a CORRECT backfill as
+of whenever it's actually run (dev laptop or VPS, any date), not a stale
+snapshot. The ticker UNIVERSE list comes from ticker_whitelist.json's
+`eligible_tickers` (tracked in git, present on every environment) --
+research/ohlcv_backtest_raw.csv is a dev-laptop-only research artifact
+NEVER committed to git and will NOT exist on a fresh VPS checkout, don't
+reintroduce a dependency on it here. Uses the identical Stage-1/lane/tag
+logic as engine/macd_confirm_pillar.py (imported directly, not
 reimplemented) applied to each historical row. Output schema matches
 macd_confirm_pillar.py's pick dicts exactly. Run this ONCE per environment
 right after deploying engine/macd_confirm_pillar.py -- re-running it later
@@ -31,7 +32,7 @@ import engine.macd_confirm_pillar as pillar
 import engine.legacy_core as core
 import engine.scanalert as scanalert
 
-TICKER_LIST_SOURCE = "research/ohlcv_backtest_raw.csv"
+TICKER_LIST_SOURCE = "ticker_whitelist.json"
 BACKFILL_WINDOW_DAYS = 8  # look back this many trading days for D0 candidates
 DB_FETCH_LIMIT = 200      # bars to pull per ticker from the live DB (needs >=60 for MIN_HISTORY + 10d lookback)
 
@@ -118,7 +119,8 @@ def main():
                   f"really want to re-backfill (this will discard real tracked picks).")
             return
 
-    ticker_universe = sorted(pd.read_csv(TICKER_LIST_SOURCE)["ticker"].unique())
+    with open(TICKER_LIST_SOURCE, encoding="utf-8") as f:
+        ticker_universe = sorted(json.load(f)["eligible_tickers"])
     print(f"Loading {len(ticker_universe)} tickers from the LIVE local DB...")
     df = _load_from_live_db(ticker_universe)
     if df.empty:
