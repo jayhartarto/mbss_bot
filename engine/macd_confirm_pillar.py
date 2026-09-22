@@ -82,6 +82,7 @@ import numpy as np
 import pandas as pd
 
 from engine import legacy_core as core
+from engine import scanalert as scanalert_engine  # IDX tick-size rounding (_idx_round_tick*)
 
 # ---------------------------------------------------------------------------
 # Constants (all validated in the research trail referenced above)
@@ -233,7 +234,9 @@ def evaluate_ticker(ticker: str) -> dict | None:
         "lane": lane,
         "age_days": 1,
         "entry_ref_price": entry_ref,
-        "sl_price": entry_ref,  # FADING trigger level, see docstring caveat
+        "sl_price": entry_ref,  # FADING trigger level = entry_ref itself, already a real
+                                 # traded close price so already tick-valid (no rounding needed,
+                                 # unlike TP below which is a COMPUTED price)
         "tag": "VALID" if 1 in TAG_THRESHOLDS else "FADING",  # placeholder, resolved tomorrow onward
         "ret_so_far_pct": None,
         "resolved_date": None,
@@ -356,12 +359,15 @@ def format_age_label(pick: dict) -> str:
 TAG_ICONS = {"FADING": "🔴", "VALID": "🟡", "STRONG": "🟠", "VERY STRONG": "🟢"}
 
 
-def tp_price(pick: dict) -> float | None:
-    """Informational milestone only -- see module docstring caveat.
-    'price needed to reach VERY STRONG at the CURRENT age_day', or the
-    day-5 (locked) milestone once past day 5."""
+def very_strong_milestone_price(pick: dict) -> float | None:
+    """NOT a sell target -- see module docstring. This is the price the
+    candidate needs to reach TODAY to be upgraded to VERY STRONG in
+    tonight's tag update (or the day-5, locked milestone once past day
+    5). Rounded UP to the nearest valid IDX tick (same convention as
+    engine/bsjp2.py's TP rounding) so it doesn't undershoot."""
     if pick.get("tag") is None:
         return None
     day = min(pick.get("age_days", 1), MAX_TAG_DAY)
     _, t2 = TAG_THRESHOLDS[day]
-    return round(pick["entry_ref_price"] * (1 + t2))
+    raw = pick["entry_ref_price"] * (1 + t2)
+    return scanalert_engine._idx_round_tick_ceil(raw)

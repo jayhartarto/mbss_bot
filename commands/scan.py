@@ -4121,16 +4121,16 @@ async def swing_command(update, context):
         tag_icon = macd_confirm_pillar_engine.TAG_ICONS.get(tag, "")
         age_label = macd_confirm_pillar_engine.format_age_label(p)
         ret_note = f" ({p['ret_so_far_pct']:+.2f}% vs entry)" if p.get("ret_so_far_pct") is not None else ""
-        tp = macd_confirm_pillar_engine.tp_price(p)
-        tp_line = f"TP (target hari ini): {tp:,.0f}\n" if tp else ""
+        milestone = macd_confirm_pillar_engine.very_strong_milestone_price(p)
+        milestone_line = f"Level naik ke 🟢 VERY STRONG: {milestone:,.0f} (BUKAN target jual)\n" if milestone and tag != "VERY STRONG" else ""
         lines.append(
             f"{lane_icon} {p['ticker']} — {p['lane']}\n"
             f"{tag_icon} {tag}{ret_note}\n"
             f"{age_label}\n"
             f"Entry ref: {p['entry_ref_price']:,.0f}\n"
-            f"SL (trigger fading): {p['sl_price']:,.0f}\n"
-            f"{tp_line}"
-            f"Horizon: hold s/d D{macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS} (close-only, TP di atas cuma referensi)."
+            f"SL (level early-warning fading): {p['sl_price']:,.0f}\n"
+            f"{milestone_line}"
+            f"Horizon: hold s/d D{macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS}, exit close-only (tidak ada TP jual)."
         )
 
     lines.append(
