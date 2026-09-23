@@ -4065,12 +4065,31 @@ async def swing_command(update, context):
     # ret_so_far vs entry_ref_price each night, so it naturally re-appears
     # here the moment it's no longer FADING. Don't filter in the engine/
     # persistence layer -- only at display time.
+    #
+    # Quality(D2) VERY STRONG also fully hidden, same session -- the D1-D5
+    # TP-formula rework found this exact bucket's win_remain (a fresh entry
+    # TODAY) sits at 21-43% across every day and the chase-risk cutoff
+    # already flags 79-100% of it anyway (see
+    # research/macd_confirm_d1d5_tp_formula_2026_09_23.py /
+    # macd_confirm_d1d5_sl_tp_touch_winrate_2026_09_23.py) -- showing it
+    # with just a warning still surfaced a mostly-bad candidate as "active".
+    # Same re-appear-when-conditions-change treatment as FADING: not
+    # filtered in the persistence layer, tag/lane re-derived fresh nightly.
     macd_confirm_active = [
         p for p in macd_confirm_picks
         if p.get("status") == "ALIVE" and p.get("tag") != "FADING"
+        and not (p.get("lane") == "Quality(D2)" and p.get("tag") == "VERY STRONG")
     ]
-    tag_rank = {"VERY STRONG": 0, "STRONG": 1, "VALID": 2, "FADING": 3}
-    macd_confirm_active.sort(key=lambda p: (tag_rank.get(p.get("tag"), 4), -p["age_days"]))
+    # Sorted by the DYNAMIC win-rate (win_rate_of -- current-price/remaining
+    # basis, keyed by age_day x lane x tag, see engine/macd_confirm_pillar.py
+    # 2026-09-23 REWORK) descending, per user request -- replaces the old
+    # tag-rank-then-age sort now that a real per-candidate win-rate number
+    # exists to sort on directly. None (shouldn't happen for a resolved
+    # ALIVE pick, but defensive) sorts last.
+    macd_confirm_active.sort(
+        key=lambda p: (macd_confirm_pillar_engine.win_rate_of(p) is None,
+                        -(macd_confirm_pillar_engine.win_rate_of(p) or 0))
+    )
 
     if not bow_active and not vcp_active and not macd_confirm_active:
         await core.safe_reply(
@@ -4158,6 +4177,19 @@ async def swing_command(update, context):
             else:
                 tp_lines = ""
         sl_pct = (p["sl_price"] / current_price - 1) * 100
+        # Hard-SL emphasis for HighRisk/Reward VERY STRONG only (user
+        # request 2026-09-23) -- this exact cell has by far the fattest
+        # loss tail in the whole pillar (mean loss among D12-close losers
+        # -16.9% if left unmanaged, vs -3% to -6% everywhere else); a real
+        # -10% stop contains it to ~-9.2% at the cost of ~9pt win-rate --
+        # see engine/macd_confirm_pillar.py's needs_hard_sl_warning().
+        hard_sl_note = (
+            "\n🛑 SL WAJIB DIPATUHI KETAT -10% — tag ini historisnya "
+            "punya rata-rata kerugian jauh lebih dalam (~-17%) kalau SL "
+            "tidak dieksekusi disiplin. Jangan tahan posisi lewat level SL "
+            "berharap recover."
+            if macd_confirm_pillar_engine.needs_hard_sl_warning(p) else ""
+        )
         lines.append(
             f"{lane_icon} {p['ticker']}\n"
             f"{tag_icon} {tag}{ret_note}\n"
@@ -4169,6 +4201,7 @@ async def swing_command(update, context):
             f"SL: {p['sl_price']:,.0f} ({sl_pct:+.0f}% dari harga sekarang)\n"
             f"Horizon: {macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS} hari"
             f"{chase_note}"
+            f"{hard_sl_note}"
         )
 
     lines.append(
