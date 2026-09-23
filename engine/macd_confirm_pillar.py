@@ -314,6 +314,7 @@ def evaluate_ticker(ticker: str) -> dict | None:
         "lane": lane,
         "age_days": 1,
         "entry_ref_price": entry_ref,
+        "current_price": entry_ref,  # updated nightly in _resolve_active_pick
         "sl_price": scanalert_engine._idx_round_tick_floor(entry_ref * (1 - SL_PCT / 100)),
         "tag": "VALID" if 1 in TAG_THRESHOLDS else "FADING",  # placeholder, resolved tomorrow onward
         "ret_so_far_pct": None,
@@ -373,7 +374,15 @@ def _resolve_active_pick(pick: dict) -> dict:
     """Re-check one still-ALIVE pick against fresh OHLCV: bump age, compute
     ret_so_far vs entry_ref_price, re-derive tag (locked after age_day 5),
     expire at ALERT_MAX_AGE_DAYS regardless of tag (matches the backtest's
-    close-only-at-D12 exit -- no TP is ever wired as an actual trigger)."""
+    close-only-at-D12 exit -- no TP is ever wired as an actual trigger).
+
+    Also refreshes `current_price` and `sl_price` off TODAY's close (user
+    correction 2026-09-23: don't assume the trader already entered at
+    entry_ref_price -- SL/TP shown to the user must be computed from the
+    price they'd actually pay if they entered NOW, not the stale D0/D1
+    anchor. `entry_ref_price` and `ret_so_far_pct`/`tag` stay anchored to
+    the original signal day -- that's the research-validated basis for the
+    conviction tag itself, only the execution levels (SL/TP1/TP2) move."""
     df = core.get_ohlcv_daily_from_db(pick["ticker"], limit=150)
     feats = _compute_latest_features(df)
     if feats is None:
@@ -388,6 +397,9 @@ def _resolve_active_pick(pick: dict) -> dict:
     ret_so_far = (feats["close"] - entry_ref) / entry_ref
     pick["ret_so_far_pct"] = round(ret_so_far * 100, 2)
     pick["tag"] = _tag_of(ret_so_far, pick["age_days"])
+
+    pick["current_price"] = feats["close"]
+    pick["sl_price"] = scanalert_engine._idx_round_tick_floor(feats["close"] * (1 - SL_PCT / 100))
 
     if pick["age_days"] > ALERT_MAX_AGE_DAYS:
         pick["status"] = "EXPIRED"
@@ -456,17 +468,37 @@ def next_tier_price(pick: dict) -> tuple[str, float] | None:
 
 
 def tp_prices(pick: dict) -> tuple[float, float] | None:
-    """TP1/TP2 = real historical HIGH-touch-rate targets for this tag
-    (informational reference, NOT an exit trigger -- see module
-    docstring MISTAKE #2; validated exit is close-only at D12). None for
-    FADING (no position exists yet)."""
+    """TP1/TP2 = real historical HIGH-touch-rate targets for this tag,
+    computed from CURRENT price (user correction 2026-09-23 -- not
+    entry_ref_price; nothing has been bought yet, so the % must be
+    reachable from where the trader would actually enter today).
+    Informational reference, NOT an exit trigger -- see module docstring
+    MISTAKE #2; validated exit is close-only at D12. None for FADING (no
+    position exists yet)."""
     tag = pick.get("tag")
     if tag is None or tag == "FADING" or tag not in TP1_PCT_BY_TAG:
         return None
-    entry = pick["entry_ref_price"]
-    tp1 = scanalert_engine._idx_round_tick_ceil(entry * (1 + TP1_PCT_BY_TAG[tag] / 100))
-    tp2 = scanalert_engine._idx_round_tick_ceil(entry * (1 + TP2_PCT_BY_TAG[tag] / 100))
+    current = pick.get("current_price", pick["entry_ref_price"])
+    tp1 = scanalert_engine._idx_round_tick_ceil(current * (1 + TP1_PCT_BY_TAG[tag] / 100))
+    tp2 = scanalert_engine._idx_round_tick_ceil(current * (1 + TP2_PCT_BY_TAG[tag] / 100))
     return tp1, tp2
+
+
+def is_chasing_too_high(pick: dict) -> bool:
+    """No-chasing guardrail (user request 2026-09-23): if price has
+    already run further from entry_ref_price than this tag's OWN TP2
+    touch-rate target (see TP2_PCT_BY_TAG -- reusing the already-
+    validated ceiling rather than inventing a new number), a fresh entry
+    TODAY is chasing a move that's statistically already past its typical
+    upside for this tag, not catching it early. FADING/None tag -> False
+    (irrelevant, already hidden from display elsewhere)."""
+    tag = pick.get("tag")
+    if tag is None or tag == "FADING" or tag not in TP2_PCT_BY_TAG:
+        return False
+    ret_so_far = pick.get("ret_so_far_pct")
+    if ret_so_far is None:
+        return False
+    return ret_so_far > TP2_PCT_BY_TAG[tag]
 
 
 def win_rate_of(pick: dict) -> float | None:

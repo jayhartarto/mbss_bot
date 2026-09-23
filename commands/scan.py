@@ -4135,25 +4135,40 @@ async def swing_command(update, context):
         win_rate_line = f"Win Rate: ~{win_rate:.0f}%\n" if win_rate is not None else ""
         upgrade = macd_confirm_pillar_engine.next_tier_price(p)
         upgrade_line = f"Upgrade to {upgrade[0]}: {upgrade[1]:,.0f}\n" if upgrade else ""
-        tps = macd_confirm_pillar_engine.tp_prices(p)
         entry_ref = p["entry_ref_price"]
-        if tps:
-            tp1, tp2 = tps
-            tp_lines = (f"TP 1: {tp1:,.0f} ({(tp1/entry_ref-1)*100:+.0f}%)\n"
-                        f"TP 2: {tp2:,.0f} ({(tp2/entry_ref-1)*100:+.0f}%)\n")
-        else:
+        current_price = p.get("current_price", entry_ref)
+        # SL/TP are computed off CURRENT price, not entry_ref -- nothing has
+        # actually been bought yet, so % must be reachable from where the
+        # trader would enter today (user correction 2026-09-23).
+        if macd_confirm_pillar_engine.is_chasing_too_high(p):
+            chase_note = (
+                f"\n⛔ JANGAN DIKEJAR — harga sudah naik "
+                f"{p['ret_so_far_pct']:+.1f}% dari entry ref, sudah lewat TP2 "
+                f"historis untuk tag {tag} ini. Tunggu pullback/konfirmasi "
+                f"baru, bukan entry di harga sekarang."
+            )
             tp_lines = ""
-        sl_pct = (p["sl_price"] / entry_ref - 1) * 100
+        else:
+            chase_note = ""
+            tps = macd_confirm_pillar_engine.tp_prices(p)
+            if tps:
+                tp1, tp2 = tps
+                tp_lines = (f"TP 1: {tp1:,.0f} ({(tp1/current_price-1)*100:+.0f}% dari harga sekarang)\n"
+                            f"TP 2: {tp2:,.0f} ({(tp2/current_price-1)*100:+.0f}% dari harga sekarang)\n")
+            else:
+                tp_lines = ""
+        sl_pct = (p["sl_price"] / current_price - 1) * 100
         lines.append(
             f"{lane_icon} {p['ticker']}\n"
             f"{tag_icon} {tag}{ret_note}\n"
             f"{win_rate_line}"
             f"{age_label}\n"
-            f"Entry ref: {entry_ref:,.0f}\n"
+            f"Entry ref: {entry_ref:,.0f} | Harga sekarang: {current_price:,.0f}\n"
             f"{upgrade_line}"
             f"{tp_lines}"
-            f"SL: {p['sl_price']:,.0f} ({sl_pct:+.0f}%)\n"
+            f"SL: {p['sl_price']:,.0f} ({sl_pct:+.0f}% dari harga sekarang)\n"
             f"Horizon: {macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS} hari"
+            f"{chase_note}"
         )
 
     lines.append(
