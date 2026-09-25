@@ -485,6 +485,12 @@ async def run_bsjp2_intraday_tick() -> dict:
         t_state["fading"] = bool(ret_2d_cum_live is not None and ret_2d_cum_live < STAGE1_RET2D_MIN_PCT)
         t_state["price_now"] = price_now
         t_state["ret_2d_cum_live"] = ret_2d_cum_live
+        # high_so_far from yfinance's partial-day bar is already the session's
+        # cumulative high as of this tick (not a per-tick delta) -- track it
+        # so the render step can tell "already spiked and given back" apart
+        # from "still climbing" (user request 2026-09-25).
+        if bar.get("high_so_far") is not None:
+            t_state["high_so_far"] = max(t_state.get("high_so_far") or 0.0, bar["high_so_far"])
 
         # BUGFIX (user report 2026-09-21): TP1/TP2/TP3 used to be recomputed
         # from the live, constantly-moving `price_now` on EVERY tick -- this
@@ -579,14 +585,21 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
     import engine.scanalert as scanalert_engine
     now_wib = datetime.datetime.now(core_engine.WIB)
     lines = [f"🔥 BSJP LIVE — status D+1 (update {now_wib.strftime('%H:%M:%S')} WIB)\n"]
+    any_hidden_fading = False
     for ticker, c, t_state in active:
         price_now = t_state.get("price_now")
         trigger = scanalert_engine._idx_round_tick_ceil(c["prev_close"] * (1 + STAGE1_RET2D_MIN_PCT / 100.0))
         if price_now is None:
             lines.append(f"{ticker} — belum ada data live siklus ini")
             continue
+        # FADING is hidden from display (user request 2026-09-25, same
+        # convention as MACD-confirm/swing, commit c51b57a): it means "don't
+        # enter today", not "gone" -- still tracked in live_state every tick
+        # (t_state["fading"] above), so a recovery re-appears automatically
+        # without extra logic. Don't filter in the tracking loop itself, only
+        # here at display time.
         if t_state.get("fading"):
-            lines.append(f"{ticker} Now {price_now:,.0f} (di bawah trigger/fading {trigger:,.0f}) -> Status: FADING, tinggalkan")
+            any_hidden_fading = True
             continue
         rocket = t_state.get("rocket")
         rocket = rocket if rocket and rocket != "none" else None
@@ -604,19 +617,49 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
         # BB-upper leg once tonight's full close is available.
         tp_sl = _dynamic_tp_sl(tp_tier, entry_price, trigger, c.get("swing_high_60d_prior"), None)
         block = [f"{ticker} Now {price_now:,.0f} (entry {entry_price:,.0f}) | {display_tag}"]
-        block.append(f"TP1 {tp_sl['tp1']:,.0f} (+{(tp_sl['tp1']/price_now-1)*100:.1f}% dari now)")
-        block.append(f"TP2 {tp_sl['tp2']:,.0f} (+{(tp_sl['tp2']/price_now-1)*100:.1f}% dari now)")
-        if tp_sl["tp3"] is not None:
-            block.append(f"TP3 {tp_sl['tp3']:,.0f} (+{(tp_sl['tp3']/price_now-1)*100:.1f}% dari now)*")
+        # No-chasing guard (user request 2026-09-25, same logic already
+        # validated/shipped for MACD-confirm: project_macd_confirm_sltp_
+        # currentprice_and_nochase_2026_09_23). Once the live price has
+        # already run past TP2 (the higher of the two calibrated targets),
+        # buying now has objectively less room left to that same historical
+        # ceiling than the tier's own backtest assumed -- not a claim the
+        # stock is bad, just that today's price is no longer a fresh entry.
+        if price_now > tp_sl["tp2"]:
+            block.append(
+                f"⛔ JANGAN DIKEJAR — harga sudah lewat TP2 ({tp_sl['tp2']:,.0f}), "
+                "entry baru di sini sudah kehilangan sebagian besar target yang dihitung"
+            )
+        else:
+            block.append(f"TP1 {tp_sl['tp1']:,.0f} (+{(tp_sl['tp1']/price_now-1)*100:.1f}% dari now)")
+            block.append(f"TP2 {tp_sl['tp2']:,.0f} (+{(tp_sl['tp2']/price_now-1)*100:.1f}% dari now)")
+            if tp_sl["tp3"] is not None:
+                block.append(f"TP3 {tp_sl['tp3']:,.0f} (+{(tp_sl['tp3']/price_now-1)*100:.1f}% dari now)*")
         block.append(f"SL {tp_sl['sl']:,.0f} ({(tp_sl['sl']/price_now-1)*100:.1f}% dari now)")
         block.append(f"Trigger/fading: {trigger:,.0f}")
+        # Same-day spike-then-giveback note (user request 2026-09-25):
+        # informational only, NOT a validated filter -- available cached BSJP
+        # backtests (research/.tmp_bsjp_stage2_daybyday.parquet) only track
+        # TP touches from D2 onward, so whether "touched TP intraday on the
+        # entry day itself, then retraced back near entry" predicts worse
+        # forward outcome hasn't actually been tested. Surface it for the
+        # user's own judgment rather than silently hiding or silently
+        # ignoring it.
+        high_so_far = t_state.get("high_so_far")
+        if high_so_far is not None and high_so_far >= tp_sl["tp1"] and price_now <= entry_price * 1.01:
+            block.append(
+                f"⚠️ Sempat sentuh TP1/TP2 intraday (high {high_so_far:,.0f}) tapi sudah retrace "
+                "ke dekat entry -- pola ini belum divalidasi backtest, pertimbangkan risikonya sendiri"
+            )
         lines.append("\n".join(block))
-    lines.append(
+    footer = [
         "\n· = confirmed Stage-1 tapi belum capai TIER1 (konviksi lebih tinggi) -- tetap valid, "
         "TP pakai angka dasar.\n*TP3 cuma tampil kalau targetnya genuinely di atas TP2.\n"
         "TP1/TP2/TP3/SL dikunci di harga saat pertama terkonfirmasi -- TIDAK berubah lagi sepanjang sesi "
         "biar tidak jadi target bergerak; \"dari now\" cuma menunjukkan jarak dari harga saat ini."
-    )
+    ]
+    if any_hidden_fading:
+        footer.append("(Ada kandidat FADING yang disembunyikan dari tampilan -- tetap dipantau, akan muncul lagi kalau recover.)")
+    lines.append("\n".join(footer))
     return "\n\n".join(lines)
 
 
