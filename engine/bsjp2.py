@@ -118,6 +118,30 @@ DYNAMIC_TP_TABLE = {
     "ROCKET_PLUS": (3.68, 9.91),
 }
 
+# Spike-then-faded D1 candle (backtest-validated 2026-09-25, see memory
+# project_bsjp_d1_spike_fade_quality_downgrade_2026_09_25.md and
+# research/bsjp_d1_wick_quality_2026_09_25.py +
+# research/bsjp_d1_wick_by_tier_2026_09_25.py, n=4013 Stage-1 REVISED
+# population, tier classification via _assign_conviction_tier below):
+# a D1 candle whose own high ran well above its own close, AND closed in the
+# bottom half of its own day range, degrades forward D2-D4 quality EVEN
+# WITHIN the same conviction tier -- worst inside TIER_EXTREME (win
+# 53.6%->39.5%, median +0.94%->-1.92%, tail MAE<-8% 17.8%->29.4%), same
+# direction in STAGE1_BASE (win 46.0%->36.4%, median 0.00%->-1.47%). Treated
+# the same as an ordinary FADING pick: tagged fading, dropped/hidden.
+SPIKE_FADE_UPPER_WICK_MIN_PCT = 5.0   # D1 high at least this % above D1 close
+SPIKE_FADE_CLOSE_POSITION_MAX = 0.5   # D1 close in the bottom half of its own day range
+
+
+def _is_spike_fade_candle(day_high, day_low, day_close) -> bool:
+    if day_high is None or day_low is None or day_close is None or day_close <= 0:
+        return False
+    upper_wick_pct = (day_high - day_close) / day_close * 100.0
+    day_range = day_high - day_low
+    close_position = (day_close - day_low) / day_range if day_range > 0 else 0.5
+    return upper_wick_pct >= SPIKE_FADE_UPPER_WICK_MIN_PCT and close_position < SPIKE_FADE_CLOSE_POSITION_MAX
+
+
 # Fire-icon display (memory "Tracking-message design decision": user
 # collapsed the ladder to 3 states -- TIER2/TIER3 (the ATR-floor ladder)
 # both display as "2 api", TIER-EXTREME alone is "3 api". STAGE1_BASE (Stage-1
@@ -197,6 +221,8 @@ def compute_bsjp2_features(hist: pd.DataFrame) -> dict | None:
     opens = hist["Open"] if "Open" in hist.columns else None
 
     today_close = float(closes.iloc[-1])
+    today_high = float(highs.iloc[-1])
+    today_low = float(lows.iloc[-1])
     prior_close = float(closes.iloc[-2])  # close_(D0-1) -- the trigger/fading anchor
     if prior_close <= 0 or today_close <= 0:
         return None
@@ -279,6 +305,8 @@ def compute_bsjp2_features(hist: pd.DataFrame) -> dict | None:
         "bsjp2_pct_b_prior": round(pct_b_prior, 4) if pct_b_prior is not None else None,
         "bsjp2_rsi14": round(rsi14_today, 1) if rsi14_today is not None else None,
         "bsjp2_close": today_close,
+        "bsjp2_high": today_high,
+        "bsjp2_low": today_low,
         "bsjp2_prev_close": prior_close,
         "bsjp2_bb_upper": round(bb_upper_today, 2) if bb_upper_today is not None else None,
         "bsjp2_swing_high_60d_prior": round(swing_high_60d_prior, 2) if swing_high_60d_prior is not None else None,
@@ -418,6 +446,7 @@ def _fetch_bsjp2_live_bar(tickers: list[str]) -> dict:
                 "current_price": float(row["Close"]),
                 "open_so_far": float(row["Open"]) if pd.notna(row["Open"]) else None,
                 "high_so_far": float(row["High"]) if pd.notna(row["High"]) else None,
+                "low_so_far": float(row["Low"]) if pd.notna(row["Low"]) else None,
             }
         if i + _BSJP2_FETCH_BATCH < len(tickers):
             time.sleep(0.5)
@@ -482,15 +511,30 @@ async def run_bsjp2_intraday_tick() -> dict:
             gap_opening = (bar["open_so_far"] - c["close_d0"]) / c["close_d0"] * 100.0
             t_state["rocket"] = _rocket_tag(gap_opening, c.get("atr_pct_prior"), c.get("rsi14_d0")) or "none"
 
-        t_state["fading"] = bool(ret_2d_cum_live is not None and ret_2d_cum_live < STAGE1_RET2D_MIN_PCT)
-        t_state["price_now"] = price_now
-        t_state["ret_2d_cum_live"] = ret_2d_cum_live
-        # high_so_far from yfinance's partial-day bar is already the session's
-        # cumulative high as of this tick (not a per-tick delta) -- track it
-        # so the render step can tell "already spiked and given back" apart
-        # from "still climbing" (user request 2026-09-25).
+        # high_so_far/low_so_far from yfinance's partial-day bar are already
+        # the session's cumulative extremes as of this tick (not a per-tick
+        # delta) -- track the running max/min across ticks.
         if bar.get("high_so_far") is not None:
             t_state["high_so_far"] = max(t_state.get("high_so_far") or 0.0, bar["high_so_far"])
+        if bar.get("low_so_far") is not None:
+            prev_low = t_state.get("low_so_far")
+            t_state["low_so_far"] = bar["low_so_far"] if prev_low is None else min(prev_low, bar["low_so_far"])
+
+        # Spike-then-faded guard (backtest-validated, see SPIKE_FADE_* above):
+        # treated the same as ordinary Stage-1 FADING -- tagged fading and
+        # hidden by _render_bsjp2_intraday_message. Uses price_now as the
+        # best available live proxy for D1's eventual close (same convention
+        # already used for entry_price_locked below) -- re-evaluated fresh
+        # every tick, so it un-flags automatically if price recovers later
+        # in the session, same self-correcting behavior as the ret_2d_cum
+        # fading check.
+        spike_fade_live = _is_spike_fade_candle(t_state.get("high_so_far"), t_state.get("low_so_far"), price_now)
+
+        t_state["fading"] = bool(
+            (ret_2d_cum_live is not None and ret_2d_cum_live < STAGE1_RET2D_MIN_PCT) or spike_fade_live
+        )
+        t_state["price_now"] = price_now
+        t_state["ret_2d_cum_live"] = ret_2d_cum_live
 
         # BUGFIX (user report 2026-09-21): TP1/TP2/TP3 used to be recomputed
         # from the live, constantly-moving `price_now` on EVERY tick -- this
@@ -636,20 +680,6 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
                 block.append(f"TP3 {tp_sl['tp3']:,.0f} (+{(tp_sl['tp3']/price_now-1)*100:.1f}% dari now)*")
         block.append(f"SL {tp_sl['sl']:,.0f} ({(tp_sl['sl']/price_now-1)*100:.1f}% dari now)")
         block.append(f"Trigger/fading: {trigger:,.0f}")
-        # Same-day spike-then-giveback note (user request 2026-09-25):
-        # informational only, NOT a validated filter -- available cached BSJP
-        # backtests (research/.tmp_bsjp_stage2_daybyday.parquet) only track
-        # TP touches from D2 onward, so whether "touched TP intraday on the
-        # entry day itself, then retraced back near entry" predicts worse
-        # forward outcome hasn't actually been tested. Surface it for the
-        # user's own judgment rather than silently hiding or silently
-        # ignoring it.
-        high_so_far = t_state.get("high_so_far")
-        if high_so_far is not None and high_so_far >= tp_sl["tp1"] and price_now <= entry_price * 1.01:
-            block.append(
-                f"⚠️ Sempat sentuh TP1/TP2 intraday (high {high_so_far:,.0f}) tapi sudah retrace "
-                "ke dekat entry -- pola ini belum divalidasi backtest, pertimbangkan risikonya sendiri"
-            )
         lines.append("\n".join(block))
     footer = [
         "\n· = confirmed Stage-1 tapi belum capai TIER1 (konviksi lebih tinggi) -- tetap valid, "
@@ -658,7 +688,11 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
         "biar tidak jadi target bergerak; \"dari now\" cuma menunjukkan jarak dari harga saat ini."
     ]
     if any_hidden_fading:
-        footer.append("(Ada kandidat FADING yang disembunyikan dari tampilan -- tetap dipantau, akan muncul lagi kalau recover.)")
+        footer.append(
+            "(Ada kandidat FADING (termasuk yang kena pola spike-lalu-fade: high jauh di atas "
+            "close & closing di separuh bawah range hari itu) yang disembunyikan dari tampilan -- "
+            "tetap dipantau, akan muncul lagi kalau recover.)"
+        )
     lines.append("\n".join(footer))
     return "\n\n".join(lines)
 
@@ -696,6 +730,8 @@ def finalize_bsjp2_confirmations(results: dict) -> list[dict]:
         ret_2d_cum = (close_d1 - prev_close) / prev_close * 100.0
         if ret_2d_cum < STAGE1_RET2D_MIN_PCT:
             continue  # never confirmed -- faded, drop silently (state file gets replaced by tomorrow's watchlist anyway)
+        if _is_spike_fade_candle(r.get("bsjp2_high"), r.get("bsjp2_low"), close_d1):
+            continue  # spike-then-faded D1 candle -- backtest-validated quality downgrade, treated as fading (drop silently)
 
         atr_prior = c.get("atr_pct_prior")
         pct_b_prior = c.get("pct_b_prior")
