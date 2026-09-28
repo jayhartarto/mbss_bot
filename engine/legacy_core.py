@@ -2772,7 +2772,8 @@ def estimate_tp_horizon(scoring: dict) -> dict:
 def compute_daytrade_score(scoring: dict) -> float:
     """
     Ranking khusus untuk /screendaytrade — BEDA dari final_score brief pagi
-    (Value 25% + Momentum 45% + Sentiment 30%). Untuk kebutuhan "saham mana yang
+    (Fundamental/Momentum/Sentiment 29.1%/39.0%/31.9%, lihat engine/scoring.py
+    VALUE_SCORE_WEIGHT dkk). Untuk kebutuhan "saham mana yang
     lagi bergerak SEKARANG", value/fundamental kurang relevan; yang penting
     aktivitas/momentum saat ini. Tidak memakai brokersum sama sekali (data EOD
     1 hari lag, tidak cocok untuk horizon day trade jam-menit).
@@ -7873,6 +7874,7 @@ def build_app():
     # used to be defined here as NESTED closures (pre-existing inconsistency,
     # not introduced by this refactor) — moved to commands/misc.py as
     # ordinary top-level functions, behavior unchanged.
+    app.add_handler(CommandHandler(["dividen", "dividend"], commands_misc.dividend_calendar_command))
     app.add_handler(CommandHandler("dbstats", commands_misc.db_stats_command))
     app.add_handler(CommandHandler("dbstatus", commands_misc.db_stats_command))
     app.add_handler(CommandHandler("populatedb", commands_misc.populate_db_command))

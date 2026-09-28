@@ -60,6 +60,9 @@ import engine.scoring as scoring_engine
 import engine.broker as broker_engine
 import engine.backbone as backbone_engine
 import engine.news_catalyst as news_catalyst_engine
+import engine.news_sentiment as news_sentiment_engine
+import engine.dividend_calendar as dividend_calendar_engine
+import engine.fundamental_health as fundamental_health_engine
 import engine.buy_on_weakness as buy_on_weakness_engine
 import engine.vcp_pillar as vcp_pillar_engine
 import engine.macd_confirm_pillar as macd_confirm_pillar_engine
@@ -445,6 +448,11 @@ async def run_nightly_full_scan(context):
         #     and computes the dynamic TP1/TP2/TP3+SL recommendation that
         #     `/bsjp tp` reads. Order matters: finalize reads yesterday's
         #     watchlist file BEFORE build overwrites it with tonight's.
+        # Default list kosong (bukan cuma di dalam try) -- apply_momentum_
+        # pillar_boosts di bawah butuh keempat variabel ini SELALU ter-
+        # definisi walau salah satu step di bawah gagal (soft-fail parsial,
+        # bukan all-or-nothing utk momentum-adjustment step).
+        bsjp2_confirmed, bow_candidates, vcp_candidates, macd_confirm_candidates = [], [], [], []
         try:
             results_by_ticker = {r["ticker"]: r for r in results if r and r.get("ticker")}
             bsjp2_confirmed = bsjp2_engine.finalize_bsjp2_confirmations(results_by_ticker)
@@ -511,6 +519,28 @@ async def run_nightly_full_scan(context):
             print(f"🌀 MACD-confirm: {len(macd_confirm_candidates)} kandidat baru hari ini.")
         except Exception as e:
             print(f"⚠️ Gagal menjalankan MACD-confirm: {e}")
+
+        # Momentum score redesign 2026-09-27/28 -- HARUS di sini, SETELAH
+        # keempat pilar di atas selesai (lihat docstring apply_momentum_
+        # pillar_boosts utk alasan lengkap kenapa post-hoc). soft-fail spt
+        # step lain -- gagal di sini TIDAK boleh gagalkan seluruh /eodscan,
+        # momentum_score mentah (belum distandarisasi/pillar-adjusted)
+        # tetap ada di results kalau step ini error.
+        try:
+            apply_momentum_pillar_boosts(
+                results, bsjp2_confirmed, bow_candidates, vcp_candidates, macd_confirm_candidates,
+            )
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan momentum pillar-adjustment: {e}")
+
+        # Sentiment regime redesign 2026-09-28 -- lihat docstring
+        # apply_sentiment_regime_boost. Independen dari momentum-adjustment
+        # di atas (komponen skor beda), tapi ditaruh berurutan di sini krn
+        # sama2 post-hoc setelah seluruh universe selesai di-score.
+        try:
+            apply_sentiment_regime_boost(results)
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan sentiment regime-adjustment: {e}")
 
         trading_night_index = _get_and_increment_trading_night_index()
 
@@ -616,6 +646,16 @@ async def run_nightly_full_scan(context):
             save_rapidapi_market_intelligence(merged_market_intel)
         except Exception as e:
             print(f"⚠️ Gagal membangun RapidAPI market intelligence sweep: {e}")
+
+        try:
+            await asyncio.to_thread(dividend_calendar_engine.refresh_if_stale)
+        except Exception as e:
+            print(f"⚠️ Gagal refresh kalender dividen: {e}")
+
+        try:
+            await asyncio.to_thread(fundamental_health_engine.refresh_if_stale)
+        except Exception as e:
+            print(f"⚠️ Gagal refresh fundamental health: {e}")
 
         # Whitelist accumulation/distribution adjustment (MBSS v2, RapidAPI
         # integration, "diskusi trader" session) — folds the whitelist
@@ -768,6 +808,16 @@ async def run_nightly_full_scan(context):
         except Exception as e:
             print(f"⚠️ Gagal scan news catalyst: {e}")
 
+        # MBSS v2 (user request 2026-09-27, redesign Sentiment score): sentimen
+        # umum positif/negatif per headline (bukan cuma kategori M&A spt di
+        # atas) -- SAMA keterbatasan RSS (tidak ada arsip historis), jadi CUMA
+        # log tiap malam, BELUM masuk formula skor manapun sampai n cukup utk
+        # divalidasi (lihat engine/news_sentiment.py).
+        try:
+            await asyncio.to_thread(news_sentiment_engine.scan_news_sentiment, results)
+        except Exception as e:
+            print(f"⚠️ Gagal scan news sentiment: {e}")
+
         # BUGFIX (ditemukan lewat pengamatan user — SOHO "Top" berturut-turut
         # dengan skor cuma 4.0, tidak istimewa): results TIDAK PERNAH di-sort
         # sebelum ini, jadi "Top" sebelumnya cuma ticker PERTAMA yang diproses
@@ -860,6 +910,167 @@ async def run_nightly_full_scan(context):
 # ticker-scoped sentiment shortlist for the one signal (retail-vs-bandar
 # divergence) nothing else in this file provides.
 # ==========================================
+
+
+# Momentum score redesign 2026-09-27/28 -- bonus per tier, dari win-rate/
+# statistik riset masing2 pilar (lihat memory project_momentum_score_
+# redesign_2026_09_27). BSJP tier terluas (Stage1-only) bonus kecil, makin
+# ketat gate-nya makin besar bonusnya -- TIER_EXTREME tertinggi di antara
+# tier BSJP krn edge historisnya paling kuat DI ANTARA tier (bukan klaim
+# unconditional, ini relatif ke tier lain). Spike-fade candle SUDAH di-
+# exclude total dari bsjp2_confirmed sendiri (lihat finalize_bsjp2_
+# confirmations, drop silently) -- TIDAK perlu malus tambahan di sini,
+# exclusion-nya sendiri sudah setara "tidak dapat bonus BSJP sama sekali".
+BSJP_TIER_MOMENTUM_BONUS = {
+    "STAGE1_BASE": 1.0, "TIER1": 1.5, "TIER2": 2.0, "TIER3": 2.0,
+    "TIER_EXTREME": 2.5, "ROCKET": 1.5, "ROCKET_PLUS": 1.5,
+}
+# BOW: win-rate ASLI per tier (Tier1 94.5%/SL5.5%, Tier2 89.0%, Tier3 89.2%)
+# -- edge terkuat semua pilar yg diuji sesi ini, bonus tertinggi.
+BOW_TIER_MOMENTUM_BONUS = {"TIER1": 3.0, "TIER2": 2.5, "TIER3": 2.3}
+# VCP: TP1 touch 72.4%, tapi lebih "lumpy"/right-tail drpd BOW -- dikalibrasi
+# sedikit di bawah BOW tier2/3 meski touch-rate mentahnya mirip.
+VCP_PASS_MOMENTUM_BONUS = 2.2
+# MACD-confirm: chase-risk (Quality D2 + VERY STRONG) win_remain jatuh ke
+# 21-43% -- malus keras, override bonus lane/tag apa pun utk cell ini.
+MACD_CHASE_MOMENTUM_MALUS = -3.5
+MOMENTUM_TARGET_MEAN = 5.5  # menyamai mean empiris Fundamental Health (~5.9)
+MOMENTUM_TARGET_STD = 1.1   # menyamai std empiris Fundamental Health (~1.07)
+
+
+def apply_momentum_pillar_boosts(
+    results: list, bsjp2_confirmed: list, bow_candidates: list,
+    vcp_candidates: list, macd_confirm_candidates: list,
+) -> int:
+    """
+    Post-hoc pass, dipanggil SETELAH keempat pilar (BSJP/BOW/VCP/MACD-confirm)
+    selesai dihitung di run_nightly_full_scan -- HARUS post-hoc krn dua alasan:
+    (1) standardisasi ATR-based momentum_score MENTAH butuh distribusi
+        SELURUH populasi malam ini (mean/std lintas-populasi, bukan per-
+        ticker) -- riset 2026-09-27 ukur nyata std mentah 2.76 vs Fundamental
+        Health 1.07, tanpa standardisasi ini Momentum (bobot 45%) akan
+        mendominasi variasi final_score jauh melebihi bobot nominalnya.
+    (2) bonus/malus pilar baru bisa ditempel setelah keempat pilar itu
+        sendiri selesai dihitung (compute_factor_scoring, tempatnya
+        momentum_score MENTAH dihitung, jalan DULUAN di pipeline sebelum
+        pilar-pilar ini -- lihat komentar di scoring.py's blok MOMENTUM
+        SCORE utk detail).
+    Kalau >1 pilar nyala bareng, ambil bonus TERBESAR (bukan dijumlah, biar
+    tidak menggelembung tidak wajar) -- malus (chase-risk) SELALU diterapkan
+    penuh di atas itu, krn itu red flag nyata bukan sekadar absennya sinyal.
+    Return jumlah ticker yg benar2 dpt penyesuaian (delta != 0 atau ada flag).
+    """
+    valid = [r for r in results if r and not r.get("excluded") and r.get("scores", {}).get("momentum") is not None]
+    if not valid:
+        return 0
+    raw_scores = [r["scores"]["momentum"] for r in valid]
+    pop_mean = sum(raw_scores) / len(raw_scores)
+    variance = sum((s - pop_mean) ** 2 for s in raw_scores) / len(raw_scores)
+    pop_std = variance ** 0.5 or 1.0
+
+    bsjp_by_ticker = {p["ticker"]: p for p in (bsjp2_confirmed or [])}
+    bow_by_ticker = {p["ticker"]: p for p in (bow_candidates or [])}
+    vcp_pass_tickers = {p["ticker"] for p in (vcp_candidates or []) if p.get("vcp_pass")}
+    macd_by_ticker = {p["ticker"]: p for p in (macd_confirm_candidates or [])}
+
+    n_adjusted = 0
+    for r in valid:
+        ticker = r["ticker"]
+        z = (r["scores"]["momentum"] - pop_mean) / pop_std
+        standardized = MOMENTUM_TARGET_MEAN + z * MOMENTUM_TARGET_STD
+
+        bonuses = []
+        malus_total = 0.0
+        flags = {}
+
+        bsjp_pick = bsjp_by_ticker.get(ticker)
+        if bsjp_pick:
+            tier_label = bsjp_pick.get("tier") or "STAGE1_BASE"
+            bonuses.append(BSJP_TIER_MOMENTUM_BONUS.get(tier_label, 1.0))
+            flags["bsjp_tier"] = tier_label
+
+        bow_pick = bow_by_ticker.get(ticker)
+        if bow_pick:
+            bonuses.append(BOW_TIER_MOMENTUM_BONUS.get(bow_pick.get("tier"), 2.0))
+            flags["bow_tier"] = bow_pick.get("tier")
+
+        if ticker in vcp_pass_tickers:
+            bonuses.append(VCP_PASS_MOMENTUM_BONUS)
+            flags["vcp_pass"] = True
+
+        macd_pick = macd_by_ticker.get(ticker)
+        if macd_pick:
+            if macd_confirm_pillar_engine.is_chasing_too_high(macd_pick):
+                malus_total += MACD_CHASE_MOMENTUM_MALUS
+                flags["macd_chase_risk"] = True
+            else:
+                win_rate = macd_confirm_pillar_engine.win_rate_of(macd_pick)
+                if win_rate is not None:
+                    bonuses.append((win_rate - 50.0) / 50.0 * 3.0)
+                if macd_confirm_pillar_engine.needs_hard_sl_warning(macd_pick):
+                    flags["macd_tail_risk_hard_sl"] = True  # skor TETAP ikut win-rate, cuma flag SL-ketat -- lihat scoring.py
+
+        pillar_bonus = max(bonuses) if bonuses else 0.0
+        new_momentum_target = standardized + pillar_bonus + malus_total
+        delta = max(1.0, min(10.0, new_momentum_target)) - r["scores"]["momentum"]
+        if abs(delta) > 0.001 or flags:
+            scoring_engine.apply_momentum_pillar_adjustment(r, delta, flags)
+            n_adjusted += 1
+
+    print(f"🎯 Momentum pillar-adjustment: {len(valid)} ticker distandarisasi lintas-populasi, {n_adjusted} dpt penyesuaian pilar/flag nyata.")
+    return n_adjusted
+
+
+SENTIMENT_TARGET_MEAN = 5.5  # sama target dgn Momentum & Fundamental Health
+SENTIMENT_TARGET_STD = 1.1
+IHSG_REGIME_MAX_ADJUSTMENT = 1.5  # dibatasi spy tidak mendominasi differensiasi antar-saham
+IHSG_REGIME_SCALE_PCT = 7.0  # ~std riil ihsg_ret20 2 tahun terakhir (6.54%)
+
+
+def apply_sentiment_regime_boost(results: list) -> int:
+    """
+    Post-hoc pass (2026-09-28) -- standardisasi sentiment_score MENTAH
+    lintas-populasi malam ini (target mean 5.5/std 1.1, sama alasan dgn
+    Momentum: base RSI+%B TERBUKTI condong ikut arah IHSG scr cross-
+    sectional -- diukur nyata mean base jatuh ke 3.99 saat IHSG ret20=-4.24%,
+    tanpa standardisasi sebaran Sentiment jadi tidak sehat/rawan floor-
+    clipping tergantung regime hari itu), LALU tempel katalis market-wide
+    IHSG SEKALI stlh standardisasi (user request 2026-09-28: "kalau ada
+    katalis market wide saja gimana, berlaku utk regime IHSG" -- backtest
+    unconditional n=435 hari, korelasi ihsg_ret20 vs rata2 fwd20 SELURUH
+    pasar liquid = 0.194, pola momentum-continuation: IHSG turun tajam 20hr
+    -> rata2 saham fwd20 -1.70%, IHSG naik tajam -> +4.64%).
+
+    URUTAN PENTING: standardisasi DULU baru regime ditambah -- kalau
+    dibalik/digabung inline di compute_factor_scoring, regime ke-double-
+    hitung dgn drift alami base RSI/%B (sudah dicoba & gagal, lihat komentar
+    di scoring.py's blok SENTIMENT SCORE).
+    """
+    valid = [r for r in results if r and not r.get("excluded") and r.get("scores", {}).get("sentiment") is not None]
+    if not valid:
+        return 0
+    raw_scores = [r["scores"]["sentiment"] for r in valid]
+    pop_mean = sum(raw_scores) / len(raw_scores)
+    variance = sum((s - pop_mean) ** 2 for s in raw_scores) / len(raw_scores)
+    pop_std = variance ** 0.5 or 1.0
+
+    ihsg_ret20 = market_engine.get_ihsg_return_nd(20)
+    regime_adjustment = 0.0
+    if ihsg_ret20 is not None:
+        regime_adjustment = max(-IHSG_REGIME_MAX_ADJUSTMENT, min(IHSG_REGIME_MAX_ADJUSTMENT, ihsg_ret20 / IHSG_REGIME_SCALE_PCT * IHSG_REGIME_MAX_ADJUSTMENT))
+
+    n_adjusted = 0
+    for r in valid:
+        z = (r["scores"]["sentiment"] - pop_mean) / pop_std
+        standardized = SENTIMENT_TARGET_MEAN + z * SENTIMENT_TARGET_STD
+        new_sentiment_target = standardized + regime_adjustment
+        delta = max(1.0, min(10.0, new_sentiment_target)) - r["scores"]["sentiment"]
+        if abs(delta) > 0.001:
+            scoring_engine.apply_sentiment_regime_adjustment(r, delta)
+            n_adjusted += 1
+
+    print(f"🌊 Sentiment regime-adjustment: {len(valid)} ticker distandarisasi, regime IHSG={regime_adjustment:+.2f} (ret20={ihsg_ret20}), {n_adjusted} ticker berubah.")
+    return n_adjusted
 
 
 def _get_and_increment_trading_night_index() -> int:

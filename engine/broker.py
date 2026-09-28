@@ -2281,6 +2281,38 @@ def fetch_rapidapi_sector_rotation() -> dict | None:
         core.time.sleep(1.1)
 
 
+def fetch_rapidapi_dividend_calendar() -> list | None:
+    """
+    GET /api/calendar/dividend — market-wide, no params. One call returns
+    every dividend event from ~1 year back up to the furthest announced cum
+    date (confirmed live 2026-09-25: 471 rows, 376 tickers). Each row has
+    company_symbol, dividend_id, dividend_cumdate/exdate/recdate/paydate,
+    dividend_value, lastprice. No interim/final label (event_note empty,
+    fiscal_year always 0). Returns the row list, or None on any failure.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("calendar_dividend"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/calendar/dividend",
+            headers=core.RAPIDAPI_IDX_HEADERS,
+            timeout=30,
+        )
+        if resp.status_code == 429:
+            print("⚠️ RapidAPI IDX rate-limited (429) for calendar/dividend — backing off.")
+            return None
+        data = resp.json()
+        if not data.get("success"):
+            print(f"⚠️ RapidAPI IDX error for calendar/dividend: {data}")
+            return None
+        return data.get("data", {}).get("data", {}).get("dividend")
+    except Exception as e:
+        print(f"⚠️ RapidAPI IDX fetch failed for calendar/dividend: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)
+
+
 def fetch_rapidapi_market_mover(mover_type: str = "top-gainer") -> dict | None:
     """
     GET /api/movers/{mover_type} — market-wide, confirmed live with

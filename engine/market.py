@@ -87,6 +87,35 @@ def get_ihsg_return_nd(n: int = 20):
         return None
 
 
+_gold_nd_cache: dict[int, dict] = {}
+
+
+def get_gold_return_nd(n: int = 5):
+    """
+    Harga emas global (GC=F, USD/troy ounce) N-hari return -- dipakai booster
+    Sentiment KHUSUS ticker tambang emas (ARCI/EMAS/PSAB/SQMI). MBSS v2 (user
+    request 2026-09-27, redesign Sentiment score): riset backtest 2 tahun
+    nunjukkan korelasi harga emas vs return 4 ticker ini genuinely kuat
+    (0.349 sama-hari, 0.256 lag-1-hari) -- JAUH lebih kuat dari kandidat lain
+    yang diuji sesi itu (foreign flow/CMF/volume/RS-IHSG semua <=0.08).
+    Sama pola cache-per-hari dgn get_ihsg_return_nd.
+    """
+    today_str = datetime.datetime.now(core.WIB).strftime("%Y-%m-%d")
+    cached = _gold_nd_cache.get(n)
+    if cached and cached.get("date") == today_str and cached.get("return_nd") is not None:
+        return cached["return_nd"]
+    try:
+        hist = core.get_yf_ticker("GC=F").history(period="3mo", timeout=15)
+        if len(hist) < n + 1:
+            return None
+        gold_return = ((hist["Close"].iloc[-1] - hist["Close"].iloc[-(n + 1)]) / hist["Close"].iloc[-(n + 1)]) * 100
+        _gold_nd_cache[n] = {"date": today_str, "return_nd": gold_return}
+        return gold_return
+    except Exception as e:
+        print(f"⚠️ Gagal fetch harga emas {n}d untuk Sentiment gold booster: {e}")
+        return None
+
+
 def get_ihsg_return_today():
     """
     Return % IHSG (Jakarta Composite Index, ^JKSE) HARI INI SAJA (close terakhir

@@ -34,6 +34,9 @@ import engine.market as market_engine
 import engine.nightly as nightly_engine
 import engine.backbone as backbone_engine
 import engine.lane_confidence as lane_confidence
+import engine.dividend_calendar as dividend_calendar
+import engine.fundamental_health as fundamental_health
+import engine.news_sentiment as news_sentiment
 
 
 async def check_stock(update, context):
@@ -752,6 +755,9 @@ async def check_stock(update, context):
         f"{_icon_rs(rs)} RS vs IHSG {rs}%  |  Range {result['day_range_pct_10d']}%"
         f"{market_engine.format_sector_tag(result.get('sector'), prefix=chr(10))}"
         f"{broker_engine.format_smart_money_tag(ticker, nightly_engine.load_broksum_250())}"
+        f"{dividend_calendar.format_check_line(dividend_calendar.get_ticker_dividend(ticker, result.get('price')))}"
+        f"{fundamental_health.format_check_block(fundamental_health.get_fundamental_health(ticker))}"
+        f"{news_sentiment.format_check_block(news_sentiment.get_recent_sentiment_tally(ticker))}"
     )
 
     # MBSS v2 (user request — Bias Bandar di /check, studi kasus manual

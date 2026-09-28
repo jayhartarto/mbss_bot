@@ -2,7 +2,7 @@
 commands/misc.py — Command Layer: misc/system group (MBSS v2 Sprint 1, Phase 5b)
 
 Telegram handlers for /start, /version, /whitelist, /glossary (+ /istilah),
-/rebuildwhitelist, /winrate, /dbstats (+ /dbstatus), /populatedb,
+/rebuildwhitelist, /winrate, /dividen, /dbstats (+ /dbstatus), /populatedb,
 /testbrief, /testopening.
 
 All thin handlers — everything they call (safe_reply, whitelist builders,
@@ -28,15 +28,16 @@ import os
 
 import engine.legacy_core as core
 import engine.scanalert as scanalert_engine
+import engine.dividend_calendar as dividend_calendar
 
 
 GLOSSARY_TEXT = """📖 KAMUS ISTILAH BOT
 
-━━━ SKOR FAKTOR ━━━
-Nilai (Value): valuasi saham — PE, PB, yield dividen. Tinggi = murah secara fundamental.
-Momentum: arah & kekuatan tren harga — RSI, MACD, SMA, pola chart.
-Sentimen: tekanan beli/jual dari volume — CMF, OBV, rasio volume.
-Final: gabungan tertimbang dari ketiganya (30% Nilai, 40% Momentum, 30% Sentimen).
+━━━ SKOR FAKTOR (direvisi 2026-09-28) ━━━
+Fundamental: seberapa sehat perusahaan — profitabilitas, kesehatan keuangan, pertumbuhan, dividen, valuasi. Dinilai relatif ke sektornya, direfresh bulanan (tidak berubah tiap hari).
+Momentum: berkorelasi dgn setup pilar tervalidasi (BSJP/BOW/VCP/MACD-confirm) — basisnya volatilitas (ATR), lalu naik/turun tergantung setup mana yang aktif malam itu.
+Sentimen: kekuatan teknikal jangka menengah (RSI/%B) + performa vs IHSG + kondisi pasar (regime IHSG) + lonjakan volume ekstrem (waspada, bukan bonus).
+Final: gabungan tertimbang (29% Fundamental, 39% Momentum, 32% Sentimen) — Momentum tetap paling dominan, tapi bobotnya dikoreksi supaya pengaruh riilnya sesuai rasio yang dimaksud.
 
 ━━━ INDIKATOR TEKNIKAL ━━━
 RSI (Relative Strength Index): 0-100, mengukur jenuh beli/jual berdasarkan riwayat harga saham itu sendiri (adaptif). Sekitar 45-55 = netral sehat; mendekati 65-75+ = mulai jenuh beli.
@@ -489,6 +490,33 @@ async def db_stats_command(update, context):
         f"Night scan: {stats.get('last_nightly_scan_at') or '-'}\n"
         f"Night marker: {stats.get('last_nightly_scan_marker') or '-'}"
     )
+
+
+async def dividend_calendar_command(update, context):
+    await asyncio.to_thread(dividend_calendar.refresh_if_stale)
+    view = dividend_calendar.get_calendar_view()
+    if not view["fetched_at"]:
+        await update.message.reply_text("💰 Kalender dividen belum tersedia (fetch RapidAPI gagal / kuota habis).")
+        return
+    issi = set(core.fetch_online_sharia_list(index_key="ISSI"))
+
+    def _block(title: str, events: list) -> str:
+        if not events:
+            return f"{title}\n   (tidak ada)"
+        lines = [title]
+        for e in events:
+            tag = "" if e["ticker"] in issi else " (non-ISSI)"
+            lines.append(f"• {e['ticker']}{tag} — {dividend_calendar.format_event_line(e)}")
+        return "\n".join(lines)
+
+    text = (
+        "💰 KALENDER DIVIDEN\n"
+        "Cum date = hari terakhir beli utk dapat hak dividen. Ex date = harga biasanya turun ~sebesar dividen.\n\n"
+        f"{_block('📅 Cum date akan datang:', view['upcoming'])}\n\n"
+        f"{_block(f'📉 Baru ex-date ({dividend_calendar.RECENT_EX_WINDOW_DAYS} hari terakhir):', view['recent_ex'])}\n\n"
+        f"Yield dihitung dari harga saat data diambil. Sumber: RapidAPI IDX, update {view['fetched_at']}."
+    )
+    await update.message.reply_text(text)
 
 
 async def populate_db_command(update, context):

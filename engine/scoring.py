@@ -694,7 +694,7 @@ def _apply_brokersum_adjustment_original(scoring: dict, brokersum: dict) -> dict
 
     value_score = scoring["scores"]["value"]
     momentum_score = scoring["scores"]["momentum"]
-    new_final = (value_score * 0.25) + (momentum_score * 0.45) + (new_sentiment * 0.30)
+    new_final = (value_score * VALUE_SCORE_WEIGHT) + (momentum_score * MOMENTUM_SCORE_WEIGHT) + (new_sentiment * SENTIMENT_SCORE_WEIGHT)
 
     decision = decide_action(
         final_score=new_final, value_score=value_score, momentum_score=momentum_score,
@@ -716,6 +716,80 @@ def _apply_brokersum_adjustment_original(scoring: dict, brokersum: dict) -> dict
     return scoring
 
 
+
+
+def apply_momentum_pillar_adjustment(scoring: dict, delta: float, flags: dict | None = None) -> dict:
+    """
+    Post-hoc pass (2026-09-27/28 Momentum redesign) -- dipanggil dari
+    engine/nightly.py SETELAH standardisasi lintas-populasi + lookup pilar
+    BSJP/BOW/VCP/MACD-confirm selesai (lihat apply_momentum_pillar_boosts di
+    nightly.py utk alasan kenapa ini HARUS post-hoc, bukan di dalam
+    compute_factor_scoring). Sama pola dgn _apply_brokersum_adjustment_
+    original: tempel delta ke momentum_score, hitung ulang final_score,
+    re-run decide_action supaya action_id ikut konsisten, bukan cuma
+    angka yg berubah.
+    """
+    old_momentum = scoring["scores"]["momentum"]
+    new_momentum = max(1.0, min(10.0, old_momentum + delta))
+    value_score = scoring["scores"]["value"]
+    sentiment_score = scoring["scores"]["sentiment"]
+    new_final = (value_score * VALUE_SCORE_WEIGHT) + (new_momentum * MOMENTUM_SCORE_WEIGHT) + (sentiment_score * SENTIMENT_SCORE_WEIGHT)
+
+    decision = decide_action(
+        final_score=new_final, value_score=value_score, momentum_score=new_momentum,
+        sentiment_score=sentiment_score, is_financial_distress_flag=scoring.get("is_financial_distress_flag", False),
+        chart_pattern=scoring.get("chart_pattern", "none"), is_overbought_caution=scoring.get("is_overbought_caution", False),
+        obv_divergence=scoring.get("obv_divergence", "none"), is_volume_spike_anomaly=scoring.get("is_volume_spike_anomaly", False),
+        is_near_price_floor=scoring.get("is_near_price_floor", False), is_unusually_low_pe=scoring.get("is_unusually_low_pe", False),
+        macd_bearish_cross=scoring.get("macd_bearish_cross", False), is_below_sma50=scoring.get("is_below_sma50", False),
+    )
+
+    scoring["scores"]["momentum"] = round(new_momentum, 2)
+    scoring["scores"]["final"] = round(new_final, 2)
+    scoring["action_id"] = decision["action_id"]
+    scoring["action_label_id"] = decision["action_label_id"]
+    scoring["action_ceiling_applied"] = decision["ceiling_applied"]
+    scoring["action_component_spread"] = decision["component_spread"]
+    scoring["momentum_pillar_adjustment"] = round(delta, 2)
+    scoring["momentum_pillar_flags"] = flags or {}
+    return scoring
+
+
+def apply_sentiment_regime_adjustment(scoring: dict, delta: float) -> dict:
+    """
+    Post-hoc pass (2026-09-28), sama pola persis dgn apply_momentum_pillar_
+    adjustment. Dipanggil dari engine/nightly.py::apply_sentiment_regime_boost
+    SETELAH sentiment_score MENTAH (base RSI+%B + RS-vs-IHSG malus + volume-
+    spike malus + gold-booster, dihitung di compute_factor_scoring) distandar-
+    isasi lintas-populasi malam itu + katalis regime IHSG ditempel SEKALI --
+    HARUS post-hoc krn distribusi populasi baru diketahui setelah SELURUH
+    universe selesai di-score (lihat komentar di scoring.py's blok SENTIMENT
+    SCORE utk kronologi kenapa versi inline DIBUANG -- dobel-hitung dgn
+    regime-drift alami base RSI/%B, terbukti bikin 25% sampel mentok floor).
+    """
+    old_sentiment = scoring["scores"]["sentiment"]
+    new_sentiment = max(1.0, min(10.0, old_sentiment + delta))
+    value_score = scoring["scores"]["value"]
+    momentum_score = scoring["scores"]["momentum"]
+    new_final = (value_score * VALUE_SCORE_WEIGHT) + (momentum_score * MOMENTUM_SCORE_WEIGHT) + (new_sentiment * SENTIMENT_SCORE_WEIGHT)
+
+    decision = decide_action(
+        final_score=new_final, value_score=value_score, momentum_score=momentum_score,
+        sentiment_score=new_sentiment, is_financial_distress_flag=scoring.get("is_financial_distress_flag", False),
+        chart_pattern=scoring.get("chart_pattern", "none"), is_overbought_caution=scoring.get("is_overbought_caution", False),
+        obv_divergence=scoring.get("obv_divergence", "none"), is_volume_spike_anomaly=scoring.get("is_volume_spike_anomaly", False),
+        is_near_price_floor=scoring.get("is_near_price_floor", False), is_unusually_low_pe=scoring.get("is_unusually_low_pe", False),
+        macd_bearish_cross=scoring.get("macd_bearish_cross", False), is_below_sma50=scoring.get("is_below_sma50", False),
+    )
+
+    scoring["scores"]["sentiment"] = round(new_sentiment, 2)
+    scoring["scores"]["final"] = round(new_final, 2)
+    scoring["action_id"] = decision["action_id"]
+    scoring["action_label_id"] = decision["action_label_id"]
+    scoring["action_ceiling_applied"] = decision["ceiling_applied"]
+    scoring["action_component_spread"] = decision["component_spread"]
+    scoring["sentiment_regime_adjustment"] = round(delta, 2)
+    return scoring
 
 
 def apply_brokersum_adjustment(scoring: dict, brokersum: dict) -> dict:
@@ -863,7 +937,7 @@ def apply_whitelist_accumulation_adjustment(scoring: dict, signal: dict | None) 
 
     value_score = scoring["scores"]["value"]
     momentum_score = scoring["scores"]["momentum"]
-    new_final = (value_score * 0.25) + (momentum_score * 0.45) + (new_sentiment * 0.30)
+    new_final = (value_score * VALUE_SCORE_WEIGHT) + (momentum_score * MOMENTUM_SCORE_WEIGHT) + (new_sentiment * SENTIMENT_SCORE_WEIGHT)
 
     decision = decide_action(
         final_score=new_final, value_score=value_score, momentum_score=momentum_score,
@@ -950,6 +1024,30 @@ def decide_action(final_score, value_score, momentum_score, sentiment_score,
         "component_spread": round(component_spread, 1),
         "is_borderline": is_borderline,
     }
+
+
+# Bobot final_score -- DIREVISI 2026-09-28 (user request: "geser bobotnya" agar
+# kontribusi RIIL ke variasi final_score sesuai rasio LABEL 25/45/30, bukan
+# cuma nilai bobotnya sendiri). Dgn Value/Fundamental, Momentum, Sentiment
+# SEKARANG semua distandarisasi ke std~1.07-1.1 yg sama (lihat fundamental_
+# health.py, apply_momentum_pillar_boosts, apply_sentiment_regime_boost di
+# nightly.py), kontribusi varians tiap komponen ke final_score ≈ bobot²
+# (bukan bobot linear) -- bobot lama 0.25/0.45/0.30 ternyata scr RIIL
+# berkontribusi 17.6%/57.0%/25.4% (dihitung: bobot²/Σbobot²), Momentum
+# mendominasi jauh melebihi label "45%"-nya. Bobot BARU = akar(bobot lama),
+# dinormalisasi ulang ke total 1.0 -- verifikasi: 0.291²/Σ=25.0%,
+# 0.390²/Σ=45.0%, 0.319²/Σ=30.0%, PERSIS sesuai rasio label asli.
+VALUE_SCORE_WEIGHT = 0.291
+MOMENTUM_SCORE_WEIGHT = 0.390
+SENTIMENT_SCORE_WEIGHT = 0.319
+
+# Sentiment score redesign 2026-09-27 -- booster emas HANYA utk ticker tambang
+# emas (idx_ic_sector_map.csv subindustri "Emas"). Backtest 2 tahun: korelasi
+# return grup ini vs harga emas global 0.349/0.256 (lihat compute_factor_
+# scoring, blok SENTIMENT SCORE). Daftar sempit by design -- ANTM/MDKA masuk
+# subindustri lain di taksonomi IDX-IC, belum diverifikasi apakah exposure
+# emasnya cukup besar utk ikut booster ini, cek lagi kalau mau diperluas.
+GOLD_LINKED_TICKERS = {"ARCI", "EMAS", "PSAB", "SQMI"}
 
 
 def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundamentals=False, skip_live_refresh=False):
@@ -1775,63 +1873,40 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
     momentum_score_before_rsi_cap = momentum_score
     rsi_overbought_flag = current_rsi > p75
 
-    # --- 4. SENTIMENT SCORE (volume, adaptive per stock, sharpened by CMF + OBV divergence) ---
-    # vol_ratio, current_cmf sudah dihitung lebih awal (dibutuhkan Momentum duluan) —
-    # reuse di sini, tidak dihitung ulang.
-    if has_adaptive_baseline:
-        vol_ratio_series = vol_ratio_full_series.iloc[:-1]
-        vol_pct_rank = core.percentile_rank(vol_ratio_series, vol_ratio)
-        sentiment_score = core.score_from_percentile(vol_pct_rank)
-    else:
-        if vol_ratio > 2.0:
-            sentiment_score = 10
-        elif vol_ratio > 1.5:
-            sentiment_score = 8
-        elif vol_ratio > 1.0:
-            sentiment_score = 6
-        elif vol_ratio < 0.5:
-            sentiment_score = 2
-        else:
-            sentiment_score = 4
-
-    # CMF: was volume actually buying pressure (closes near daily highs) or selling
-    # pressure (closes near daily lows)? Pulls the raw volume-ratio score toward
-    # what the money flow direction actually shows, instead of treating all high
-    # volume as automatically bullish.
-    cmf_adjustment_applied = 0.0
-    if current_cmf is not None and not pd.isna(current_cmf):
-        # current_cmf ranges roughly -1 to +1; nudge sentiment score toward it
-        cmf_adjustment = current_cmf * 2.0  # e.g. CMF of -0.5 pulls score down ~1 point
-        sentiment_score = max(1.0, min(10.0, sentiment_score + cmf_adjustment))
-        cmf_adjustment_applied = cmf_adjustment
-        # MBSS v2 (user request 2026-08-27 -- riset lanjutan): penalti/bonus CMF
-        # ini TIDAK backwards spt RSI, TAPI genuinely tidak prediktif DI DALAM
-        # populasi lane MACD (576 ISSI/2thn n=12.869: hit6 flat 47-52% di
-        # semua bucket CMF, tanpa arah jelas) -- di-UNDO utk ticker ber-lane
-        # MACD (lihat is_macd_lane_active menjelang final_score), TETAP
-        # berlaku spt biasa di luar itu.
-    else:
+    # --- 4. SENTIMENT SCORE -- REDESIGN 2026-09-27 (user request, riset menyeluruh
+    # 2026-09-27/28: lihat memory project_sentiment_score_redesign_2026_09_27) ---
+    # Base LAMA (volume-ratio + CMF ±2.0) DIBUANG SELURUHNYA: backtest unconditional
+    # 2 tahun (TP+10%/SL-7% 5hr & TP+15%/SL-10% 20hr, liquid Rp1B+, n=111.382-
+    # 121.655 ticker-hari) nunjukkan korelasi CMF dan volume-ratio (di luar ekor
+    # vol_ratio>3.0) dgn hasil ke depan nyaris nol (0.003-0.06) -- pola SAMA
+    # dgn RSI/MACD-line yg gagal jadi driver universal di riset Momentum:
+    # population-conditional, bukan sinyal berdiri sendiri. Volume-ratio malah
+    # terbukti TERBALIK di ekor ekstrem (desil vol_ratio tertinggi = SL-rate
+    # tertinggi 43.8% vs baseline ~25-30%, ditangani di bawah sbg malus, BUKAN
+    # bonus spt formula lama). current_cmf TETAP dihitung di atas (dipakai
+    # momentum dead-stock-check & field display "cmf"), CUMA sudah tidak lagi
+    # mempengaruhi sentiment_score sama sekali.
+    #
+    # Base BARU: RSI + %B (dihitung di bawah, setelah blok Bollinger) -- diuji
+    # unconditional korelasi 0.052-0.074 di horizon 20 hari (JAUH lebih baik
+    # drpd CMF/volume), tapi bentuknya HORIZON-DEPENDENT (smile di 5 hari,
+    # hampir monoton naik di 20 hari) -- base condong ke temuan 20-hari yg
+    # lebih dominan, dgn malus kecil di ekor paling ekstrem (>p95) sbg
+    # pengingat risiko jendela pendek. Placeholder di sini, nilai FINAL
+    # dihitung setelah percent_b tersedia (lihat blok setelah Bollinger).
+    sentiment_score = 5.0
+    if current_cmf is not None and pd.isna(current_cmf):
         current_cmf = None
 
     # --- Bollinger Band position + squeeze (MBSS v2, user request — diskusi
     # Investopedia Bollinger Bands). Dua sinyal terpisah dari band yang sama:
     #
-    # 1) Band touch (bounce/waspada) — sentuh lower/upper band adalah sinyal
-    #    mean-reversion KLASIK, TAPI cuma valid di kondisi ranging/lemah — di
-    #    trend KUAT harga bisa "band walking" (nempel di satu sisi band
-    #    berhari-hari, itu justru KELANJUTAN trend, bukan reversal). Gate
-    #    pakai current_adx (cutoff 25, sama seperti format_adx_label "tren
-    #    kuat") + is_below_ema21 (arah trend) supaya tidak salah kaprah treat
-    #    band-walking sebagai sinyal reversal:
-    #    - ADX<25 (ranging) ATAU arah trend BERLAWANAN dari band yang
-    #      disentuh (mis. dekat upper band tapi is_below_ema21=True) ->
-    #      mean-reversion genuinely lebih kredibel -> adjustment penuh ke
-    #      sentiment_score.
-    #    - ADX>=25 DAN arah trend SEARAH band yang disentuh -> band walking,
-    #      bukan reversal -> adjustment ditekan ke 0.
-    #    Konfirmasi tambahan dari CMF (ambang 0.15, sama dengan cmf_adjustment
-    #    di atas) mengurangi keyakinan adjustment kalau arus uang masih kuat
-    #    melawan arah reversal yang diharapkan.
+    # 1) Band touch -- SEJAK REDESIGN 2026-09-27, percent_b TIDAK LAGI diberi
+    #    adjustment ±1.5 di sini (band_walking/reversal-gate lama DIHAPUS) --
+    #    percent_b sekarang jadi salah satu dari 2 bahan BASE sentiment_score
+    #    yang baru (lihat blok setelah Bollinger ini), bukan adjustment
+    #    terpisah. bb_signal_note (band_walking/near_band_*) TETAP dihitung
+    #    murni sbg field informasi (dipakai di /check), independen dari skor.
     #
     # 2) Squeeze (bandwidth di persentil rendah histori ~6 bulan) — sinyal
     #    PRA-breakout, muncul SEBELUM harga mulai bergerak. SENGAJA TIDAK
@@ -1870,27 +1945,87 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
             percent_b = (current_price - bb_lower_val) / bb_width
             strong_trend = bool(current_adx >= 25)
             trend_bullish = not is_below_ema21
-            bb_adjustment = 0.0
             if percent_b <= 0.1:  # dekat/menembus lower band
                 band_walking_down = strong_trend and is_below_ema21
-                if not band_walking_down:
-                    bb_adjustment = 1.5
-                    if current_cmf is not None and not pd.isna(current_cmf) and current_cmf < -0.15:
-                        bb_adjustment = 0.5  # arus jual masih dominan, kurangi keyakinan bounce
-                    bb_signal_note = "near_lower_band_bounce_candidate"
-                else:
-                    bb_signal_note = "band_walking_down"
+                bb_signal_note = "band_walking_down" if band_walking_down else "near_lower_band_bounce_candidate"
             elif percent_b >= 0.9:  # dekat/menembus upper band
                 band_walking_up = strong_trend and trend_bullish
-                if not band_walking_up:
-                    bb_adjustment = -1.5
-                    if current_cmf is not None and not pd.isna(current_cmf) and current_cmf > 0.15:
-                        bb_adjustment = -0.5  # arus beli masih kuat, kurangi urgency waspada
-                    bb_signal_note = "near_upper_band_caution"
-                else:
-                    bb_signal_note = "band_walking_up"
-            if bb_adjustment:
-                sentiment_score = max(1.0, min(10.0, sentiment_score + bb_adjustment))
+                bb_signal_note = "band_walking_up" if band_walking_up else "near_upper_band_caution"
+
+    # --- SENTIMENT SCORE, nilai FINAL (redesign 2026-09-27) ---
+    # Base: rata-rata RSI-percentile (adaptif vs histori 120hr sendiri, konvensi
+    # sama dgn Momentum) + percent_b (0-1 by construction, langsung diskalakan
+    # tanpa persentil lagi). Field kosong -> netral 5.0, konvensi rumah project.
+    rsi_pct_for_sentiment = None
+    if has_adaptive_baseline and len(rsi_hist) >= 20:
+        rsi_pct_for_sentiment = core.percentile_rank(rsi_hist, current_rsi)
+    rsi_sent_score = core.score_from_percentile(rsi_pct_for_sentiment) if rsi_pct_for_sentiment is not None else 5.0
+    pctb_sent_score = (1 + max(0.0, min(1.0, percent_b)) * 9) if percent_b is not None else 5.0
+    sentiment_score = (rsi_sent_score + pctb_sent_score) / 2
+
+    # Malus ekor paling ekstrem (>p95 RSI, atau %B>=0.97) -- riset horizon 5hr
+    # nunjukkan ekstrem atas tetap sedikit lebih berisiko (smile-shaped) meski
+    # horizon 20hr dominan monoton naik (base di atas sudah condong ke situ).
+    if rsi_pct_for_sentiment is not None and rsi_pct_for_sentiment > 0.95:
+        sentiment_score -= 1.0
+    if percent_b is not None and percent_b >= 0.97:
+        sentiment_score -= 1.0
+
+    # RS vs IHSG 20 hari -- ASIMETRIS (riset lintas rezim 2026-09-27): hindari
+    # outperform EKSTREM itu ROBUST, bahkan MENGUAT saat IHSG crash (SL 43% saat
+    # drawdown IHSG>20% vs baseline ~30% biasa) -- malus sisi ini penuh. Malus
+    # underperform-ekstrem SENGAJA lebih ringan: di rezim calm memang buruk
+    # (falling knife lanjut turun), TAPI di crash dalam (IHSG drawdown>20%)
+    # horizon 20hr malah BERBALIK jadi sedikit positif (dugaan: capitulation-
+    # bounce bareng pasar) -- tidak stabil lintas rezim, jangan disamakan bobot
+    # dgn sisi outperform. Base ISHG-20d di sini INDEPENDEN dari relative_
+    # strength_vs_ihsg (harian, dipakai Momentum) -- jangan disatukan, beda
+    # horizon & tujuan.
+    rs20_vs_ihsg = None
+    if len(close_prices) > 20:
+        stock_ret20 = (current_price - close_prices.iloc[-21]) / close_prices.iloc[-21] * 100
+        ihsg_ret20 = market_engine.get_ihsg_return_nd(20)
+        if ihsg_ret20 is not None:
+            rs20_vs_ihsg = round(stock_ret20 - ihsg_ret20, 2)
+            if rs20_vs_ihsg > 30:
+                sentiment_score -= 2.5
+            elif rs20_vs_ihsg > 15:
+                sentiment_score -= 1.2
+            elif rs20_vs_ihsg < -30:
+                sentiment_score -= 1.0
+            elif rs20_vs_ihsg < -15:
+                sentiment_score -= 0.5
+
+    # (Katalis market-wide regime IHSG DIPINDAH post-hoc ke engine/nightly.py
+    # ::apply_sentiment_regime_boost -- lihat komentar di sana utk alasan.
+    # SEMPAT dicoba di sini langsung 2026-09-28, TAPI base RSI+%B ternyata
+    # SUDAH otomatis condong ikut arah IHSG (cross-sectional, saat market
+    # turun serentak mayoritas saham "terlihat lemah" vs histori 20hr-nya
+    # sendiri -- diukur nyata: mean base turun ke 3.99 saat IHSG ret20=-4.24%)
+    # -- adjustment eksplisit di sini DOBEL-HITUNG efek yg sama, terbukti
+    # bikin 25% sampel mentok floor 1.0. Fix: standardisasi base DULU
+    # (lintas-populasi malam itu), baru tempel regime SEKALI, bersih.)
+
+    # Lonjakan volume ekstrem -- backtest unconditional (n=111.382, liquid
+    # Rp1B+) nunjukkan desil vol_ratio TERTINGGI justru SL-rate tertinggi
+    # (43.8% vs baseline ~25-30%), BERTOLAK BELAKANG dgn asumsi formula lama
+    # (volume tinggi = bonus). Ambang 3.0 reuse persis dari is_volume_spike_
+    # anomaly (dihitung ulang di bawah utk decide_action's ceiling).
+    if vol_ratio > 3.0:
+        sentiment_score -= 2.0
+
+    # Booster emas -- HANYA ticker tambang emas (idx_ic_sector_map.csv
+    # subindustri "Emas"). Backtest 2 tahun: korelasi return grup ini vs harga
+    # emas global (GC=F) 0.349 (sama-hari)/0.256 (lag 1 hari) -- JAUH lebih
+    # kuat drpd kandidat sentimen lain yg diuji sesi ini (semua <=0.08).
+    # Ambang "emas naik >=3% trailing 5hr" kasar & BELUM di-sweep, sengaja
+    # longgar drpd overfit ke satu angka presisi.
+    if ticker in GOLD_LINKED_TICKERS:
+        gold_ret5d = market_engine.get_gold_return_nd(5)
+        if gold_ret5d is not None and gold_ret5d >= 3.0:
+            sentiment_score += 2.0
+
+    sentiment_score = max(1.0, min(10.0, sentiment_score))
 
     # MBSS v2 (user request — riset "macd centerline approach" sbg sinyal
     # SETUP SDT, positioning SDT = cari kandidat SEBELUM breakout vs HC =
@@ -2149,13 +2284,14 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         else:
             macd_lifecycle_state = "CONTINUATION"
 
-    # OBV divergence: the key check for "price looks fine but volume flow disagrees"
+    # OBV divergence: dipakai decide_action's ceiling flag (is_overbought_caution-
+    # style hard cap), TIDAK LAGI mengubah sentiment_score langsung -- backtest
+    # unconditional 2026-09-27 (n=111.382, TP/SL touch-rate) nunjukkan bearish_
+    # divergence justru spread PALING BAIK (-5.7) drpd "none" (-9.3) di luar
+    # populasi BOW yg jadi sumber klaim "rugi bersih -0.94%" sebelumnya --
+    # arahnya TIDAK generalize, sama pola dgn RSI/MACD-line/CMF di redesign ini.
     obv_series = core.calculate_obv(close_prices, volumes)
     obv_divergence = core.detect_obv_divergence(close_prices, obv_series)
-    if obv_divergence == "bearish_divergence":
-        sentiment_score = max(1.0, sentiment_score - 2.5)  # override: flow says distribution
-    elif obv_divergence == "bullish_divergence":
-        sentiment_score = min(10.0, sentiment_score + 1.0)
 
     # Extreme volume spikes (e.g. 5x+ normal) are anomalies, not automatically bullish —
     # they're often one-off news/rumor-driven or thin-liquidity events that can reverse
@@ -2196,24 +2332,55 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         or is_macd_continuation_or_validation or is_macd_momentum_extended
     )
 
-    # Terapkan cap RSI yg SEBELUMNYA ditunda (lihat momentum_score_before_
-    # rsi_cap) -- skip cap kalau lane MACD aktif, terapkan spt biasa kalau
-    # tidak.
-    if rsi_overbought_flag and not is_macd_lane_active:
-        momentum_score = min(momentum_score_before_rsi_cap, RSI_OVERBOUGHT_MOMENTUM_CAP)
+    # --- MOMENTUM SCORE, nilai FINAL -- REDESIGN 2026-09-27/28 (user request:
+    # "momentum harus berkorelasi dgn setup valid: BSJP dan swing" + "petakan
+    # sesuai hasil riset, termasuk temuan lose besar jadi skor jelek"). Base
+    # LAMA (EMA21-distance + MACD-cross-decay + ADX-damping + new-high-bonus +
+    # RS-harian-bonus + lower-highs-penalty + volume-bonus + dead-stock-
+    # penalty + RSI-overbought-cap di atas, termasuk momentum_score_before_
+    # rsi_cap/RSI_OVERBOUGHT_MOMENTUM_CAP) DIBUANG SELURUHNYA sbg driver
+    # momentum_score -- riset menyeluruh (memory project_momentum_score_
+    # redesign_2026_09_27) nunjukkan RSI & MACD-line SELALU population-
+    # conditional (arahnya bahkan TERBALIK di dalam vs di luar lane MACD),
+    # TIDAK ADA bukti unconditional apa pun. Flag individual di atas (chart_
+    # pattern, is_overbought_caution, macd_bearish_cross, is_below_sma50)
+    # TETAP jalan & TETAP dipakai sbg ceiling terpisah di decide_action --
+    # cuma sudah tidak boleh JUGA jadi adjustment linear momentum_score di
+    # sini (dulu ganda: flag DAN angka, sekarang cuma flag).
+    #
+    # Base BARU: ATR%14-persentil -- SATU-SATUNYA temuan yg tervalidasi
+    # UNCONDITIONAL lintas SELURUH universe (n=192.380 ticker-hari, kuartil
+    # ATR terendah menang return DAN drawdown horizon D10/D20, MAE separuh
+    # kuartil tertinggi). Nilai di sini MASIH MENTAH (skala penuh 1-10) --
+    # dimampatkan & distandarisasi lintas-populasi malam ini (target mean~5.5/
+    # std~1.1, menyamai sebaran Fundamental Health, BUKAN dibiarkan std~2.76
+    # spt mentahnya -- riset ukur nyata 2026-09-27 nunjukkan itu bikin
+    # Momentum mendominasi variasi final_score jauh melebihi bobot 45%
+    # nominalnya) DAN diberi bonus/malus pilar (BSJP tier+spike-fade, BOW/VCP
+    # tier, MACD-confirm lane+tag+chase-risk) SETELAH INI, POST-HOC di
+    # engine/nightly.py (lihat apply_momentum_pillar_adjustment) -- HARUS
+    # post-hoc krn pilar & distribusi lintas-populasi baru tersedia setelah
+    # SELURUH universe selesai di-score, bukan per-ticker spt fungsi ini.
+    if atr_pct14_percentile is not None:
+        momentum_score = core.score_from_percentile(atr_pct14_percentile, invert=True)
     else:
-        momentum_score = momentum_score_before_rsi_cap
+        momentum_score = 5.0  # ATR tidak terhitung (histori kurang dari 15 hari) -- netral, bukan dihukum
 
-    # Batalkan adjustment CMF yg SEBELUMNYA sudah diterapkan (lihat
-    # cmf_adjustment_applied) kalau lane MACD aktif -- re-clip [1,10] krn
-    # sentiment_score sudah menerima adjustment lain (BB/OBV) sejak itu.
-    if is_macd_lane_active and cmf_adjustment_applied:
-        sentiment_score = max(1.0, min(10.0, sentiment_score - cmf_adjustment_applied))
+    # (CMF-undo utk lane MACD DIHAPUS 2026-09-27 -- CMF sudah tidak lagi
+    # dipakai di sentiment_score sama sekali sejak redesign, lihat blok
+    # SENTIMENT SCORE di atas -- is_macd_lane_active TETAP dipakai di atas
+    # utk RSI-cap Momentum, itu bagian terpisah yg belum diubah.)
 
-    # Direvisi user: dari Value 30/Momentum 40/Sentiment 30 jadi Value 25/Momentum
-    # 45/Sentiment 30 — untuk swing pendek, Momentum harus mengalahkan Value
-    # (mengejar uang beberapa hari, bukan mencari saham termurah).
-    final_score = (value_score * 0.25) + (momentum_score * 0.45) + (sentiment_score * 0.30)
+    # Histori bobot: Value 30/Momentum 40/Sentiment 30 -> Value 25/Momentum
+    # 45/Sentiment 30 (swing pendek, Momentum harus mengalahkan Value) -> BOBOT
+    # SEKARANG (2026-09-28, VALUE_SCORE_WEIGHT/MOMENTUM_SCORE_WEIGHT/SENTIMENT_
+    # SCORE_WEIGHT = 0.291/0.390/0.319, lihat komentar di dekat GOLD_LINKED_
+    # TICKERS): akar dari rasio 25/45/30 -- BUKAN rasio baru, cuma dikoreksi
+    # supaya KONTRIBUSI VARIANS ke final_score (bukan cuma nilai bobotnya)
+    # benar2 25/45/30, krn ketiga komponen skrg distandarisasi ke std yg sama
+    # (dulu bobot linear 0.25/0.45/0.30 = kontribusi RIIL 17.6/57.0/25.4%,
+    # Momentum dominan jauh melebihi label "45%"-nya).
+    final_score = (value_score * VALUE_SCORE_WEIGHT) + (momentum_score * MOMENTUM_SCORE_WEIGHT) + (sentiment_score * SENTIMENT_SCORE_WEIGHT)
 
     # MBSS v2 (user request — Bias Bandar sebagai KALKULASI, bukan cuma
     # peringatan, per studi kasus manual TMPO/MDIA/JGLE/DOOH/ICON): penalti
@@ -2500,6 +2667,7 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         "obv_slope_5_pct": round(float((obv_series.iloc[-1] - obv_series.iloc[-6]) / max(abs(obv_series.iloc[-6]), 1e-9) * 100), 2) if len(obv_series) >= 6 else None,
         "vol_ratio": round(vol_ratio, 2),
         "cmf": round(current_cmf, 2) if current_cmf is not None else "N/A",
+        "rs20_vs_ihsg_pct": rs20_vs_ihsg,
         "obv_divergence": obv_divergence,
         "is_overbought_caution": is_overbought_caution,
         "is_volume_spike_anomaly": is_volume_spike_anomaly,
