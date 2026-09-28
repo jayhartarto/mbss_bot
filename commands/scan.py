@@ -355,28 +355,28 @@ async def all_setup_candidates_command(update, context):
             lines.append(line)
 
     # MBSS v2 (user request 2026-09-06 -- safety-net ENTRY PAGI): tampilkan
-    # top-20 kandidat yg SUDAH lolos filter RSI(Wilder)>=65 & MACD histogram
-    # (SMA produksi)>0 -- REUSE persis threshold & field yg dipakai lane
-    # ENTRY PAGI (engine/scanalert.py run_entry_pagi_scan_once), TANPA
-    # opening-range (belum ada pra-bursa) -- fallback MANUAL kalau scan
-    # otomatis 09:05 gagal/error. Backtest: RSI>=65/MACD>0 -> n=39
-    # (3.25/hari), median D1=6.00%, win=84.6% (lihat memory
-    # reference_bpjs_bsjp_external_strategy_doc.md).
+    # top-20 kandidat yg SUDAH lolos DNA gate (momentum-pump) -- REUSE
+    # persis threshold & field yg dipakai lane ENTRY PAGI (engine/
+    # scanalert.py entry_pagi_dna_gate_pass), TANPA opening-range (belum
+    # ada pra-bursa) -- fallback MANUAL kalau scan otomatis 09:05 gagal.
+    # DIGANTI 2026-09-28 dari funnel RSI>=65/MACD>0 lama -- lihat catatan
+    # lengkap di engine/scanalert.py ENTRY_PAGI_ENABLED & entry_pagi_dna_
+    # gate_pass. Ini pre-filter EOD SAJA (belum lewat konfirmasi 5-menit),
+    # jadi recall-nya sengaja lebih longgar dari yg akhirnya jadi TICK asli.
+    entry_pagi_atr_p75 = scanalert_engine.compute_atr_pct14_p75(all_values)
     entry_pagi_pool = [
-        r for r in all_values
-        if r.get("rsi") is not None and r.get("macd_hist") is not None
-        and r["rsi"] >= scanalert_engine.ENTRY_PAGI_RSI_MIN and r["macd_hist"] > scanalert_engine.ENTRY_PAGI_MACD_MIN
+        r for r in all_values if scanalert_engine.entry_pagi_dna_gate_pass(r, entry_pagi_atr_p75)
     ]
-    entry_pagi_top20 = sorted(entry_pagi_pool, key=lambda r: r["macd_hist"], reverse=True)[:20]
-    lines.append(f"\n🌅 ENTRY PAGI pre-filter ({len(entry_pagi_pool)} lolos RSI>=65 & MACD>0, top 20 by MACD)")
+    entry_pagi_top20 = sorted(entry_pagi_pool, key=lambda r: r["atr_pct14"], reverse=True)[:20]
+    lines.append(f"\n🌅 ENTRY PAGI pre-filter ({len(entry_pagi_pool)} lolos DNA gate, top 20 by ATR%)")
     if not entry_pagi_top20:
         lines.append("  (kosong)")
     else:
         for r in entry_pagi_top20:
             sm_tag = scanalert_engine._smart_money_tag(r.get("whitelist_accumulation_net_pct"), r.get("whitelist_num_brokers"))
-            lines.append(f"  {r['ticker']} | RSI {r['rsi']:.0f} | MACD {r['macd_hist']:.2f}{sm_tag}")
+            lines.append(f"  {r['ticker']} | ATR {r['atr_pct14']:.1f}% | %B {r['pct_b']:.2f} | ret5d {r['ret_5d_pct']:+.1f}%{sm_tag}")
         lines.append(
-            "  ⚠️ Ini kandidat PRE-filter (D-1 close), BELUM lewat ranking opening-range 09:00-09:05 "
+            "  ⚠️ Ini kandidat PRE-filter (D-1 close), BELUM lewat konfirmasi 5-menit 09:00-09:05 "
             "-- fallback manual kalau scan otomatis ENTRY PAGI 09:05 gagal, bukan pengganti alert asli."
         )
 
@@ -2625,7 +2625,7 @@ async def entry_pagi_manual_command(update, context):
     if picks:
         await core.safe_reply(update.message, f"✅ Selesai -- {picks} kandidat lolos, TICK baru sudah dikirim di atas.")
     else:
-        await core.safe_reply(update.message, "✅ Selesai -- 0 kandidat lolos filter RSI>=65 & MACD>0 hari ini (wajar, bukan error).")
+        await core.safe_reply(update.message, "✅ Selesai -- 0 kandidat lolos DNA gate + konfirmasi 5-menit hari ini (wajar, bukan error).")
 
 
 async def ff_daytrade_manual_command(update, context):
@@ -2780,8 +2780,10 @@ async def pingpong_watchlist_command(update, context):
     diranking komposit (rank volume + rank range, sama pola rank-sum spt
     rank_rebound_top5_candidates/_rank_entry_pagi_candidates -- REUSE,
     bukan reinvent), lalu ditandai kalau JUGA muncul di lane/tool lain
-    yg sudah tervalidasi -- REBOUND Top-5, gate ENTRY PAGI (RSI>=65&
-    MACD>0), FF DAYTRADE, SDT, HC, plus Smart Money (whitelist broker) &
+    yg sudah tervalidasi -- REBOUND Top-5, gate ENTRY PAGI (DNA gate
+    momentum-pump, diganti 2026-09-28 dari RSI>=65&MACD>0 -- lihat
+    engine/scanalert.py entry_pagi_dna_gate_pass), FF DAYTRADE, SDT, HC,
+    plus Smart Money (whitelist broker) &
     Foreign Flow (net_ratio_1d). REBOUND/ENTRY PAGI-gate/FF DAYTRADE
     dihitung LANGSUNG dari `scored` (100% D-1-based). SDT/HC REUSE
     _consensus_sdt_hc_selected yg sama dgn /consensus (EOD-only, butuh
@@ -2817,6 +2819,8 @@ async def pingpong_watchlist_command(update, context):
             "whitelist_num_brokers": r.get("whitelist_num_brokers"),
             "foreign_net_ratio_1d": r.get("foreign_net_ratio_1d"),
             "rsi": r.get("rsi"), "macd_hist": r.get("macd_hist"),
+            "price": r.get("price"), "pct_b": r.get("pct_b"),
+            "atr_pct14": r.get("atr_pct14"), "ret_5d_pct": r.get("ret_5d_pct"),
         })
 
     if len(rows) < 10:
@@ -2869,6 +2873,11 @@ async def pingpong_watchlist_command(update, context):
         return {x["ticker"]: i for i, x in enumerate(ordered, start=1)}
     r_vol = _rank_map(candidates, lambda x: x["avg_volume_5d"], reverse=True)
     r_range = _rank_map(candidates, lambda x: x["range_pct_3d_avg"], reverse=True)
+    # ENTRY PAGI cross-tag DIGANTI 2026-09-28 dari RSI>=65/MACD>0 ke DNA gate
+    # momentum-pump yg sama dgn lane ENTRY PAGI produksi (entry_pagi_dna_
+    # gate_pass) -- EOD-only, TANPA konfirmasi 5-menit (di luar scope tag
+    # informational ini, murni "ada dukungan dari lane lain").
+    entry_pagi_atr_p75 = scanalert_engine.compute_atr_pct14_p75(scored)
     for r in candidates:
         r["priority_score"] = r_vol[r["ticker"]] + r_range[r["ticker"]]
         tags = []
@@ -2876,7 +2885,7 @@ async def pingpong_watchlist_command(update, context):
             tags.append("REBOUND")
         if r["ticker"] in ff_daytrade_tickers:
             tags.append("FF DAYTRADE")
-        if r["rsi"] is not None and r["macd_hist"] is not None and r["rsi"] >= scanalert_engine.ENTRY_PAGI_RSI_MIN and r["macd_hist"] > scanalert_engine.ENTRY_PAGI_MACD_MIN:
+        if scanalert_engine.entry_pagi_dna_gate_pass(r, entry_pagi_atr_p75):
             tags.append("ENTRY PAGI")
         if r["ticker"] in hc_selected:
             tags.append("HC")
@@ -3681,8 +3690,9 @@ async def consensus_command(update, context):
             lines.append(f"• {sym} — Multibagger {c.get('multibagger_score', '-')}/100, {c.get('potential_return', '-')} ({c.get('timeframe', '-')}){also_str}")
 
     # === ENTRY PAGI ∩ HC/allsetup (MBSS v2, user request 2026-09-06) ===
-    # Irisan kandidat ENTRY PAGI hari ini (top-10 opening-range + RSI>=65/
-    # MACD>0, engine/scanalert.py run_entry_pagi_scan_once) dgn HC/SDT --
+    # Irisan kandidat ENTRY PAGI hari ini (DNA gate momentum-pump +
+    # konfirmasi 5-menit, diganti 2026-09-28 dari top-10 opening-range +
+    # RSI>=65/MACD>0 -- engine/scanalert.py run_entry_pagi_scan_once) dgn HC/SDT --
     # PROXY "allsetup" pakai sdt_selected (union lane MACD yg SAMA dgn
     # /allsetup's 9-lane pool, REUSE drpd re-derive semua lane di sini).
     # entry_pagi_state.json HANYA terisi kalau job 09:05 sudah fire hari
@@ -3704,7 +3714,7 @@ async def consensus_command(update, context):
         lines.append("\n🌅 ENTRY PAGI ∩ HC/allsetup — belum fire hari ini (scan 09:05-09:20 WIB belum jalan, atau /consensus dipanggil sebelum itu)")
     else:
         if not entry_pagi_tickers:
-            lines.append("\n🌅 ENTRY PAGI ∩ HC/allsetup — 0 saham (Entry Pagi sudah scan hari ini, tapi 0 kandidat lolos filter RSI/MACD -- wajar, bukan error)")
+            lines.append("\n🌅 ENTRY PAGI ∩ HC/allsetup — 0 saham (Entry Pagi sudah scan hari ini, tapi 0 kandidat lolos DNA gate + konfirmasi 5-menit -- wajar, bukan error)")
         else:
             entry_pagi_cross = sorted(entry_pagi_tickers & hc_selected)
             lines.append(f"\n🌅 ENTRY PAGI ∩ HC/allsetup — {len(entry_pagi_cross)} saham (dari {len(entry_pagi_tickers)} kandidat Entry Pagi hari ini)")

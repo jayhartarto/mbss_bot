@@ -2656,42 +2656,68 @@ async def run_conviction_sweep_once() -> dict:
 # akan diam2 menghentikan job berulang tanpa pemberitahuan kalau tak
 # ditangkap).
 #
-# MEKANISME (dikunci setelah banyak ronde backtest, lihat memory
-# reference_bpjs_bsjp_external_strategy_doc.md utk riwayat lengkap):
-# 1) 09:00-09:05 WIB = jendela opening-range. Composite ranking top-10
-#    SELURUH universe (scan cache nightly) berdasar 3 fitur opening-range
-#    (entry_pos_in_or, dist_from_prior_high_pct, or_range_pct -- masing2
-#    di-rank lalu dijumlah, skor TERENDAH menang), dgn filter likuiditas
-#    (top-half by D-1 value_traded). TIDAK ada exclude band "safe-pool" --
-#    riset menemukan itu redundant dgn filter trend RSI/MACD di bawah.
-# 2) Dari top-10 itu, filter FINAL: RSI(Wilder,14)>=65 & MACD histogram
-#    (SMA, formula PRODUKSI/"Brights") >0, keduanya field `rsi`/`macd_hist`
-#    yg SUDAH dihitung nightly (compute_factor_scoring) -- REUSE, bukan
-#    pipeline indikator baru. Formula PRODUKSI dipilih drpd formula EMA/
-#    rolling-RSI yg dipakai riset asli krn performa SEBANDING (bahkan
-#    D1-win lebih besar) DAN reuse field existing -- lihat memory di atas
-#    utk perbandingan A/B lengkap.
+# MEKANISME LAMA (RSI>=65/MACD>0, dikunci setelah banyak ronde backtest --
+# lihat memory reference_bpjs_bsjp_external_strategy_doc.md) DIGANTI
+# TOTAL 2026-09-28. Riwayat: gagal bar daytrade family 2026-09-21 (win
+# 46.5%, mean +0.71%), sempat dinonaktifkan (ENTRY_PAGI_ENABLED=False),
+# user putuskan drop tapi implementasi belum pernah dikerjakan (memory
+# project_daytrade_family_decision_2026_09_21). Sesi 2026-09-28: user
+# amati IATA/UVCR/JAWA rally sesi-1 di atas open hari yg sama -- riset
+# session1_rally_dna_2026_09_28.py/_filter_test_2026_09_28.py menemukan
+# DNA D-1 (momentum-pump archetype) + tervalidasi user via konfirmasi
+# 5-menit. MEKANISME BARU:
+# 1) DNA gate EOD (entry_pagi_dna_gate_pass, lihat docstring-nya): price
+#    <=500, pct_b>=0.6, ret_5d_pct>0, atr_pct14>=p75 cross-sectional --
+#    SEMUA field REUSE dari compute_factor_scoring, TANPA fetch baru.
+# 2) 09:00-09:05 WIB = jendela opening-range (TIDAK berubah dari lama --
+#    kebetulan sudah persis "5 menit pertama sejak open" yg user minta).
+#    Konfirmasi WAJIB: harga close bar 09:05 (entry_ref) >= +2% dari open
+#    09:00 (chg_5min_pct, ENTRY_PAGI_CONFIRM_5MIN_PCT) -- "kalau bergerak
+#    naik, ambil momentumnya, kalau turun, skip" (user request eksplisit).
+#    Survivor di-rank by chg_5min_pct DESCENDING, Top-5 (ENTRY_PAGI_TOP_N).
 # 3) Entry LANGSUNG di harga alert (entry_ref = close bar terakhir jendela
-#    OR) -- BUKAN tunggu dip (temuan penting sesi ini: asumsi awal
-#    "tunggu dip" TERNYATA tidak match mekanisme riset asli yg justru
-#    entry immediate).
+#    OR, = harga yg sudah lolos konfirmasi 5-menit) -- BUKAN tunggu dip.
 # 4) Avg-down SEKALI di -3% dari entry (50/50 split) -- avg_cost jadi
 #    rata2 entry & avg_down_price kalau tersentuh.
-# 5) Exit Day-1: TP+6%/SL-6% dari avg_cost, force-carry ke D+2 kalau blm
-#    resolve sampai akhir jam bursa (15:45 WIB, toleransi sblm closing).
-# 6) Exit Day-2 (HANYA utk pick yg carry): trailing target mulai +5%,
-#    decay ke floor +2% (giveback 1% dari peak return tercapai), SL -6%
-#    ttp berlaku, force-exit di AKHIR SESI 1 D+1 (BUKAN lanjut sesi 2 --
-#    riset: subset lemah ini makin memburuk kalau ditahan lebih lama).
+# 5) Exit Day-1: TP+5%/SL-8% dari avg_cost (touch-rate research/session1_
+#    rally_dna_filter_test_2026_09_28.py: TP 52%, SL 20%, neither 27%),
+#    force-carry ke D+2 kalau blm resolve sampai akhir jam bursa (15:45
+#    WIB, toleransi sblm closing).
+# 6) Exit Day-2 (HANYA utk pick yg carry, BELUM diriset ulang utk sinyal
+#    baru ini -- angka lama dipertahankan sbg default konservatif):
+#    trailing target mulai +5%, decay ke floor +2% (giveback 1% dari peak
+#    return tercapai), SL -6% ttp berlaku, force-exit di AKHIR SESI 1 D+1.
 #
-# Backtest (research/rsi_macd_filter_backtest.py section3, RSI>=65/MACD
-# produksi>0): n=39 (3.25/hari, 12 hari bursa), mean=3.34%, median=6.00%,
+# CATATAN RISIKO (jangan dihapus/lupakan): sample backtest KECIL (11 hari
+# bearish-regime, SATU downleg kontinu, BUKAN beberapa periode bearish
+# independen) -- re-validate begitu ada periode bearish lain. Filter ini
+# jg menaikkan frekuensi gagal (24.5% closed<=-5% dari open sendiri,
+# ~18% langsung ambruk dari MENIT PERTAMA) -- dial risk/reward, BUKAN
+# filter aman. Arketipe ke-2 (oversold-bounce) SENGAJA belum diikutkan,
+# lihat catatan ENTRY_PAGI_ENABLED di atas.
+#
+# Backtest LAMA (research/rsi_macd_filter_backtest.py section3, RSI>=65/MACD
+# produksi>0, SUDAH TIDAK DIPAKAI -- disimpan sbg histori): n=39
+# (3.25/hari, 12 hari bursa), mean=3.34%, median=6.00%,
 # win=84.6%. D1-only: n=21, win=95.2%. D+2 (carryover): n=18, mean=0.91%,
 # median=2.00%, win=72.2%.
-ENTRY_PAGI_ENABLED = False  # MBSS v2 (user request 2026-09-21): dinonaktifkan -- profitable 46.5%
-# (di bawah 50%!), mean cuma +0.71%, tidak lolos bar "profitable meyakinkan" utk daytrade
-# family (lihat memory project_daytrade_family_audit_2026_09_21). feature-toggle terisolasi
-# -- set True lagi kalau mau diaktifkan, TANPA menyentuh lane lain.
+ENTRY_PAGI_ENABLED = True  # MBSS v2 (2026-09-28): REPLACED, bukan cuma diaktifkan lagi.
+# RSI>=65/MACD>0 funnel di atas gagal bar daytrade family 2026-09-21 (win
+# 46.5%, mean +0.71%) dan sempat dinonaktifkan -- user putuskan saat itu
+# DROP /entrypagi (memory project_daytrade_family_decision_2026_09_21),
+# tapi implementasi belum pernah dikerjakan. Sesi 2026-09-28: user amati
+# IATA/UVCR/JAWA rally sesi-1 di atas open hari yg sama, riset
+# (research/session1_rally_scan_2026_09_28.py, session1_rally_dna_2026_09_28.py,
+# session1_rally_dna_filter_test_2026_09_28.py) menemukan DNA D-1 yg
+# konsisten (11 hari bearish-regime, SATU downleg kontinu -- SAMPLE KECIL,
+# re-validate begitu ada periode bearish lain) dan divalidasi user via
+# konfirmasi 5-menit-pertama-sejak-open (persis window OR 09:00-09:05 yg
+# SUDAH ada di bawah). Menggantikan funnel RSI/MACD lama SEPENUHNYA --
+# lihat entry_pagi_dna_gate_pass() & _rank_entry_pagi_candidates() baru.
+# Arketipe ke-2 dari riset yg sama (oversold-bounce, RSI<=40 + jauh di
+# bawah SMA20) SENGAJA belum diikutkan -- butuh field dist_sma20_pct baru
+# di compute_factor_scoring yg belum ditambahkan (proxy pakai pct_b yg
+# sudah ada ambruk ke lift ~1.1x, tidak viable). Follow-up terpisah.
 
 ENTRY_PAGI_OR_WINDOW_END = datetime.time(9, 5)  # jendela opening-range: buka s.d. 09:05 WIB
 ENTRY_PAGI_SCAN_WINDOW_START = datetime.time(9, 5)
@@ -2717,12 +2743,25 @@ ENTRY_PAGI_MONITOR_WINDOW_END = datetime.time(15, 50)
 ENTRY_PAGI_SESSION1_END = datetime.time(11, 59, 59)  # scan kandidat BARU cukup di sesi 1 (user request -- "biar gak noisy"), monitoring TP/SL tetap sepanjang hari
 ENTRY_PAGI_FORCE_EOD_TIME = datetime.time(15, 45)  # dekat closing -- kalau blm resolve, carry ke D+2 drpd ke-skip krn keburu market tutup
 
-ENTRY_PAGI_RSI_MIN = 65.0
-ENTRY_PAGI_MACD_MIN = 0.0
-ENTRY_PAGI_TOP_N = 10
+# DNA gate (momentum-pump archetype, session1_rally_dna_2026_09_28.py --
+# semua field REUSE dari nightly EOD cache, TANPA fetch tambahan):
+ENTRY_PAGI_PRICE_MAX = 500.0        # penny-stock tilt yg ditemukan di riset
+ENTRY_PAGI_PCT_B_MIN = 0.6          # di atas SMA20, area upper-band
+ENTRY_PAGI_ATR_PCT_PERCENTILE = 0.75  # ATR14% >= p75 cross-sectional malam itu (volatilitas tinggi)
+# 5-menit konfirmasi (harga @ OR window 09:00-09:05 vs open 09:00 -- user
+# request 2026-09-28: "pantau 5 menit awal, kalau naik ambil momentumnya").
+# Backtest (n=494 kandidat gate): >=+2% -> hit-rate rally>=10% naik dari
+# base 12.3% ke 45.3% (lift 3.7x); turun/flat di menit-5 -> hit-rate
+# ANJLOK ke 6.5% (di bawah base) -- >=2% dipilih sbg titik confirm.
+ENTRY_PAGI_CONFIRM_5MIN_PCT = 2.0
+ENTRY_PAGI_TOP_N = 5  # diturunkan dari 10 -- sinyal ini jauh lebih ketat (~3-4 lolos/hari di backtest), TOP_N lama akan sering kosongkan hari yg justru kandidatnya sehat
 ENTRY_PAGI_AVGDOWN_PCT = -3.0
-ENTRY_PAGI_D1_TP_PCT = 6.0
-ENTRY_PAGI_D1_SL_PCT = 6.0
+# TP/SL dihitung DARI entry (harga confirm 09:05), bukan dari open -- lihat
+# research/session1_rally_dna_filter_test_2026_09_28.py bagian TP/SL
+# touch-rate (n=44 kandidat confirm>=2%): TP+5%/SL-8% -> TP 52%, SL 20%,
+# neither 27% (kombinasi EV terbaik dari beberapa yg dicoba: 3/5, 5/6, 3/6).
+ENTRY_PAGI_D1_TP_PCT = 5.0
+ENTRY_PAGI_D1_SL_PCT = 8.0
 # MBSS v2 (user request 2026-09-09, delay-fetch review): entry_price
 # dihitung dari OR window (bisa >=beberapa menit stale krn delay yfinance
 # + waktu baca user). Backtest ceiling-tolerance (research/entry_pagi_
@@ -2814,116 +2853,106 @@ def _entry_pagi_opening_range_from_bars(data, tickers: list[str], or_window_end:
             or_high = float(win["High"].astype(float).max())
             or_low = float(win["Low"].astype(float).min())
             entry_ref = float(win["Close"].astype(float).iloc[-1])
+            open_price = float(win["Open"].astype(float).iloc[0])
         except Exception:
             continue
-        if or_high > 0 and or_low > 0 and entry_ref > 0:
-            out[t] = {"or_high": or_high, "or_low": or_low, "entry_ref": entry_ref}
+        if or_high > 0 and or_low > 0 and entry_ref > 0 and open_price > 0:
+            out[t] = {"or_high": or_high, "or_low": or_low, "entry_ref": entry_ref, "open_price": open_price}
     return out
+
+
+def compute_atr_pct14_p75(records) -> float | None:
+    """Cross-sectional ATR14% p75 dari populasi malam ini (`scored.values()`
+    atau list dict apapun yg punya field atr_pct14) -- shared helper dipakai
+    entry_pagi_dna_gate_pass di 3 titik (scan otomatis, preview manual
+    /fast, cross-tag /pingpong) supaya threshold-nya TIDAK bisa divergen
+    antar tempat. None kalau data kurang dari 20 (percentile tidak stabil)."""
+    values = records.values() if hasattr(records, "values") else records
+    vals = sorted(v.get("atr_pct14") for v in values if v.get("atr_pct14") is not None)
+    if len(vals) < 20:
+        return None
+    idx = min(int(len(vals) * ENTRY_PAGI_ATR_PCT_PERCENTILE), len(vals) - 1)
+    return vals[idx]
+
+
+def entry_pagi_dna_gate_pass(info: dict, atr_p75: float | None) -> bool:
+    """Momentum-pump DNA gate (MBSS v2, 2026-09-28 -- MENGGANTIKAN funnel
+    RSI>=65/MACD>0 lama sepenuhnya, lihat catatan ENTRY_PAGI_ENABLED di
+    atas utk riwayat lengkap keputusannya). Semua field REUSE dari cache
+    EOD nightly (`scored[t]`), TANPA fetch tambahan:
+      - price<=500 (penny-stock tilt yg ditemukan konsisten di riset)
+      - pct_b>=0.6 (di atas SMA20, area upper-band -- BUKAN oversold-bounce)
+      - ret_5d_pct>0 (sudah trending naik, bukan saham yg baru dibuang/jatuh)
+      - atr_pct14>=p75 cross-sectional malam ini (volatilitas tinggi -- ini
+        DIAL risk/reward, bukan filter keamanan, sama spt tiering ATR di
+        pillar lain -- lihat memory project_macd_n10_atr_filter_and_tiering)
+
+    Backtest research/session1_rally_dna_filter_test_2026_09_28.py (11 hari
+    bearish-regime, SATU downleg kontinu -- sample kecil, belum tervalidasi
+    lintas periode bearish lain): lift 3.97x vs base rate utk next-day
+    session-1 rally>=10% (15.4% vs 3.9%). CATATAN RISIKO (jangan dihapus):
+    filter ini jg menaikkan frekuensi gagal -- 24.5% kandidat historis
+    berakhir closed<=-5% dari open sendiri hari itu, ~18% malah langsung
+    ambruk dari MENIT PERTAMA tanpa sempat rally sama sekali. Makanya gate
+    EOD ini SENGAJA tidak dipakai sendirian -- lihat ENTRY_PAGI_CONFIRM_
+    5MIN_PCT, konfirmasi intraday di _rank_entry_pagi_candidates."""
+    if atr_p75 is None:
+        return False
+    price = info.get("price")
+    pct_b = info.get("pct_b")
+    ret_5d = info.get("ret_5d_pct")
+    atr14 = info.get("atr_pct14")
+    if price is None or pct_b is None or ret_5d is None or atr14 is None:
+        return False
+    return price <= ENTRY_PAGI_PRICE_MAX and pct_b >= ENTRY_PAGI_PCT_B_MIN and ret_5d > 0 and atr14 >= atr_p75
 
 
 def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
     """
-    FUNNEL DIBALIK (MBSS v2, 2026-09-09 -- diagnosis 3-hari-beruntun ENTRY
-    PAGI gagal fire, memory project_entry_pagi_funnel_redesign_2026_09_09.
-    md). Desain LAMA: rank SELURUH universe by posisi-OR dulu (buta thd
-    momentum) -> ambil Top-10 -> BARU filter RSI/MACD. Kalau Top-10 hasil
-    posisi-OR itu kebetulan tidak ada yg RSI/MACD-qualifying, SELURUHNYA
-    kosong -- walau pool RSI/MACD sendiri (scan/prefilter EOD) SEHAT.
-    Backtest 2thn (458 hari): gate RSI/MACD SENDIRI cuma kosong 0.7% hari,
-    tapi desain LAMA (rank-dulu-filter-belakangan) kosong ~46.5% hari --
-    45.8 poin persen semata2 krn URUTAN funnel, BUKAN kondisi pasar. Live
-    case malam ini (user report): prefilter EOD 127 ticker lolos RSI/
-    MACD, TAPI alert intraday 3 hari beruntun tidak pernah keluar -- PERSIS
-    gejala bug ini, bukan kebetulan.
+    MBSS v2, 2026-09-28 -- REPLACED (bukan tuning). Funnel RSI>=65/MACD>0
+    lama (rangking 5-faktor: posisi-OR, dist-from-prior-high, or_range,
+    foreign-flow, extension-risk) dicabut TOTAL bareng gate-nya -- sinyal
+    lama gagal bar daytrade family 2026-09-21 (win 46.5%), user putuskan
+    drop tapi belum pernah diimplementasi (memory project_daytrade_family_
+    decision_2026_09_21). Diganti dua tahap:
 
-    FIX: gate RSI>=65 & MACD>0 diterapkan DI SINI (line pertama, ke
-    SELURUH or_data), SEBELUM liquidity-filter & ranking -- bukan lagi di
-    akhir stlh Top-10. Backtest desain baru: tingkat kosong turun ke 0.7%
-    (persis match tingkat kosong gate itu sendiri), win39.8%->kira2 sama/
-    lebih baik, TANPA ongkos kualitas (fix murni urutan, bukan mengubah
-    apa yg menentukan ADA-tidaknya kandidat).
+    1. DNA gate (entry_pagi_dna_gate_pass, EOD-only -- lihat docstringnya)
+       diterapkan DULU ke seluruh scored ∩ or_data, SEBELUM ranking apapun
+       -- funnel-order fix 2026-09-09 (project_entry_pagi_funnel_redesign)
+       masih dipegang: gate di depan, bukan di belakang stlh Top-N.
+    2. Konfirmasi 5-menit (chg_5min_pct = harga OR window 09:05 vs open
+       09:00, window ini KEBETULAN sudah persis 5 menit -- ENTRY_PAGI_OR_
+       WINDOW_END tidak perlu diubah) -- WAJIB >=ENTRY_PAGI_CONFIRM_5MIN_PCT,
+       ini bagian yg user minta eksplisit ("pantau 5 menit awal open, kalau
+       naik ambil momentumnya, kalau turun skip") dan tervalidasi kuat di
+       backtest (lift 3.7x pada >=+2%, hit-rate ANJLOK di bawah base kalau
+       turun). Rank oleh chg_5min_pct DESCENDING (makin kuat konfirmasinya
+       makin diprioritaskan) -- BUKAN composite-rank 5-faktor lama, karena
+       thesis-nya sudah beda total (momentum intraday, bukan pullback-ke-OR).
 
-    Composite ranking 5 faktor (naik dari 4): entry_pos_in_or (posisi
-    entry_ref dlm range OR -- makin dekat OR_low makin baik, strategi
-    pullback), dist_from_prior_high_pct (makin jauh di bawah high D-1
-    makin baik), or_range_pct (opening range makin lebar makin baik),
-    foreign_net_ratio_1d (D-1 foreign net-buy/volume, booster sejak
-    2026-09-09 pagi, commit e1a3e89), DAN BARU: extension-risk (rank
-    ASCENDING by RSI -- makin RENDAH/kurang-extended makin baik). User
-    keputusan eksplisit: DEPRIORITIZE bukan hard-exclude utk RSI ekstrem
-    (mis. SAFE RSI94/SOHO RSI89/UANG RSI87 malam ini) -- nama itu MASIH
-    bisa masuk Top-10 kalau faktor lain sangat kuat, cuma diturunkan
-    prioritasnya, TIDAK dikeluarkan paksa dari pool. Backtest konfirmasi
-    band RSI 65-80 (win52.8%/mean+0.50%) jauh lebih baik dari >=85
-    (win38.4%/mean+0.07%) -- gradien monoton bersih, bukan spike.
-
-    Liquidity filter: top-half by D-1 value_traded (proxy `day_vol_avg_
-    prior` riset -- REUSE field yg SUDAH dihitung nightly, TANPA fetch
-    tambahan) -- TIDAK berubah dari desain lama.
-
-    Ticker TANPA data foreign flow (None) diberi rank TERBURUK di r4
-    (bukan di-drop/dipenalti keras) -- "missing = neutral" jadi "missing
-    = tidak dpt boost", bukan "missing = excluded". RSI/MACD WAJIB ada
-    (fail-closed, gate inti) -- beda dari foreign_net_ratio_1d yg opsional.
+    Tidak ada liquidity-median-filter terpisah lagi (gate DNA + konfirmasi
+    5-menit sendiri sudah signifikan mempersempit pool di backtest, ~3-4
+    lolos/hari) -- value_traded tetap disimpan per-row utk kebutuhan
+    display/logging, bukan gate.
     """
+    atr_p75 = compute_atr_pct14_p75(scored)
     rows = []
     for t, snap in or_data.items():
         info = scored.get(t)
-        if not info:
+        if not info or not entry_pagi_dna_gate_pass(info, atr_p75):
             continue
-        prior_high = info.get("intraday_high")  # D-1 day-high (dihitung nightly, dekat closing D-1)
-        value_traded = info.get("value_traded")
-        if not prior_high or prior_high <= 0 or not value_traded:
-            continue
-        rsi = info.get("rsi")
-        macd_hist = info.get("macd_hist")
-        if rsi is None or macd_hist is None or not (rsi >= ENTRY_PAGI_RSI_MIN and macd_hist > ENTRY_PAGI_MACD_MIN):
-            continue  # gate INTI diterapkan DI SINI (fix funnel-order), bukan di akhir stlh Top-10
-        or_high, or_low, entry_ref = snap["or_high"], snap["or_low"], snap["entry_ref"]
-        or_range_pct = (or_high - or_low) / or_low * 100 if or_low > 0 else None
-        entry_pos_in_or = (
-            (entry_ref - or_low) / (or_high - or_low) if (or_high - or_low) > 0 else None
-        )
-        if entry_pos_in_or is None or or_range_pct is None:
-            continue
-        dist_from_prior_high_pct = (entry_ref - prior_high) / prior_high * 100
+        open_price, entry_ref = snap["open_price"], snap["entry_ref"]
+        chg_5min_pct = (entry_ref / open_price - 1) * 100
+        if chg_5min_pct < ENTRY_PAGI_CONFIRM_5MIN_PCT:
+            continue  # "kalau bergerak turun, skip" -- user request 2026-09-28
         rows.append({
-            "ticker": t, "entry_ref": entry_ref, "value_traded": value_traded,
-            "entry_pos_in_or": entry_pos_in_or, "dist_from_prior_high_pct": dist_from_prior_high_pct,
-            "or_range_pct": or_range_pct, "rsi": rsi, "macd_hist": macd_hist,
+            "ticker": t, "entry_ref": entry_ref, "value_traded": info.get("value_traded"),
+            "chg_5min_pct": chg_5min_pct,
             "whitelist_accumulation_net_pct": info.get("whitelist_accumulation_net_pct"),
             "whitelist_num_brokers": info.get("whitelist_num_brokers"),
-            "foreign_net_ratio_1d": info.get("foreign_net_ratio_1d"),
         })
-    if len(rows) < ENTRY_PAGI_TOP_N:
-        return []
-
-    rows_by_vt = sorted(rows, key=lambda r: r["value_traded"])
-    median_vt = rows_by_vt[len(rows_by_vt) // 2]["value_traded"]
-    liquid = [r for r in rows if r["value_traded"] >= median_vt]
-    if len(liquid) < ENTRY_PAGI_TOP_N:
-        liquid = rows
-
-    def _rank_map(seq, key, reverse=False):
-        ordered = sorted(seq, key=key, reverse=reverse)
-        return {r["ticker"]: i for i, r in enumerate(ordered, start=1)}
-
-    r1 = _rank_map(liquid, lambda r: r["entry_pos_in_or"])
-    r2 = _rank_map(liquid, lambda r: r["dist_from_prior_high_pct"])
-    r3 = _rank_map(liquid, lambda r: r["or_range_pct"], reverse=True)
-    # foreign_net_ratio_1d makin TINGGI makin baik (net-buy asing) -> reverse=True
-    # spt r3. Missing (None) diperlakukan sbg -inf shg selalu rank TERBURUK,
-    # bukan crash (None tidak bisa dibandingkan langsung dgn float di sort()).
-    r4 = _rank_map(liquid, lambda r: r["foreign_net_ratio_1d"] if r["foreign_net_ratio_1d"] is not None else float("-inf"), reverse=True)
-    # extension-risk (MBSS v2, 2026-09-09): rank ASCENDING by RSI -- makin
-    # RENDAH/kurang-extended makin baik (deprioritize, BUKAN exclude, sesuai
-    # keputusan user). rsi SELALU ada di titik ini (gate inti di atas sudah
-    # mewajibkan), jadi tidak butuh guard None.
-    r5 = _rank_map(liquid, lambda r: r["rsi"])
-    for r in liquid:
-        r["score"] = r1[r["ticker"]] + r2[r["ticker"]] + r3[r["ticker"]] + r4[r["ticker"]] + r5[r["ticker"]]
-    liquid.sort(key=lambda r: r["score"])
-    return liquid[:ENTRY_PAGI_TOP_N]
+    rows.sort(key=lambda r: r["chg_5min_pct"], reverse=True)
+    return rows[:ENTRY_PAGI_TOP_N]
 
 
 def _smart_money_tag(net_pct, num_brokers) -> str:
@@ -3187,7 +3216,7 @@ async def run_entry_pagi_scan_once(force: bool = False) -> dict:
     if picks_state or skipped_state:
         new_state["message_id"] = await _entry_pagi_send_new_message(_render_entry_pagi_message(picks_state, skipped_state))
     else:
-        print("ℹ️ Entry Pagi: tidak ada kandidat lolos filter RSI/MACD hari ini.")
+        print("ℹ️ Entry Pagi: tidak ada kandidat lolos DNA gate + konfirmasi 5-menit hari ini.")
 
     _save_entry_pagi_state(new_state)
     summary["picks"] = len(picks_state)

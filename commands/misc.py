@@ -88,11 +88,11 @@ Ketik /check, /myportfolio, atau /testbrief untuk melihat istilah-istilah ini da
 TRADE_RULES_TEXT = """📐 TRADE STRATEGY — ENTRY PAGI / REBOUND / ENTRY SORE
 
 ━━━ ENTRY PAGI ━━━
-Screening: top-10 ranking opening-range (posisi entry di jendela 09:00-09:05, jarak dari high kemarin, lebar range) + filter RSI(Wilder,14)>=65 & MACD histogram(SMA produksi)>0 dari closing kemarin (D-1).
+Screening (diganti 2026-09-28 -- lihat engine/scanalert.py ENTRY_PAGI_ENABLED): DNA gate D-1 (price<=500, %B>=0.6, ret_5d>0, ATR14%>=p75 cross-sectional) + konfirmasi 5-menit-pertama (harga jendela 09:00-09:05 harus sudah >=+2% dari open 09:00 -- "naik dulu baru masuk, turun skip"). Top-5 by kekuatan konfirmasi.
 Entry: langsung di closing jendela opening-range (09:05), TANPA tunggu dip.
 Avg-down: sekali, di -3% dari entry (split modal 50/50).
-TP: +6% dari avg cost, hari yang sama (D1).
-SL: -6% dari avg cost, hari yang sama (D1).
+TP: +5% dari avg cost, hari yang sama (D1).
+SL: -8% dari avg cost, hari yang sama (D1).
 Kalau belum resolve s.d closing: lanjut D+1 -- trailing target mulai +5%, turun bertahap ke floor +2% (giveback 1% dari peak), SL tetap -6%, force-exit akhir sesi 1 D+1.
 
 ━━━ DAY TRADE REBOUND ━━━
