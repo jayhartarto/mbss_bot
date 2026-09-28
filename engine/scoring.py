@@ -61,6 +61,7 @@ import pandas as pd
 from engine import legacy_core as core
 import engine.market as market_engine
 import engine.broker as broker_engine
+import engine.fundamental_health as fundamental_health_engine
 
 _bsjp2_error_logged = False  # reset per process restart -- see compute_bsjp2_features call below
 
@@ -974,9 +975,21 @@ ACTION_LABEL_ID = {
 def decide_action(final_score, value_score, momentum_score, sentiment_score,
                    is_financial_distress_flag, chart_pattern, is_overbought_caution,
                    obv_divergence, is_volume_spike_anomaly, is_near_price_floor,
-                   is_unusually_low_pe, macd_bearish_cross=False, is_below_sma50=False):
-    # 1. Base tier from the blended score
-    if final_score >= 7.5:
+                   is_unusually_low_pe, macd_bearish_cross=False, is_below_sma50=False,
+                   base_tier_override=None, is_borderline_override=None):
+    # 1. Base tier dari final_score ABSOLUT -- ATAU dari base_tier_override
+    # kalau dikirim (REDESIGN 2026-09-28: percentile lintas-populasi malam
+    # ini, lihat engine/nightly.py::apply_percentile_action_tiers). Cutoff
+    # absolut 7.5/6.0/4.5 di bawah ini DIKALIBRASI UTK FORMULA LAMA -- diukur
+    # nyata (n=107 ticker, 2026-09-28) final_score BARU std-nya cuma ~0.58
+    # berpusat di ~5, cutoff lama jadi nyaris tidak pernah tercapai (0
+    # STRONG_BUY, 1 BUY_ACCUMULATE dari 107). Tetap disimpan sbg FALLBACK
+    # utk panggilan TANPA konteks populasi (mis. compute_factor_scoring's
+    # panggilan awal SEBELUM post-hoc pass jalan) -- base_tier_override
+    # SELALU menang kalau tersedia, itu yg dipakai /eodscan produksi.
+    if base_tier_override is not None:
+        base_tier = base_tier_override
+    elif final_score >= 7.5:
         base_tier = "STRONG_BUY"
     elif final_score >= 6.0:
         base_tier = "BUY_ACCUMULATE"
@@ -1007,7 +1020,7 @@ def decide_action(final_score, value_score, momentum_score, sentiment_score,
     # 4. Borderline buffer near the score cliffs — avoids false precision where 7.49
     # vs 7.51 would otherwise flip confidently between two very different labels.
     thresholds = [4.5, 6.0, 7.5]
-    is_borderline = any(abs(final_score - t) < 0.3 for t in thresholds)
+    is_borderline = is_borderline_override if is_borderline_override is not None else any(abs(final_score - t) < 0.3 for t in thresholds)
     # is_below_sma50 (still in a weaker medium-term trend) joins the other soft flags —
     # relevant for swing-trade framing since a good short-term setup inside a still-
     # weak medium-term regime is exactly the kind of tension worth surfacing.
@@ -1361,12 +1374,22 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         pb_score_fixed = max(1.0, min(10.0, 10 - (pb - 0.5) / 0.35))
 
     is_financial_distress_flag = (pe is not None and pe < 0) or (pb is not None and pb < 0)
-    dividend_score = max(1.0, min(10.0, dividend_yield_pct))  # roughly 1 point per 1% yield, capped
+    dividend_score = max(1.0, min(10.0, dividend_yield_pct))  # tetap dihitung -- TIDAK LAGI dipakai value_score, cuma sisa historis (dividend_yield_pct mentah tetap dipakai utk display /check)
 
-    # Bobot direvisi user: PE 25 / PB 35 / Dividend 15 / Growth Catalyst 25 (dihapus,
-    # susah dikuantifikasi) — dinormalisasi proporsional ke 100% dari 3 komponen
-    # yang tersisa, mempertahankan rasio relatif PE<PB, Dividend paling kecil.
-    value_score = (pe_score_fixed * 0.333) + (pb_score_fixed * 0.467) + (dividend_score * 0.20)
+    # Value score -- REPLACED 2026-09-28 (GAP ditemukan saat audit downstream:
+    # user sudah konfirmasi "fundamental menggantikan value score" sejak
+    # 2026-09-27, TAPI koneksinya KELUPAAN saat itu -- fundamental_health.py
+    # dibangun & tampil di /check, tapi value_score DI SINI masih formula
+    # PE/PB/dividend lama, tidak pernah benar2 diganti. pe_score_fixed/
+    # pb_score_fixed/dividend_score di atas jadi TIDAK DIPAKAI lagi (biarkan,
+    # pe/pb/dividend_yield_pct MENTAH-nya tetap field display /check).
+    # Fallback netral 5.0 kalau ticker belum ada di cache bulanan (bulan
+    # pertama sblm refresh pertama, atau ticker baru/di luar whitelist) --
+    # konvensi rumah "missing = netral".
+    _fh = fundamental_health_engine.get_fundamental_health(ticker)
+    value_score = _fh["final"] if _fh else 5.0
+    if _fh and _fh.get("is_distress"):
+        is_financial_distress_flag = True
 
     # --- 3. MOMENTUM SCORE (RSI + price-vs-SMA20, both adaptive per stock) ---
     sma20_series = close_prices.rolling(window=20).mean()

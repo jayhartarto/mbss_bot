@@ -542,6 +542,15 @@ async def run_nightly_full_scan(context):
         except Exception as e:
             print(f"⚠️ Gagal menjalankan sentiment regime-adjustment: {e}")
 
+        # HARUS TERAKHIR (2026-09-28) -- final_score di atas sudah lengkap
+        # ter-adjust (momentum pillar + sentiment regime), sekarang baru
+        # action_id dinilai ulang relatif ke populasi malam ini. Lihat
+        # docstring apply_percentile_action_tiers utk alasan lengkap.
+        try:
+            apply_percentile_action_tiers(results)
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan percentile action-tiers: {e}")
+
         trading_night_index = _get_and_increment_trading_night_index()
 
         broksum_250_data = {}
@@ -1071,6 +1080,75 @@ def apply_sentiment_regime_boost(results: list) -> int:
 
     print(f"🌊 Sentiment regime-adjustment: {len(valid)} ticker distandarisasi, regime IHSG={regime_adjustment:+.2f} (ret20={ihsg_ret20}), {n_adjusted} ticker berubah.")
     return n_adjusted
+
+
+# Cutoff PERSENTIL lintas-populasi (2026-09-28) -- BELUM divalidasi backtest
+# (beda dari komponen skor lain sesi ini yg semua diukur empiris), pilihan
+# awal yg wajar: bawah 30%=AVOID_SELL, 30-70%=HOLD, 70-90%=BUY_ACCUMULATE,
+# atas 10%=STRONG_BUY. REVISIT setelah ada histori live -- sama disiplin dgn
+# DANGER_GATE_QUANTILE_BY_REGIME's non-R1 cutoff (backbone.py, "conservative
+# placeholder pending forward data").
+ACTION_TIER_PERCENTILE_CUTOFFS = (0.30, 0.70, 0.90)  # (AVOID_SELL|HOLD, HOLD|BUY_ACCUMULATE, BUY_ACCUMULATE|STRONG_BUY)
+ACTION_TIER_BORDERLINE_BAND = 0.03  # +-3 poin persentil dari cutoff dianggap borderline
+
+
+def apply_percentile_action_tiers(results: list) -> int:
+    """
+    Post-hoc pass TERAKHIR (2026-09-28) -- dipanggil SETELAH apply_momentum_
+    pillar_boosts & apply_sentiment_regime_boost selesai, jadi final_score yg
+    dipakai di sini sudah lengkap ter-adjust. Ganti base_tier decide_action()
+    dari cutoff ABSOLUT (7.5/6.0/4.5, dikalibrasi utk formula skor LAMA) jadi
+    PERSENTIL LINTAS-POPULASI malam ini -- sama pola dgn Danger Gate
+    (DANGER_GATE_QUANTILE_BY_REGIME, backbone.py).
+
+    ALASAN (diukur nyata 2026-09-28, n=107 ticker sampel lintas sektor):
+    final_score BARU (Fundamental/Momentum/Sentiment yg sudah distandarisasi)
+    std-nya cuma ~0.58, berpusat di ~5 -- cutoff absolut lama (jarak 1.5 poin
+    per tier) jadi nyaris tidak pernah tercapai: 0 STRONG_BUY, cuma 1
+    BUY_ACCUMULATE dari 107 ticker. Base_tier HARUS relatif ke populasi malam
+    itu sendiri, bukan angka mutlak yg tidak lagi match skala skor baru.
+    """
+    valid = [r for r in results if r and not r.get("excluded") and r.get("scores", {}).get("final") is not None]
+    if not valid:
+        return 0
+    finals = [r["scores"]["final"] for r in valid]
+    n = len(finals)
+    c1, c2, c3 = ACTION_TIER_PERCENTILE_CUTOFFS
+
+    n_changed = 0
+    for r in valid:
+        x = r["scores"]["final"]
+        pct = sum(1 for f in finals if f < x) / n
+        if pct < c1:
+            base_tier = "AVOID_SELL"
+        elif pct < c2:
+            base_tier = "HOLD"
+        elif pct < c3:
+            base_tier = "BUY_ACCUMULATE"
+        else:
+            base_tier = "STRONG_BUY"
+        is_borderline = any(abs(pct - c) < ACTION_TIER_BORDERLINE_BAND for c in ACTION_TIER_PERCENTILE_CUTOFFS)
+
+        s = r["scores"]
+        decision = scoring_engine.decide_action(
+            final_score=s["final"], value_score=s["value"], momentum_score=s["momentum"],
+            sentiment_score=s["sentiment"], is_financial_distress_flag=r.get("is_financial_distress_flag", False),
+            chart_pattern=r.get("chart_pattern", "none"), is_overbought_caution=r.get("is_overbought_caution", False),
+            obv_divergence=r.get("obv_divergence", "none"), is_volume_spike_anomaly=r.get("is_volume_spike_anomaly", False),
+            is_near_price_floor=r.get("is_near_price_floor", False), is_unusually_low_pe=r.get("is_unusually_low_pe", False),
+            macd_bearish_cross=r.get("macd_bearish_cross", False), is_below_sma50=r.get("is_below_sma50", False),
+            base_tier_override=base_tier, is_borderline_override=is_borderline,
+        )
+        if decision["action_id"] != r.get("action_id"):
+            n_changed += 1
+        r["action_id"] = decision["action_id"]
+        r["action_label_id"] = decision["action_label_id"]
+        r["action_ceiling_applied"] = decision["ceiling_applied"]
+        r["action_component_spread"] = decision["component_spread"]
+        r["action_tier_percentile"] = round(pct, 3)
+
+    print(f"🏷️ Percentile action-tiers: {n} ticker dinilai ulang lintas-populasi, {n_changed} action_id berubah dari hasil cutoff absolut sebelumnya.")
+    return n_changed
 
 
 def _get_and_increment_trading_night_index() -> int:
