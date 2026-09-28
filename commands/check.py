@@ -50,16 +50,38 @@ async def check_stock(update, context):
     use_zapi = len(context.args) > 1 and context.args[1].lower() == "zapi"
     await core.safe_reply(update.message, f"🔎 Menganalisa {ticker}, mohon tunggu...")
 
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(scoring_engine.compute_factor_scoring, ticker), timeout=1800
-        )
-    except asyncio.TimeoutError:
-        await core.safe_reply(update.message, f"⚠️ Timeout mengambil data untuk {ticker}. Coba lagi nanti.")
-        return
-    except Exception as e:
-        await core.safe_reply(update.message, f"⚠️ Gagal mengambil data untuk {ticker}: {e}")
-        return
+    # MBSS v2 (user request 2026-09-28, gap ditemukan lewat kasus CSIS):
+    # compute_factor_scoring() on-demand di sini TIDAK PERNAH lewat 3 post-hoc
+    # pass di engine/nightly.py (apply_momentum_pillar_boosts/apply_sentiment_
+    # regime_boost/apply_percentile_action_tiers) -- ketiganya BUTUH konteks
+    # SELURUH populasi malam itu (standardisasi lintas-populasi, lookup tier
+    # BSJP/BOW/VCP/MACD-confirm, persentil final_score), yang genuinely tidak
+    # ada untuk panggilan SATU ticker. Akibatnya /check menampilkan Momentum/
+    # Sentimen mentah (belum distandarisasi, belum dapat bonus pilar) dan
+    # action_id dari cutoff absolut LAMA -- BISA BEDA dari yang ditampilkan
+    # /strongbuy, /screendaytrade, /consensus (semua baca cache /eodscan yang
+    # SUDAH lengkap ter-adjust). Fix: coba cache /eodscan DULU (baca-saja,
+    # tanpa fetch baru -- sama disiplin dgn command lain, lihat finance skill
+    # "/check switched to READ-ONLY same-day cache reuse"), fallback ke live
+    # compute cuma kalau ticker belum ada di cache (ticker baru/di luar
+    # whitelist/cache belum pernah ada).
+    cache_staleness_note = None
+    scored_cache, cache_staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
+    result = scored_cache.get(ticker) if scored_cache else None
+    if result:
+        result = dict(result)  # copy -- jangan mutasi cache in-place di bawah
+    else:
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(scoring_engine.compute_factor_scoring, ticker), timeout=1800
+            )
+        except asyncio.TimeoutError:
+            await core.safe_reply(update.message, f"⚠️ Timeout mengambil data untuk {ticker}. Coba lagi nanti.")
+            return
+        except Exception as e:
+            await core.safe_reply(update.message, f"⚠️ Gagal mengambil data untuk {ticker}: {e}")
+            return
+        cache_staleness_note = "ℹ️ Ticker belum ada di cache /eodscan semalam -- dihitung langsung, Momentum/Sentimen di bawah BELUM distandarisasi lintas-populasi & BELUM dapat bonus pilar (BSJP/BOW/VCP/MACD-confirm), action_id pakai cutoff dasar."
 
     if not result:
         real_reason = scoring_engine.get_last_exclusion_reason(ticker)
@@ -204,11 +226,52 @@ async def check_stock(update, context):
     # Raw deterministic data — plain Python formatting, NOT AI-generated — so every
     # number Gemini referenced above can be independently cross-checked directly.
     freshness_line = f"⚠️ {result['data_freshness_warning']}\n" if result.get("data_freshness_warning") else ""
+    if cache_staleness_note:
+        freshness_line += f"{cache_staleness_note}\n"
 
     intraday_line = (
         f"Intraday: High {result['intraday_high']} | Low {result['intraday_low']}\n"
         if result.get('intraday_high') else ""
     )
+
+    # MBSS v2 (user request 2026-09-28): tampilkan lane pilar (BSJP/BOW/VCP/
+    # MACD-confirm) yang berkontribusi ke Momentum score, kalau ada. Field
+    # momentum_pillar_flags/momentum_pillar_adjustment/sentiment_regime_
+    # adjustment/action_tier_percentile CUMA terisi kalau result datang dari
+    # cache /eodscan (sudah lewat 3 post-hoc pass) -- kosong kalau fallback
+    # live-compute (ticker belum discan malam ini), lihat cache_staleness_note.
+    def _format_pillar_lane_block(r):
+        flags = r.get("momentum_pillar_flags") or {}
+        adj = r.get("momentum_pillar_adjustment")
+        if not flags:
+            return ""
+        labels = []
+        if flags.get("bsjp_tier"):
+            labels.append(f"BSJP {flags['bsjp_tier'].replace('_', ' ')}")
+        if flags.get("bow_tier"):
+            labels.append(f"BOW {flags['bow_tier']}")
+        if flags.get("vcp_pass"):
+            labels.append("VCP pass")
+        if flags.get("macd_chase_risk"):
+            labels.append("⚠️ MACD-confirm CHASE-RISK (malus keras)")
+        if flags.get("macd_tail_risk_hard_sl"):
+            labels.append("⚠️ MACD-confirm HighRisk/Reward VERY STRONG — SL wajib ketat")
+        if not labels:
+            return ""
+        sign = "+" if (adj or 0) >= 0 else ""
+        adj_text = f" ({sign}{adj:.1f} ke Momentum)" if adj is not None else ""
+        return f"\n🎯 Setup pilar aktif: {', '.join(labels)}{adj_text}"
+
+    def _format_action_tier_note(r):
+        pct = r.get("action_tier_percentile")
+        regime_adj = r.get("sentiment_regime_adjustment")
+        parts = []
+        if pct is not None:
+            parts.append(f"persentil final_score malam ini: top {(1 - pct) * 100:.0f}%")
+        if regime_adj is not None and abs(regime_adj) > 0.05:
+            sign = "+" if regime_adj >= 0 else ""
+            parts.append(f"regime IHSG {sign}{regime_adj:.1f} ke Sentimen")
+        return f"\n📊 {' | '.join(parts)}" if parts else ""
 
     # ── Icon helpers ──────────────────────────────────────────────
     def _icon_score(v):
@@ -758,6 +821,8 @@ async def check_stock(update, context):
         f"{dividend_calendar.format_check_line(dividend_calendar.get_ticker_dividend(ticker, result.get('price')))}"
         f"{fundamental_health.format_check_block(fundamental_health.get_fundamental_health(ticker))}"
         f"{news_sentiment.format_check_block(news_sentiment.get_recent_sentiment_tally(ticker))}"
+        f"{_format_pillar_lane_block(result)}"
+        f"{_format_action_tier_note(result)}"
     )
 
     # MBSS v2 (user request — Bias Bandar di /check, studi kasus manual
