@@ -2666,9 +2666,10 @@ async def run_conviction_sweep_once() -> dict:
 # session1_rally_dna_2026_09_28.py/_filter_test_2026_09_28.py menemukan
 # DNA D-1 (momentum-pump archetype) + tervalidasi user via konfirmasi
 # 5-menit. MEKANISME BARU:
-# 1) DNA gate EOD (entry_pagi_dna_gate_pass, lihat docstring-nya): price
-#    <=500, pct_b>=0.6, ret_5d_pct>0, atr_pct14>=p75 cross-sectional --
-#    SEMUA field REUSE dari compute_factor_scoring, TANPA fetch baru.
+# 1) DNA gate EOD (entry_pagi_dna_gate_pass, lihat docstring-nya): pct_b
+#    >=0.6, ret_5d_pct>0, atr_pct14>=p75 cross-sectional -- SEMUA field
+#    REUSE dari compute_factor_scoring, TANPA fetch baru. (Price cap
+#    dicabut 2026-09-29, lihat catatan ENTRY_PAGI_NEW_HIGH_CLOSE_POS_MIN.)
 # 2) 09:00-09:05 WIB = jendela opening-range (TIDAK berubah dari lama --
 #    kebetulan sudah persis "5 menit pertama sejak open" yg user minta).
 #    Konfirmasi WAJIB: harga close bar 09:05 (entry_ref) >= +2% dari open
@@ -2745,9 +2746,30 @@ ENTRY_PAGI_FORCE_EOD_TIME = datetime.time(15, 45)  # dekat closing -- kalau blm 
 
 # DNA gate (momentum-pump archetype, session1_rally_dna_2026_09_28.py --
 # semua field REUSE dari nightly EOD cache, TANPA fetch tambahan):
-ENTRY_PAGI_PRICE_MAX = 500.0        # penny-stock tilt yg ditemukan di riset
+# PRICE CAP DICABUT (MBSS v2, 2026-09-29, lihat memory project_entrypagi_
+# expand_and_stalled_confirm_2026_09_29.md) -- riset per-leg sweep
+# (research/entrypagi_expand_and_stalled_confirm_2026_09_29.py, n=12668,
+# 634 ticker, 21 malam) menemukan price<=500 TIDAK menjaga kualitas sama
+# sekali: melepas cap total menaikkan populasi +38% (1007->1392) sementara
+# lift TIDAK berubah (2.32x->2.35x, dalam batas noise) -- "penny-stock
+# tilt" di riset lama ternyata cuma korelasi dgn leg lain (ATR/pctb), bukan
+# efek independen. ATR percentile SEBALIKNYA genuinely load-bearing
+# (melonggarkan p75->p0 menurunkan lift 2.32x->1.54x monoton) -- JANGAN
+# dilonggarkan tanpa bukti baru.
 ENTRY_PAGI_PCT_B_MIN = 0.6          # di atas SMA20, area upper-band
-ENTRY_PAGI_ATR_PCT_PERCENTILE = 0.75  # ATR14% >= p75 cross-sectional malam itu (volatilitas tinggi)
+ENTRY_PAGI_ATR_PCT_PERCENTILE = 0.75  # ATR14% >= p75 cross-sectional malam itu (volatilitas tinggi) -- leg paling selektif, jangan dilonggarkan
+
+# is_new_high20 confidence tag (MBSS v2, 2026-09-29, riset sama di atas):
+# stacked di atas gate DNA, is_new_high_20d (D0 closing di new high 20 hari)
+# n=83 (rare, ~6% pool gate-pass), P(rally)=39.3%, lift 3.96x (~4x) -- lever
+# TERKUAT di seluruh riset ini. TAPI hanya kalau closing-nya KUAT (close_
+# position_in_range>=0.7): n=75 -> P(rally)=41.3%; kalau closing LEMAH/wick
+# (n=8, thin tapi konsisten arah dgn pola spike-fade BSJP yg sudah berulang
+# kali tervalidasi) -> P(rally) ANJLOK ke 12.5%, hampir sama dgn base rate.
+# Kalau rally beneran terjadi, is_new_high20 juga cenderung lari LEBIH JAUH
+# (median +9.98%, P75 +17.51%) drpd gate-pass biasa (median +8.77%,
+# P75 +14.00%) -- bukan cuma lebih sering, tapi juga lebih besar kalau kena.
+ENTRY_PAGI_NEW_HIGH_CLOSE_POS_MIN = 0.7
 # 5-menit konfirmasi (harga @ OR window 09:00-09:05 vs open 09:00 -- user
 # request 2026-09-28: "pantau 5 menit awal, kalau naik ambil momentumnya").
 # Backtest (n=494 kandidat gate): >=+2% -> hit-rate rally>=10% naik dari
@@ -2755,6 +2777,35 @@ ENTRY_PAGI_ATR_PCT_PERCENTILE = 0.75  # ATR14% >= p75 cross-sectional malam itu 
 # ANJLOK ke 6.5% (di bawah base) -- >=2% dipilih sbg titik confirm.
 ENTRY_PAGI_CONFIRM_5MIN_PCT = 2.0
 ENTRY_PAGI_TOP_N = 5  # diturunkan dari 10 -- sinyal ini jauh lebih ketat (~3-4 lolos/hari di backtest), TOP_N lama akan sering kosongkan hari yg justru kandidatnya sehat
+
+# Oversold-bounce DNA gate (arketipe ke-2 dari session1_rally_dna_2026_09_28.py,
+# SENGAJA di-park saat ship momentum-pump 2026-09-28 -- alasan lama "butuh
+# field dist_sma20_pct baru" ternyata KELIRU, field itu SUDAH ADA sbg
+# `price_vs_sma20_pct` (causal, dihitung compute_factor_scoring) -- proxy
+# pct_b yg dulu dipakai & gagal bukan berarti field aslinya tidak ada.
+# Live-validated 2026-09-29 (memory project_entry_pagi_oversold_bounce_
+# live_2026_09_29): dari 6 saham yg rally sesi-1 >5% hari itu, gate
+# momentum-pump di atas cuma nangkep 1 (HELI) -- 5 sisanya (MNCN/MSIN/LPKR/
+# BMTR/KPIG) semua match archetype INI dgn persis: RSI14 di persentil 0-2
+# se-universe, price_vs_sma20_pct di persentil 0-2 (turun 30-38% di bawah
+# SMA20-nya sendiri), TAPI likuiditas tetap sehat (persentil 78-93) --
+# semua abis crash/limit-down berat D-1 (ret_1d -12% s/d -19%). Thresholds
+# p10/p10/median (bukan p5) SENGAJA dilonggarkan atas permintaan user --
+# "kasih kelonggaran agar case spt KPIG tertangkap juga masih OK" (KPIG
+# RSI14=24.3 ada di persentil ~9, nyaris kepotong di p5). Backtest
+# `research/session1_rally_dna_2026_09_28.py` versi lama (proxy pct_b)
+# nemuin EV close-to-close NEGATIF (-1.81%) utk archetype ini -- TAPI itu
+# proxy yg salah & horizon exit yg belum tentu cocok (lihat feedback_
+# backtest_exit_horizon_match_usage.md), BUKAN bukti archetype-nya buruk.
+# SENGAJA WATCHLIST-ONLY (BUKAN auto-entry/TP/SL/avg-down spt momentum-
+# pump) -- user eksplisit mau decision manual sendiri (lihat bid depth +
+# kecepatan rally di apps trading-nya), dan belum ada riset TP/SL/exit utk
+# archetype ini. Jangan wire ke run_entry_pagi_scan_once/_rank_entry_pagi_
+# candidates (posisi tracking) sebelum riset exit terpisah dilakukan.
+ENTRY_PAGI_OVERSOLD_RSI_PERCENTILE = 0.10        # RSI14 <= p10 cross-sectional (rendah ekstrem)
+ENTRY_PAGI_OVERSOLD_DIST_SMA20_PERCENTILE = 0.10  # price_vs_sma20_pct <= p10 (jauh di bawah SMA20-nya sendiri)
+ENTRY_PAGI_OVERSOLD_LIQUIDITY_PERCENTILE = 0.50   # value_traded >= median ("likuiditas masih sehat", bukan saham mati)
+ENTRY_PAGI_OVERSOLD_TOP_N = 20  # watchlist longgar by design (n=20 saat live-check 09-29) -- user grouping manual di tab favorite, bukan Top-5 auto-entry
 ENTRY_PAGI_AVGDOWN_PCT = -3.0
 # TP/SL dihitung DARI entry (harga confirm 09:05), bukan dari open -- lihat
 # research/session1_rally_dna_filter_test_2026_09_28.py bagian TP/SL
@@ -2780,6 +2831,35 @@ ENTRY_PAGI_D2_TP_START_PCT = 5.0
 ENTRY_PAGI_D2_TP_FLOOR_PCT = 2.0
 ENTRY_PAGI_D2_GIVEBACK_PCT = 1.0  # giveback dari peak return tercapai sejak carry
 ENTRY_PAGI_D2_SL_PCT = 6.0
+
+# TIER 2 -- ambiguous/stalled D1 tracking (MBSS v2, 2026-09-29). Lihat
+# memory project_entrypagi_expand_and_stalled_confirm_2026_09_29.md utk
+# riset lengkap. Gate DNA sekarang cuma punya SATU checkpoint keras (chg_
+# 5min>=+2% di jendela OR 09:00-09:05) -- kandidat yg cuma tipis positif
+# atau flat langsung dibuang total tanpa dipantau lagi. Riset (n=920,
+# gate-pass population, matched ke bar 1m riil) menemukan zona ambigu
+# (chg_5min di [-1%,2%)) itu nyata: P(rally)=23.1% (2.3x base rate 9.92%),
+# vs 13.4% kalau sudah negatif dari awal, vs 75.0% kalau sudah confirm
+# keras. DI DALAM zona ambigu, pembeda utamanya: apakah harga PERNAH turun
+# ke bawah -1% dari open dalam 60menit pertama -- kalau TIDAK PERNAH,
+# P(rally) naik ke 42.7% (hampir 2x rata2 zona ambigu); kalau SEMPAT turun,
+# anjlok ke 16.1% (dekat level "negatif dari awal"). Ini persis pola yg
+# user amati manual ("tinggalkan kalau negatif dari awal, tapi yg tipis-
+# tertahan kadang lanjut rally").
+ENTRY_PAGI_TIER2_ENABLED = True
+# Cek PERTAMA sengaja di 09:15 (BUKAN 09:05) -- yfinance delay riil 10-15
+# menit (catatan user 2026-09-29): fetch di 09:05 belum tentu genuinely
+# mencerminkan harga s.d. 09:05, klasifikasi awal ambigu/negatif ditunda ke
+# titik data-nya sudah bisa dipercaya, drpd salah klasifikasi krn data blm
+# ter-update.
+ENTRY_PAGI_TIER2_MONITOR_START = datetime.time(9, 15)
+# Market-time 60menit dari open = jam 10:00; +15menit buffer delay yfinance
+# supaya fetch di titik ini genuinely sudah mencerminkan harga s.d. 10:00,
+# bukan snapshot yg masih basi beberapa menit.
+ENTRY_PAGI_TIER2_MONITOR_END = datetime.time(10, 15)
+ENTRY_PAGI_TIER2_NEVER_NEGATIVE_PCT = -1.0  # riset: dip di bawah ini kapan saja -> P(rally) anjlok
+ENTRY_PAGI_TIER2_AMBIGUOUS_LO = -1.0        # sama threshold -- di bawah ini sejak awal = "negatif dari awal", tidak dipantau
+STATE_FILE_ENTRY_PAGI_TIER2 = os.path.join(core.PROJECT_ROOT, "entry_pagi_tier2_state.json")
 
 STATE_FILE_ENTRY_PAGI = os.path.join(core.PROJECT_ROOT, "entry_pagi_state.json")
 
@@ -2861,18 +2941,26 @@ def _entry_pagi_opening_range_from_bars(data, tickers: list[str], or_window_end:
     return out
 
 
-def compute_atr_pct14_p75(records) -> float | None:
-    """Cross-sectional ATR14% p75 dari populasi malam ini (`scored.values()`
-    atau list dict apapun yg punya field atr_pct14) -- shared helper dipakai
-    entry_pagi_dna_gate_pass di 3 titik (scan otomatis, preview manual
-    /fast, cross-tag /pingpong) supaya threshold-nya TIDAK bisa divergen
-    antar tempat. None kalau data kurang dari 20 (percentile tidak stabil)."""
+def _cross_sectional_percentile(records, field: str, percentile: float) -> float | None:
+    """Percentile cross-sectional generik dari populasi malam ini
+    (`scored.values()` atau list dict apapun yg punya `field`) -- shared
+    helper dipakai compute_atr_pct14_p75 & compute_oversold_bounce_
+    thresholds supaya cara hitung percentile TIDAK bisa divergen antar
+    gate. None kalau data kurang dari 20 (percentile tidak stabil)."""
     values = records.values() if hasattr(records, "values") else records
-    vals = sorted(v.get("atr_pct14") for v in values if v.get("atr_pct14") is not None)
+    vals = sorted(v.get(field) for v in values if v.get(field) is not None)
     if len(vals) < 20:
         return None
-    idx = min(int(len(vals) * ENTRY_PAGI_ATR_PCT_PERCENTILE), len(vals) - 1)
+    idx = min(int(len(vals) * percentile), len(vals) - 1)
     return vals[idx]
+
+
+def compute_atr_pct14_p75(records) -> float | None:
+    """Cross-sectional ATR14% p75 dari populasi malam ini -- shared helper
+    dipakai entry_pagi_dna_gate_pass di 3 titik (scan otomatis, preview
+    manual /fast, cross-tag /pingpong) supaya threshold-nya TIDAK bisa
+    divergen antar tempat. None kalau data kurang dari 20."""
+    return _cross_sectional_percentile(records, "atr_pct14", ENTRY_PAGI_ATR_PCT_PERCENTILE)
 
 
 def entry_pagi_dna_gate_pass(info: dict, atr_p75: float | None) -> bool:
@@ -2880,12 +2968,15 @@ def entry_pagi_dna_gate_pass(info: dict, atr_p75: float | None) -> bool:
     RSI>=65/MACD>0 lama sepenuhnya, lihat catatan ENTRY_PAGI_ENABLED di
     atas utk riwayat lengkap keputusannya). Semua field REUSE dari cache
     EOD nightly (`scored[t]`), TANPA fetch tambahan:
-      - price<=500 (penny-stock tilt yg ditemukan konsisten di riset)
       - pct_b>=0.6 (di atas SMA20, area upper-band -- BUKAN oversold-bounce)
       - ret_5d_pct>0 (sudah trending naik, bukan saham yg baru dibuang/jatuh)
       - atr_pct14>=p75 cross-sectional malam ini (volatilitas tinggi -- ini
         DIAL risk/reward, bukan filter keamanan, sama spt tiering ATR di
         pillar lain -- lihat memory project_macd_n10_atr_filter_and_tiering)
+
+    Price cap DICABUT 2026-09-29 (lihat catatan ENTRY_PAGI_NEW_HIGH_CLOSE_
+    POS_MIN di atas) -- riset ulang menemukan itu tidak menjaga kualitas
+    sama sekali, cuma memangkas populasi tanpa manfaat.
 
     Backtest research/session1_rally_dna_filter_test_2026_09_28.py (11 hari
     bearish-regime, SATU downleg kontinu -- sample kecil, belum tervalidasi
@@ -2898,13 +2989,76 @@ def entry_pagi_dna_gate_pass(info: dict, atr_p75: float | None) -> bool:
     5MIN_PCT, konfirmasi intraday di _rank_entry_pagi_candidates."""
     if atr_p75 is None:
         return False
-    price = info.get("price")
     pct_b = info.get("pct_b")
     ret_5d = info.get("ret_5d_pct")
     atr14 = info.get("atr_pct14")
-    if price is None or pct_b is None or ret_5d is None or atr14 is None:
+    if pct_b is None or ret_5d is None or atr14 is None:
         return False
-    return price <= ENTRY_PAGI_PRICE_MAX and pct_b >= ENTRY_PAGI_PCT_B_MIN and ret_5d > 0 and atr14 >= atr_p75
+    return pct_b >= ENTRY_PAGI_PCT_B_MIN and ret_5d > 0 and atr14 >= atr_p75
+
+
+def _entry_pagi_new_high_tag(info: dict) -> str:
+    """Tag "4x confidence" utk kandidat is_new_high_20d dgn closing KUAT
+    (MBSS v2, 2026-09-29, lihat catatan ENTRY_PAGI_NEW_HIGH_CLOSE_POS_MIN
+    di atas). SENGAJA butuh close_position_in_range>=threshold -- new high
+    yg closing-nya lemah/wick punya P(rally) yg anjlok ke level base rate
+    (12.5% vs 41.3%), pola yg sama dgn spike-fade BSJP -- jangan kasih tag
+    percaya diri ke kandidat yg secara riset TIDAK terbukti lebih baik.
+    Murni informational (booster, bukan gate) -- kosong kalau kondisi tidak
+    terpenuhi ATAU datanya None (missing=neutral, konvensi project ini)."""
+    if info.get("is_new_high_20d") is not True:
+        return ""
+    close_pos = info.get("close_position_in_range")
+    if close_pos is None or close_pos < ENTRY_PAGI_NEW_HIGH_CLOSE_POS_MIN:
+        return ""
+    return " 🚀 4x (new high 20d, closing kuat -- potensi lanjut ke +10-17%)"
+
+
+def compute_oversold_bounce_thresholds(records) -> dict | None:
+    """Cross-sectional thresholds populasi malam ini utk oversold-bounce
+    gate (lihat catatan panjang di ENTRY_PAGI_OVERSOLD_* di atas) -- shared
+    helper, pola PERSIS compute_atr_pct14_p75 supaya threshold tidak bisa
+    divergen antar tempat. None kalau salah satu field datanya kurang dari
+    20 (percentile tidak stabil)."""
+    rsi_p10 = _cross_sectional_percentile(records, "rsi", ENTRY_PAGI_OVERSOLD_RSI_PERCENTILE)
+    dist_sma20_p10 = _cross_sectional_percentile(records, "price_vs_sma20_pct", ENTRY_PAGI_OVERSOLD_DIST_SMA20_PERCENTILE)
+    liquidity_median = _cross_sectional_percentile(records, "value_traded", ENTRY_PAGI_OVERSOLD_LIQUIDITY_PERCENTILE)
+    if rsi_p10 is None or dist_sma20_p10 is None or liquidity_median is None:
+        return None
+    return {"rsi_p10": rsi_p10, "dist_sma20_p10": dist_sma20_p10, "liquidity_median": liquidity_median}
+
+
+def entry_pagi_oversold_bounce_gate_pass(info: dict, thresholds: dict | None) -> bool:
+    """Oversold-bounce DNA gate (arketipe ke-2, live-validated 2026-09-29 --
+    lihat catatan panjang di ENTRY_PAGI_OVERSOLD_* di atas utk riwayat
+    lengkap). Semua field REUSE dari cache EOD nightly (`scored[t]`), TANPA
+    fetch tambahan:
+      - rsi<=p10 cross-sectional malam ini (RSI rendah ekstrem, BUKAN
+        adaptive-per-stock spt momentum/sentiment_score -- gate ini sengaja
+        cross-sectional spt ATR di gate momentum-pump)
+      - price_vs_sma20_pct<=p10 (jauh di bawah SMA20-nya sendiri -- deep
+        pullback/capitulation, KEBALIKAN dari pct_b>=0.6 di momentum-pump)
+      - value_traded>=median ("likuiditas masih sehat" -- saring saham mati/
+        gorengan sepi yg RSI-nya rendah krn tidak ada transaksi, bukan krn
+        capitulation beneran)
+
+    WATCHLIST ONLY -- gate ini SENGAJA tidak dipakai utk auto-entry/TP/SL/
+    avg-down spt momentum-pump (belum ada riset exit-horizon utk archetype
+    ini, backtest lama pakai proxy pct_b yg keliru). Jangan wire ke
+    run_entry_pagi_scan_once/_rank_entry_pagi_candidates sebelum riset
+    exit terpisah."""
+    if not thresholds:
+        return False
+    rsi = info.get("rsi")
+    dist_sma20 = info.get("price_vs_sma20_pct")
+    liquidity = info.get("value_traded")
+    if rsi is None or dist_sma20 is None or liquidity is None:
+        return False
+    return (
+        rsi <= thresholds["rsi_p10"]
+        and dist_sma20 <= thresholds["dist_sma20_p10"]
+        and liquidity >= thresholds["liquidity_median"]
+    )
 
 
 def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
@@ -2950,6 +3104,7 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
             "chg_5min_pct": chg_5min_pct,
             "whitelist_accumulation_net_pct": info.get("whitelist_accumulation_net_pct"),
             "whitelist_num_brokers": info.get("whitelist_num_brokers"),
+            "new_high_tag": _entry_pagi_new_high_tag(info),
         })
     rows.sort(key=lambda r: r["chg_5min_pct"], reverse=True)
     return rows[:ENTRY_PAGI_TOP_N]
@@ -2969,6 +3124,24 @@ def _smart_money_tag(net_pct, num_brokers) -> str:
     if net_pct >= 15 and (num_brokers or 0) >= 2:
         return f" 💰 Smart Money +{net_pct:.0f}% ({num_brokers}broker)"
     return ""
+
+
+def _oversold_bounce_ff_tag(foreign_net_ratio_1d) -> str:
+    """Label singkat foreign_net_ratio_1d utk watchlist OVERSOLD BOUNCE
+    (MBSS v2, 2026-09-29 -- riset winner/loser 1m di 12 hari bearish-
+    regime, n=296, lihat memory project_oversold_bounce_1m_winner_loser_
+    2026_09_29). Asing net-buy/kurang net-sell di hari crash korelasi win
+    rate lebih tinggi (21.6% vs 11.5% di median split) -- TAPI paling
+    lemah sendirian dari semua fitur yg diriset, jadi INFO tambahan saja
+    (murni tampilan, BUKAN gate/exclude) -- 0.0 dipakai sbg garis pembagi
+    natural (net-buy vs net-sell), bukan angka median hasil fit sample
+    kecil ini spy tidak overfit. Kosong kalau None (missing=neutral,
+    konvensi RapidAPI project ini)."""
+    if foreign_net_ratio_1d is None or not isinstance(foreign_net_ratio_1d, (int, float)):
+        return ""
+    pct = foreign_net_ratio_1d * 100
+    icon = "🟢" if pct >= 0 else "🔴"
+    return f" | FF {icon}{pct:+.1f}%"
 
 
 def format_vcp_tag(vcp_pass) -> str:
@@ -3028,9 +3201,10 @@ def _render_entry_pagi_message(picks: list[dict], skipped: list[dict] | None = N
         sl = _idx_round_tick(p["sl"])
         avgdown_note = " (avg down TERISI)" if p.get("filled_avgdown") else ""
         sm_tag = _smart_money_tag(p.get("whitelist_accumulation_net_pct"), p.get("whitelist_num_brokers"))
+        nh_tag = p.get("new_high_tag") or ""
         blocks.append(
             f"TICK {i}\n"
-            f"{p['ticker']} — {entry:,.0f} (harga alert){sm_tag}\n"
+            f"{p['ticker']} — {entry:,.0f} (harga alert){sm_tag}{nh_tag}\n"
             f"Entry Range : {lo:,.0f}-{hi:,.0f}\n"
             f"TP : {tp:,.0f}\n"
             f"SL : {sl:,.0f}\n"
@@ -3207,6 +3381,7 @@ async def run_entry_pagi_scan_once(force: bool = False) -> dict:
             "status": "WAITING", "day": "D1", "peak_ret_d2": None,
             "whitelist_accumulation_net_pct": r.get("whitelist_accumulation_net_pct"),
             "whitelist_num_brokers": r.get("whitelist_num_brokers"),
+            "new_high_tag": r.get("new_high_tag", ""),
         })
 
     new_state = {
@@ -3309,6 +3484,203 @@ async def run_entry_pagi_monitor_once() -> dict:
         summary["updated"] = sum(1 for p in open_picks if p["status"] != "WAITING")
         await _entry_pagi_edit_message(state)
         _save_entry_pagi_state(state)
+    return summary
+
+
+def _load_entry_pagi_tier2_state() -> dict:
+    if not os.path.exists(STATE_FILE_ENTRY_PAGI_TIER2):
+        return {}
+    try:
+        with open(STATE_FILE_ENTRY_PAGI_TIER2) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_entry_pagi_tier2_state(state: dict):
+    with open(STATE_FILE_ENTRY_PAGI_TIER2, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+async def run_entry_pagi_tier2_tick() -> dict:
+    """
+    TIER 2 -- ambiguous/stalled D1 tracking (MBSS v2, 2026-09-29). Lihat
+    catatan ENTRY_PAGI_TIER2_* di atas utk ringkasan riset, dan memory
+    project_entrypagi_expand_and_stalled_confirm_2026_09_29.md utk detail
+    lengkap. Gate DNA momentum-pump sekarang cuma punya SATU checkpoint
+    keras (chg_5min>=+2% di OR 09:00-09:05) -- kandidat yg tipis positif
+    atau flat langsung dibuang TOTAL, tidak dipantau lagi. Riset menemukan
+    zona ambigu itu nyata (P(rally)=23.1%, 2.3x base rate), dan di
+    dalamnya, kandidat yg TIDAK PERNAH turun ke bawah -1% dari open dalam
+    60menit pertama P(rally)-nya 42.7% -- pembeda yg sama dgn pola yg user
+    amati manual sendiri.
+
+    Cek PERTAMA sengaja di jam 09:15 (ENTRY_PAGI_TIER2_MONITOR_START),
+    BUKAN 09:05 spt gate keras -- yfinance delay riil 10-15 menit bikin
+    fetch persis di 09:05 belum tentu genuinely mencerminkan harga s.d.
+    09:05; klasifikasi ambigu/negatif ditunda ke titik data-nya sudah bisa
+    dipercaya, drpd salah klasifikasi krn bar yg dibaca masih basi.
+
+    Tiap tick (~5 menit, cadence sama dgn BSJP intraday tick):
+      - update running low_so_far per ticker yg masih dipantau
+      - turun ke bawah -1% dari open (kapan saja) -> DEAD, berhenti dipantau
+      - tembus +2% dari open -> PROMOTED, diperlakukan SAMA PERSIS spt
+        konfirmasi normal Tier 1 (entry_ref=harga saat itu, avg-down/TP/SL
+        formula sama) -- masuk ke entry_pagi_state.json UTAMA supaya
+        run_entry_pagi_monitor_once ikut memantau TP/SL-nya, bukan
+        mekanisme terpisah
+      - di akhir jendela (ENTRY_PAGI_TIER2_MONITOR_END), sisa yg masih
+        WATCHING (tidak pernah turun -1%, tidak pernah tembus +2%) di-
+        alert SEKALI sbg watchlist informational -- BUKAN auto-entry/TP/
+        SL, sama konvensi WATCHLIST-ONLY spt archetype oversold-bounce
+        (riset exit utk kasus "tertahan tapi tidak pernah confirm" ini
+        belum ada).
+    """
+    summary = {"skipped_reason": None, "watching": 0, "promoted": 0, "dead": 0}
+    if not (ENTRY_PAGI_ENABLED and ENTRY_PAGI_TIER2_ENABLED):
+        summary["skipped_reason"] = "toggled_off"
+        return summary
+    now_wib = datetime.datetime.now(core.WIB)
+    if now_wib.weekday() >= 5:
+        summary["skipped_reason"] = "weekend"
+        return summary
+    if not (ENTRY_PAGI_TIER2_MONITOR_START <= now_wib.time() <= ENTRY_PAGI_TIER2_MONITOR_END):
+        summary["skipped_reason"] = "outside_window"
+        return summary
+    if await asyncio.to_thread(core.is_idx_market_holiday_today):
+        summary["skipped_reason"] = "holiday"
+        return summary
+
+    today = _today_str()
+    tier2_state = _load_entry_pagi_tier2_state()
+    main_state = _load_entry_pagi_state()
+    already_handled = set()
+    if main_state.get("trading_day_marker") == today:
+        already_handled = {p["ticker"] for p in main_state.get("picks", [])} | \
+                           {s["ticker"] for s in main_state.get("skipped", [])}
+
+    if tier2_state.get("trading_day_marker") != today:
+        # Tick pertama hari ini -- bangun pool WATCHING dari gate DNA malam
+        # ini, exclude yg SUDAH ditangani Tier 1 (confirmed/skipped) supaya
+        # tidak dobel-alert.
+        import engine.nightly as nightly_engine  # import lokal -- hindari circular import di level modul
+        scored = nightly_engine.load_daily_scan_cache()
+        if not scored:
+            summary["skipped_reason"] = "no_cache"
+            return summary
+        atr_p75 = compute_atr_pct14_p75(scored)
+        gate_pool = [
+            t for t, info in scored.items()
+            if entry_pagi_dna_gate_pass(info, atr_p75) and t not in already_handled
+        ]
+        tier2_state = {"trading_day_marker": today, "tickers": {}, "watchlist_sent": False}
+        for t in gate_pool:
+            tier2_state["tickers"][t] = {"status": "PENDING_OPEN"}
+        print(f"🌤️ Entry Pagi Tier-2: inisialisasi {len(gate_pool)} kandidat gate-pass "
+              f"(exclude {len(already_handled)} yg sudah ditangani Tier-1) jam {now_wib.strftime('%H:%M')}.")
+
+    tickers_active = [t for t, s in tier2_state["tickers"].items() if s["status"] in ("PENDING_OPEN", "WATCHING")]
+    if not tickers_active:
+        summary["skipped_reason"] = "no_watching"
+        _save_entry_pagi_tier2_state(tier2_state)
+        return summary
+
+    data = await _get_shared_1m_bars(tickers_active)
+    if data is None or (hasattr(data, "empty") and data.empty):
+        summary["skipped_reason"] = "no_intraday_data"
+        return summary
+
+    promoted_picks = []
+    for t in tickers_active:
+        if t in already_handled:
+            tier2_state["tickers"][t]["status"] = "SUPERSEDED"  # Tier 1 sudah menangani ticker ini di siklus lain
+            continue
+        sym = t + ".JK"
+        try:
+            bars = data[sym].dropna(how="all").sort_index()
+        except Exception:
+            continue
+        if bars.empty:
+            continue
+        try:
+            open_price = float(bars["Open"].astype(float).iloc[0])
+            low_so_far_bar = float(bars["Low"].astype(float).min())
+            current_price = float(bars["Close"].astype(float).iloc[-1])
+        except Exception:
+            continue
+        if open_price <= 0:
+            continue
+
+        t_state = tier2_state["tickers"][t]
+        t_state["open_price"] = open_price
+        prev_low = t_state.get("low_so_far")
+        t_state["low_so_far"] = low_so_far_bar if prev_low is None else min(prev_low, low_so_far_bar)
+        t_state["status"] = "WATCHING"
+
+        dip_pct = (t_state["low_so_far"] - open_price) / open_price * 100.0
+        chg_now_pct = (current_price - open_price) / open_price * 100.0
+
+        if dip_pct <= ENTRY_PAGI_TIER2_NEVER_NEGATIVE_PCT:
+            t_state["status"] = "DEAD"
+            summary["dead"] += 1
+            continue
+
+        if chg_now_pct >= ENTRY_PAGI_CONFIRM_5MIN_PCT:
+            t_state["status"] = "PROMOTED"
+            entry_price = current_price
+            avg_down_price = entry_price * (1 + ENTRY_PAGI_AVGDOWN_PCT / 100.0)
+            promoted_picks.append({
+                "ticker": t, "entry_price": entry_price, "avg_down_price": avg_down_price,
+                "avg_cost": entry_price, "filled_avgdown": False,
+                "tp": entry_price * (1 + ENTRY_PAGI_D1_TP_PCT / 100.0),
+                "sl": entry_price * (1 - ENTRY_PAGI_D1_SL_PCT / 100.0),
+                "status": "WAITING", "day": "D1", "peak_ret_d2": None,
+                "whitelist_accumulation_net_pct": None, "whitelist_num_brokers": None,
+                "new_high_tag": " 🟡→✅ (konfirmasi terlambat, Tier-2)",
+            })
+            summary["promoted"] += 1
+            continue
+
+        summary["watching"] += 1
+
+    # Konfirmasi terlambat masuk ke state/pesan UTAMA (reuse mekanisme
+    # edit-in-place yg sudah ada, bukan pesan/jalur terpisah).
+    if promoted_picks:
+        if main_state.get("trading_day_marker") != today:
+            main_state = {"trading_day_marker": today, "fired": True, "message_id": None,
+                          "chat_id": core.TELEGRAM_CHAT_ID, "picks": [], "skipped": []}
+        main_state.setdefault("picks", []).extend(promoted_picks)
+        if main_state.get("message_id"):
+            await _entry_pagi_edit_message(main_state)
+        else:
+            main_state["message_id"] = await _entry_pagi_send_new_message(
+                _render_entry_pagi_message(main_state["picks"], main_state.get("skipped"))
+            )
+        _save_entry_pagi_state(main_state)
+        names = ", ".join(p["ticker"] for p in promoted_picks)
+        print(f"✅ Entry Pagi Tier-2: {len(promoted_picks)} kandidat konfirmasi terlambat "
+              f"(sempat ambigu, akhirnya tembus +2%), masuk TICK utama: {names}.")
+
+    # Jendela tutup -- kirim watchlist informational SEKALI utk sisa yg
+    # masih WATCHING (tidak pernah dead, tidak pernah promote).
+    if now_wib.time() >= ENTRY_PAGI_TIER2_MONITOR_END and not tier2_state.get("watchlist_sent"):
+        still_watching = sorted(t for t, s in tier2_state["tickers"].items() if s["status"] == "WATCHING")
+        if still_watching:
+            lines = [
+                "ENTRY PAGI — TIER 2 (masih dipantau, BUKAN sinyal entry)",
+                "Kandidat ini tipis/flat di awal, TIDAK PERNAH turun -1% dari open "
+                "selama 60 menit pertama, tapi belum tembus konfirmasi +2%.",
+                "Riset: kelompok ini P(rally sesi-1 >=5%) ~42.7% (vs base rate ~9.9%) -- "
+                "INFORMASIONAL SAJA, bukan auto-entry/TP/SL, keputusan sepenuhnya manual.",
+                "",
+                ", ".join(still_watching),
+            ]
+            await _entry_pagi_send_new_message("\n".join(lines))
+            print(f"🟡 Entry Pagi Tier-2: watchlist akhir jendela ({len(still_watching)} kandidat): "
+                  f"{', '.join(still_watching)}.")
+        tier2_state["watchlist_sent"] = True
+
+    _save_entry_pagi_tier2_state(tier2_state)
     return summary
 
 

@@ -1813,6 +1813,20 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         if is_new_high_20d:
             momentum_score = min(10.0, momentum_score + 1.0)
 
+    # close_position_in_range: posisi closing hari ini di dalam range
+    # high-low hari ini sendiri (0=closing di low, 1=closing di high) --
+    # MBSS v2 (2026-09-29), field baru MURNI INFORMASIONAL, tidak
+    # menggating apa pun di sini. Dipakai entry_pagi_dna_gate_pass's
+    # is_new_high tag (engine/scanalert.py) untuk membedakan new-high yang
+    # closing kuat vs new-high yang cuma wick (riset: P(rally)=41.3% kalau
+    # closing kuat >=0.7 vs 12.5% kalau closing lemah/wick, n=75 vs n=8 --
+    # sama pola dgn spike-fade BSJP, lihat memory
+    # project_entrypagi_expand_and_stalled_confirm_2026_09_29.md).
+    today_high = float(high_prices.iloc[-1])
+    today_low = float(low_prices.iloc[-1])
+    today_range = today_high - today_low
+    close_position_in_range = ((current_price - today_low) / today_range) if today_range > 0 else 0.5
+
     # --- Relative Strength vs IHSG: DIGANTI dari versi 10-hari kumulatif ke
     # HARIAN atas permintaan user — untuk swing pendek, 10 hari kurang responsif.
     # Saham naik 1% hari ini itu biasa saja kalau IHSG naik 2% hari itu juga
@@ -2621,6 +2635,7 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
         "macd_slope_percentile": macd_slope_percentile,  # adaptif vs trailing histori ticker sendiri, gate SDT sekarang >=50 (bukan lagi cuma slope>0)
         "macd_histogram_noise_exclude": macd_histogram_noise_exclude,  # True = histogram sehari sebelum flip masih tebal+belum melandai ("parabolic"), macd_approach_tier di-exclude
         "is_new_high_20d": is_new_high_20d,
+        "close_position_in_range": round(close_position_in_range, 4),
         "relative_strength_vs_ihsg": relative_strength_vs_ihsg,
         "consecutive_low_volume_days": consecutive_low_volume_days,
         "dead_stock_penalty_lifted": dead_stock_penalty_lifted,

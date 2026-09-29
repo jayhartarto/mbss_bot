@@ -123,23 +123,37 @@ DYNAMIC_TP_TABLE = {
 # research/bsjp_d1_wick_quality_2026_09_25.py +
 # research/bsjp_d1_wick_by_tier_2026_09_25.py, n=4013 Stage-1 REVISED
 # population, tier classification via _assign_conviction_tier below):
-# a D1 candle whose own high ran well above its own close, AND closed in the
-# bottom half of its own day range, degrades forward D2-D4 quality EVEN
-# WITHIN the same conviction tier -- worst inside TIER_EXTREME (win
-# 53.6%->39.5%, median +0.94%->-1.92%, tail MAE<-8% 17.8%->29.4%), same
-# direction in STAGE1_BASE (win 46.0%->36.4%, median 0.00%->-1.47%). Treated
-# the same as an ordinary FADING pick: tagged fading, dropped/hidden.
+# a D1 candle whose own high ran well above its own close degrades forward
+# D2-D4 quality EVEN WITHIN the same conviction tier -- worst inside
+# TIER_EXTREME (win 53.6%->39.5%, median +0.94%->-1.92%, tail MAE<-8%
+# 17.8%->29.4%), same direction in STAGE1_BASE (win 46.0%->36.4%, median
+# 0.00%->-1.47%). Treated the same as an ordinary FADING pick: tagged
+# fading, dropped/hidden.
+#
+# THRESHOLD WIDENED (2026-09-29, see memory project_bsjp_d1_spike_fade_
+# threshold_widen_2026_09_29.md and research/bsjp_d1_spike_fade_threshold_
+# boundary_2026_09_29.py): the original rule additionally required
+# close_position_in_range<0.5 (AND logic) -- boundary-tested that leg and
+# found it was letting a real-risk population through. A big-wick D1 candle
+# whose close recovered back ABOVE the midpoint of its own day range
+# (close_position>=0.5, i.e. it would have PASSED the old AND rule) still
+# shows degraded quality -- n=190, median -1.19%, tail MAE<-8%=32.1% --
+# WORSE tail risk than the population the old rule already dropped (24.9%),
+# and touch-rate is again misleading (tp2_touch=71.6%, high, same as every
+# other spike-fade case in this module). Lowering the wick threshold itself
+# (5%->3%) was tested too and found NOT to help -- that population (n=393)
+# was actually fine (tail 12.0%, better than baseline). So the fix is
+# dropping the close_position requirement entirely, not moving the wick
+# threshold: big wick alone (upper_wick_pct>=5%), regardless of where the
+# candle closed within its day range, is now sufficient to flag.
 SPIKE_FADE_UPPER_WICK_MIN_PCT = 5.0   # D1 high at least this % above D1 close
-SPIKE_FADE_CLOSE_POSITION_MAX = 0.5   # D1 close in the bottom half of its own day range
 
 
 def _is_spike_fade_candle(day_high, day_low, day_close) -> bool:
     if day_high is None or day_low is None or day_close is None or day_close <= 0:
         return False
     upper_wick_pct = (day_high - day_close) / day_close * 100.0
-    day_range = day_high - day_low
-    close_position = (day_close - day_low) / day_range if day_range > 0 else 0.5
-    return upper_wick_pct >= SPIKE_FADE_UPPER_WICK_MIN_PCT and close_position < SPIKE_FADE_CLOSE_POSITION_MAX
+    return upper_wick_pct >= SPIKE_FADE_UPPER_WICK_MIN_PCT
 
 
 # Fire-icon display (memory "Tracking-message design decision": user
@@ -689,8 +703,8 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
     ]
     if any_hidden_fading:
         footer.append(
-            "(Ada kandidat FADING (termasuk yang kena pola spike-lalu-fade: high jauh di atas "
-            "close & closing di separuh bawah range hari itu) yang disembunyikan dari tampilan -- "
+            "(Ada kandidat FADING (termasuk yang kena pola spike-fade: high hari ini jauh di atas "
+            "closing, minimal 5%) yang disembunyikan dari tampilan -- "
             "tetap dipantau, akan muncul lagi kalau recover.)"
         )
     lines.append("\n".join(footer))

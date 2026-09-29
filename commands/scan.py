@@ -380,7 +380,42 @@ async def all_setup_candidates_command(update, context):
             "-- fallback manual kalau scan otomatis ENTRY PAGI 09:05 gagal, bukan pengganti alert asli."
         )
 
-    all_tickers = [r["ticker"] for cands in lanes.values() for r in cands] + [r["ticker"] for r in entry_pagi_top20]
+    # MBSS v2 (2026-09-29, live-validated dari kasus MNCN/MSIN/LPKR/BMTR/
+    # KPIG -- lihat catatan panjang di engine/scanalert.py ENTRY_PAGI_
+    # OVERSOLD_*): arketipe ke-2 session1_rally_dna_2026_09_28.py, WATCHLIST
+    # MANUAL saja (bukan auto-entry/TP/SL spt ENTRY PAGI di atas) -- user
+    # pantau sendiri dari pagi (bid depth + kecepatan rally), grouping ke
+    # tab favorite di apps trading-nya.
+    oversold_thresholds = scanalert_engine.compute_oversold_bounce_thresholds(all_values)
+    oversold_pool = [
+        r for r in all_values if scanalert_engine.entry_pagi_oversold_bounce_gate_pass(r, oversold_thresholds)
+    ]
+    oversold_top = sorted(oversold_pool, key=lambda r: r["rsi"])[:scanalert_engine.ENTRY_PAGI_OVERSOLD_TOP_N]
+    lines.append(f"\n🩸 OVERSOLD BOUNCE watchlist ({len(oversold_pool)} lolos gate, top {scanalert_engine.ENTRY_PAGI_OVERSOLD_TOP_N} by RSI terendah)")
+    if not oversold_top:
+        lines.append("  (kosong)")
+    else:
+        for r in oversold_top:
+            sm_tag = scanalert_engine._smart_money_tag(r.get("whitelist_accumulation_net_pct"), r.get("whitelist_num_brokers"))
+            ff_tag = scanalert_engine._oversold_bounce_ff_tag(r.get("foreign_net_ratio_1d"))
+            lines.append(
+                f"  {r['ticker']} | RSI {r['rsi']:.1f} | vs SMA20 {r['price_vs_sma20_pct']:+.1f}% | "
+                f"ret1d {(r.get('ret_1d_pct') or 0):+.1f}%{ff_tag}{sm_tag}"
+            )
+        lines.append(
+            "  ⚠️ WATCHLIST MANUAL, BUKAN sinyal auto-entry -- belum ada riset TP/SL/exit utk archetype ini "
+            "(live-validated 1 hari, 2026-09-29). Pantau sendiri dari pagi: kalau mulai rally cepat + bid buy tebal, "
+            "baru dipertimbangkan masuk.\n"
+            "  ℹ️ RSI/vs-SMA20/ret1d makin ekstrem (crash makin dalam) + FF asing net-buy/kurang net-sell "
+            "secara historis korelasi win rate lebih tinggi (riset 2026-09-29, n=296, lihat memory "
+            "project_oversold_bounce_1m_winner_loser_2026_09_29) -- info tambahan buat prioritas, BUKAN gate."
+        )
+
+    all_tickers = (
+        [r["ticker"] for cands in lanes.values() for r in cands]
+        + [r["ticker"] for r in entry_pagi_top20]
+        + [r["ticker"] for r in oversold_top]
+    )
     buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
 
@@ -2821,6 +2856,7 @@ async def pingpong_watchlist_command(update, context):
             "rsi": r.get("rsi"), "macd_hist": r.get("macd_hist"),
             "price": r.get("price"), "pct_b": r.get("pct_b"),
             "atr_pct14": r.get("atr_pct14"), "ret_5d_pct": r.get("ret_5d_pct"),
+            "price_vs_sma20_pct": r.get("price_vs_sma20_pct"), "value_traded": r.get("value_traded"),
         })
 
     if len(rows) < 10:
@@ -2878,6 +2914,10 @@ async def pingpong_watchlist_command(update, context):
     # gate_pass) -- EOD-only, TANPA konfirmasi 5-menit (di luar scope tag
     # informational ini, murni "ada dukungan dari lane lain").
     entry_pagi_atr_p75 = scanalert_engine.compute_atr_pct14_p75(scored)
+    # OVERSOLD BOUNCE cross-tag (MBSS v2, 2026-09-29 -- lihat catatan
+    # ENTRY_PAGI_OVERSOLD_* di engine/scanalert.py): EOD-only, informational
+    # saja spt tag lain di sini, BUKAN gate/ranking baru utk /pingpong sendiri.
+    oversold_thresholds = scanalert_engine.compute_oversold_bounce_thresholds(scored)
     for r in candidates:
         r["priority_score"] = r_vol[r["ticker"]] + r_range[r["ticker"]]
         tags = []
@@ -2887,6 +2927,8 @@ async def pingpong_watchlist_command(update, context):
             tags.append("FF DAYTRADE")
         if scanalert_engine.entry_pagi_dna_gate_pass(r, entry_pagi_atr_p75):
             tags.append("ENTRY PAGI")
+        if scanalert_engine.entry_pagi_oversold_bounce_gate_pass(r, oversold_thresholds):
+            tags.append("OVERSOLD BOUNCE")
         if r["ticker"] in hc_selected:
             tags.append("HC")
         r["cross_tags"] = tags

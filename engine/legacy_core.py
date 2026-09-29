@@ -7633,6 +7633,20 @@ async def run_entry_pagi_monitor_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ Entry Pagi monitor job gagal: {e}")
 
 
+async def run_entry_pagi_tier2_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    JobQueue callback TERPISAH -- Entry Pagi TIER 2 (ambiguous/stalled D1
+    tracking, engine/scanalert.py run_entry_pagi_tier2_tick, MBSS v2
+    2026-09-29). No-op murah di luar jendela 09:15-10:15 WIB. Isolasi
+    try/except sendiri, sama pola dgn job Entry Pagi lain -- error di sini
+    TIDAK boleh mengganggu scan/monitor Tier-1.
+    """
+    try:
+        await scanalert_engine.run_entry_pagi_tier2_tick()
+    except Exception as e:
+        print(f"⚠️ Entry Pagi Tier-2 tick job gagal: {e}")
+
+
 async def run_entry_pagi_d2_job(context: ContextTypes.DEFAULT_TYPE):
     """
     JobQueue callback TERPISAH -- lanjutan D+2 ENTRY PAGI (trailing exit),
@@ -7961,6 +7975,11 @@ def build_app():
         app.job_queue.run_repeating(run_entry_pagi_scan_job, interval=180, first=70)
         app.job_queue.run_repeating(run_entry_pagi_monitor_job, interval=180, first=95)
         app.job_queue.run_repeating(run_entry_pagi_d2_job, interval=180, first=115)
+        # TIER 2 (ambiguous/stalled tracking, MBSS v2 2026-09-29) -- interval
+        # 300s sama cadence dgn BSJP intraday tick (jendela 09:15-10:15 lebih
+        # sempit dari Tier-1, tidak perlu polling serapat 180s), first=140
+        # beda dari job lain di atas supaya tidak selalu align.
+        app.job_queue.run_repeating(run_entry_pagi_tier2_job, interval=300, first=140)
         # ENTRY SORE pyramid job registrations retired 2026-09-20 along with
         # the rest of the old BSJP system -- see
         # archive/bsjp_legacy_fase1_fase2_pyramid_2026_09_20.py.

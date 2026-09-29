@@ -31,6 +31,7 @@ DIVIDEND_CALENDAR_FILE = os.path.join(core.PROJECT_ROOT, "dividend_calendar.json
 # call/bulan dari budget 400.
 REFRESH_EVERY_DAYS = 3
 RECENT_EX_WINDOW_DAYS = 7
+UPCOMING_WINDOW_DAYS = 30  # /dividen: hanya cum date dlm 30 hari ke depan (user request 2026-09-29)
 MARKET_CLOSE_WIB = datetime.time(16, 0)
 
 
@@ -128,16 +129,21 @@ def _enrich(e: dict, all_events: list, today: datetime.date, price: float | None
     return e
 
 
-def get_calendar_view(today: datetime.date | None = None) -> dict:
-    """{"upcoming": [...cum >= today], "recent_ex": [...ex dlm 7 hari terakhir], "fetched_at": str|None}"""
+def get_calendar_view(today: datetime.date | None = None, window_days: int = UPCOMING_WINDOW_DAYS) -> dict:
+    """{"upcoming": [...cum date dlm [today, today+window_days]], "recent_ex": [...ex
+    dlm RECENT_EX_WINDOW_DAYS hari terakhir], "fetched_at": str|None}. window_days
+    default 30 (user request 2026-09-29, /dividen) -- get_ticker_dividend (/check,
+    per-ticker) SENGAJA TIDAK pakai window ini, beda tujuan (cek dividen ticker
+    tertentu kapan pun jatuhnya, bukan kalender pasar-luas)."""
     today = today or _today()
+    window_end = today + datetime.timedelta(days=window_days)
     store = _load()
     events = [e for e in store.get("events", {}).values() if e.get("cum_date")]
     upcoming, recent_ex = [], []
     for e in events:
         cum = datetime.date.fromisoformat(e["cum_date"])
         ex = datetime.date.fromisoformat(e["ex_date"]) if e.get("ex_date") else None
-        if cum >= today:
+        if today <= cum <= window_end:
             upcoming.append(_enrich(e, events, today))
         elif ex and today - datetime.timedelta(days=RECENT_EX_WINDOW_DAYS) <= ex <= today:
             recent_ex.append(_enrich(e, events, today))

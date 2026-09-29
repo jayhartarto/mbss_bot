@@ -510,9 +510,10 @@ async def dividend_calendar_command(update, context):
         return "\n".join(lines)
 
     text = (
-        "💰 KALENDER DIVIDEN\n"
-        "Cum date = hari terakhir beli utk dapat hak dividen. Ex date = harga biasanya turun ~sebesar dividen.\n\n"
-        f"{_block('📅 Cum date akan datang:', view['upcoming'])}\n\n"
+        "💰 KALENDER DIVIDEN — 30 hari ke depan\n"
+        "Cum date = hari terakhir beli utk dapat hak dividen. Ex date = harga biasanya turun ~sebesar dividen.\n"
+        "\"Pembagian ke-N dlm 12 bln\" = indikasi dividen interim (API tidak label interim/final eksplisit).\n\n"
+        f"{_block(f'📅 Cum date dlm {dividend_calendar.UPCOMING_WINDOW_DAYS} hari ke depan:', view['upcoming'])}\n\n"
         f"{_block(f'📉 Baru ex-date ({dividend_calendar.RECENT_EX_WINDOW_DAYS} hari terakhir):', view['recent_ex'])}\n\n"
         f"Yield dihitung dari harga saat data diambil. Sumber: RapidAPI IDX, update {view['fetched_at']}."
     )
