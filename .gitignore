@@ -3,6 +3,7 @@
 *.db
 cache/
 daytrade_picks_history.json
+ticker_whitelist.json
 buy_on_weakness_picks.json
 vcp_pillar_picks.json
 macd_confirm_pillar_picks.json
