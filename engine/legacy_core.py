@@ -106,6 +106,44 @@ def get_yf_ticker(symbol: str):
     return yf.Ticker(symbol)
 
 
+_usd_idr_rate_cache: dict[str, float] = {}  # {calendar_date_marker: rate} -- in-memory, process-lifetime only
+
+
+def get_usd_idr_rate() -> float | None:
+    """
+    MBSS v2 (2026-10-03, user finding): yfinance's .info["bookValue"] for
+    IDX tickers is systematically reported in USD while currentPrice is in
+    IDR -- confirmed exactly (UNIC/FPNI/TOBA/POWR/ADRO all land on sane
+    0.87-1.36x PB once bookValue is multiplied by this rate, vs 15,000-
+    24,000x raw). See the PB_SANITY_MAX recovery branch in engine/
+    scoring.py that uses this.
+
+    Cached once per calendar day (in-memory only, not disk-persisted --
+    short-lived scan processes don't need it to survive a restart, cheap
+    to refetch). Returns None on fetch failure or non-positive rate --
+    callers MUST degrade gracefully (missing=neutral convention, same as
+    every other optional enrichment in this project), never treat None as
+    0 or a penalty.
+    """
+    today = get_current_calendar_date_marker()
+    cached = _usd_idr_rate_cache.get(today)
+    if cached is not None:
+        return cached
+    try:
+        hist = yf_fetch_with_retry(lambda: get_yf_ticker("USDIDR=X").history(period="5d", timeout=15))
+        if hist is None or hist.empty:
+            return None
+        rate = float(hist["Close"].iloc[-1])
+        if rate <= 0:
+            return None
+    except Exception as e:
+        print(f"⚠️ Gagal fetch kurs USD/IDR: {e}")
+        return None
+    _usd_idr_rate_cache.clear()  # cuma simpan 1 hari -- buang cache hari sebelumnya
+    _usd_idr_rate_cache[today] = rate
+    return rate
+
+
 def yfinance_get_kline(ticker: str, period: str = "2y") -> pd.DataFrame:
     """
     Fetch EOD OHLCV bars from Yahoo Finance for one IDX ticker.

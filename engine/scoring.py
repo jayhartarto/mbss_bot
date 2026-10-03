@@ -1294,12 +1294,39 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
             )
             pb = pb_recomputed
         else:
-            _report_data_quality_warning(
-                f"{ticker} (PB {pb:.0f})",
-                f"⚠️ {ticker}: PB {pb} dari yfinance melewati batas wajar ({PB_SANITY_MAX}x) — "
-                f"kemungkinan data quality issue, diperlakukan sebagai tidak diketahui, bukan sinyal distress"
+            # MBSS v2 (2026-10-03, user finding, dikonfirmasi exact lewat
+            # cek manual UNIC/FPNI/TOBA/POWR/ADRO): price/bookValue mentah
+            # DI ATAS masih meledak utk BANYAK ticker -- root cause
+            # sebenarnya bukan priceToBook Yahoo yang salah sendiri,
+            # tapi field bookValue MENTAH-nya SISTEMATIS dalam USD utk
+            # saham IDX, sementara currentPrice dalam IDR. UNIC: bookValue
+            # 0.811 x kurs USD/IDR hari itu (~17.900) = Rp14.517, price
+            # Rp14.975 -> PB=1.03x (wajar) -- bukan kebetulan, 5 ticker
+            # yang dicek semua landing 0.87-1.36x setelah dikali kurs.
+            # Coba recovery KEDUA (kali kurs) sebelum benar2 menyerah ke
+            # "tidak diketahui" -- jangan buang sinyal yang sebenarnya
+            # bisa diselamatkan, sama disiplin dgn recovery price/bookValue
+            # di atas.
+            usd_idr_rate = core.get_usd_idr_rate()
+            pb_recomputed_fx = (
+                (current_price / (book_value_per_share * usd_idr_rate))
+                if usd_idr_rate and book_value_per_share > 0 else 0.0
             )
-            pb = 0.0
+            if 0 < pb_recomputed_fx <= PB_SANITY_MAX:
+                _report_data_quality_warning(
+                    f"{ticker} (PB dipulihkan via kurs USD/IDR: {pb_recomputed_fx:.2f})",
+                    f"⚠️ {ticker}: PB {pb} rusak, price/bookValue mentah {pb_recomputed:.0f} juga rusak — "
+                    f"bookValue yfinance ternyata dalam USD (bukan IDR), dihitung ulang dgn kurs "
+                    f"USD/IDR {usd_idr_rate:.0f} → PB={pb_recomputed_fx:.2f}, dipakai sebagai ganti."
+                )
+                pb = pb_recomputed_fx
+            else:
+                _report_data_quality_warning(
+                    f"{ticker} (PB {pb:.0f})",
+                    f"⚠️ {ticker}: PB {pb} dari yfinance melewati batas wajar ({PB_SANITY_MAX}x) — "
+                    f"kemungkinan data quality issue, diperlakukan sebagai tidak diketahui, bukan sinyal distress"
+                )
+                pb = 0.0
     if pe > PE_SANITY_MAX:
         _report_data_quality_warning(
             f"{ticker} (PE {pe:.0f})",
