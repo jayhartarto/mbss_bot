@@ -75,6 +75,32 @@ def _noop_blacklist_write(*args, **kwargs):
     pass  # lihat catatan main() -- WAJIB no-op selama truncated-fetch phase
 
 
+def _make_asof_trading_days_between(real_fn, as_of_date):
+    """BUG NYATA ditemukan 2026-10-03 (live run di VPS, SEMUA ticker
+    ter-exclude 'kemungkinan suspended' di hari backfill paling tua):
+    engine/scoring.py's staleness-proxy check (~line 1108) memanggil
+    core.count_trading_days_between(last_bar_date_str) TANPA argumen
+    kedua -- itu default ke datetime.now() WALL-CLOCK ASLI, BUKAN
+    pick_date historis yg sedang direkonstruksi di sini. Begitu bar
+    terakhir (persis = pick_date, krn truncated fetcher) dibandingkan ke
+    hari ini yg sungguhan, gap-nya gampang >=STALE_TRADING_DAYS_THRESHOLD
+    (5) utk pick_date yg beberapa hari bursa di belakang -- scoring.py
+    langsung exclude ticker itu sbg 'suspended', PADAHAL cuma artefak
+    truncation. No-op blacklist WRITE (di atas) TIDAK cukup -- itu cuma
+    cegah PENULISAN PERMANEN ke failed_fetch_tracking.json, keputusan
+    exclude utk PANGGILAN INI SENDIRI tetap jalan krn jadi SEBELUM
+    tulis-blacklist. Fix: substitusi argumen kedua jadi as_of_date kalau
+    caller tidak mengisinya (persis kasus scoring.py), supaya stale_days
+    dihitung relatif ke pick_date, bukan wall-clock asli."""
+    as_of_str = str(as_of_date)
+
+    def _wrapped(date_str_earlier, date_str_later=None):
+        if date_str_later is None:
+            date_str_later = as_of_str
+        return real_fn(date_str_earlier, date_str_later)
+    return _wrapped
+
+
 def main():
     with open(core.WHITELIST_CACHE_FILE) as f:
         universe = json.load(f).get("eligible_tickers", [])
@@ -92,6 +118,8 @@ def main():
     core.record_direct_evidence_blacklist = _noop_blacklist_write
     core.record_fetch_result = _noop_blacklist_write
 
+    real_count_trading_days_between = core.count_trading_days_between
+
     real_get_ohlcv_smart = core.get_ohlcv_smart
     sample_hist = real_get_ohlcv_smart("BBCA", limit=30)
     if sample_hist is None or sample_hist.empty:
@@ -104,6 +132,7 @@ def main():
 
     for pick_date in pick_dates:
         core.get_ohlcv_smart = _make_truncated_fetcher(real_get_ohlcv_smart, pick_date)
+        core.count_trading_days_between = _make_asof_trading_days_between(real_count_trading_days_between, pick_date)
         pick_date_str = str(pick_date)
 
         scored = {}
@@ -137,6 +166,7 @@ def main():
               f"{len(momentum_pass)} momentum gate-pass, {len(bounce_pass)} bounce gate-pass")
 
     core.get_ohlcv_smart = real_get_ohlcv_smart  # WAJIB restore sebelum script selesai
+    core.count_trading_days_between = real_count_trading_days_between
     core.record_direct_evidence_blacklist = real_record_direct_evidence_blacklist
     core.record_fetch_result = real_record_fetch_result
 
