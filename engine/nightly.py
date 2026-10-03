@@ -50,6 +50,7 @@ same results, no new fetch).
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import pickle
 
@@ -1301,6 +1302,22 @@ def load_rapidapi_sentiment_shortlist() -> dict:
 # ==========================================
 
 
+# RAPIDAPI_MARKET_INTEL_DAILY_DIR (user request 2026-09-30, "iriskan pick
+# kita dgn pick dari rapidapi"): rapidapi_market_intel WAS cache-only
+# (cache_manager.set overwrites nightly, no per-date history) -- so there
+# was no way to ever backtest "did a ticker our own tools picked overlap
+# with RapidAPI's own breakout/multibagger picks, and did that overlap
+# predict a better outcome" the same way GRIND/VCP/BOW pairwise overlap was
+# backtested (see memory project_grind_bow_vcp_overlap_2026_09_22 -- that
+# study found overlap does NOT automatically mean confirmation, so this
+# RapidAPI question needs the same kind of real evidence, not an assumption).
+# Mirrors foreign_flow_daily/{date}.json's dated-snapshot pattern exactly
+# (one file per trading day, append-only, safe to git-commit for research
+# from any clone) -- comes from the VPS's own nightly sweep so, unlike
+# foreign_flow_daily, it needs no laptop-side Cloudflare workaround.
+RAPIDAPI_MARKET_INTEL_DAILY_DIR = os.path.join(core.PROJECT_ROOT, "rapidapi_market_intel_daily")
+
+
 def build_rapidapi_market_intelligence_sweep() -> dict:
     """
     One call each to breakout/alerts, multibagger/scan, and sector-rotation
@@ -1324,6 +1341,24 @@ def save_rapidapi_market_intelligence(data: dict):
         print(f"💾 RapidAPI market intelligence tersimpan: {n_breakout} breakout alert, {n_multibagger} multibagger candidate")
     else:
         print("⚠️ Gagal menyimpan RapidAPI market intelligence cache.")
+    _archive_rapidapi_market_intelligence_daily(data, meta["trading_day_marker"])
+
+
+def _archive_rapidapi_market_intelligence_daily(data: dict, date_marker: str):
+    """Dated snapshot alongside the overwrite-cache above -- see
+    RAPIDAPI_MARKET_INTEL_DAILY_DIR's comment for why. Same-day dedup (skip
+    if today's file already exists) matches the RapidAPI quota discipline
+    used everywhere else in this module -- this function can safely be
+    called more than once per trading day."""
+    path = os.path.join(RAPIDAPI_MARKET_INTEL_DAILY_DIR, f"{date_marker}.json")
+    if os.path.exists(path):
+        return
+    try:
+        os.makedirs(RAPIDAPI_MARKET_INTEL_DAILY_DIR, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"⚠️ Gagal arsip RapidAPI market intelligence harian ({date_marker}): {e}")
 
 
 def load_rapidapi_market_intelligence() -> dict:

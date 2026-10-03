@@ -7,6 +7,7 @@ ticker_whitelist.json
 buy_on_weakness_picks.json
 vcp_pillar_picks.json
 macd_confirm_pillar_picks.json
+entry_pagi_pick_history.json
 news_catalyst_log.json
 news_sentiment_log.json
 dividend_calendar.json

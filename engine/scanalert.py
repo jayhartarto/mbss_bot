@@ -2879,6 +2879,111 @@ def _save_entry_pagi_state(state: dict):
         json.dump(state, f, indent=2)
 
 
+# ==========================================
+# 🔁 ENTRY PAGI STREAK-ORDERED TAGGING (MBSS v2, 2026-10-02, user request:
+# "kasih urutan tag di kandidat entry pagi sesuai dengan temuan karakter2
+# dari hasil riset... perlu data pick dari 5 hari sebelumnya, maka buatkan
+# cache/json-nya saja"). entry_pagi_state.json is LIVE-SESSION state only
+# (overwritten, no multi-day history) -- this is the first persistent,
+# accumulating record for Entry Pagi, purpose-built to answer "how many
+# consecutive trading days has this ticker been triggering the gate" so
+# candidates can be ordered by the research finding (research/entrypagi_
+# streak_backtest_2026_10_01.py, memory project_entrypagi_streak_backtest_
+# 2026_10_01): MOMENTUM streak>=2 outperforms streak==1 and stays flat (no
+# exhaustion) through >=5x; OVERSOLD-BOUNCE is the OPPOSITE -- streak==1 is
+# near-best, performance mildly DECLINES into long streaks (>=5x weakest,
+# even negative mean fwd return). Record shape {ticker, pick_date, source}
+# is IDENTICAL to daytrade_picks_history.json's, on purpose -- streak
+# counting REUSES core.compute_consecutive_appearance_streak verbatim
+# instead of reimplementing the trading-day-adjacency logic.
+# ==========================================
+ENTRY_PAGI_PICK_HISTORY_FILE = os.path.join(core.PROJECT_ROOT, "entry_pagi_pick_history.json")
+ENTRY_PAGI_PICK_HISTORY_MAX_DAYS = 30  # keep file small -- streak logic only ever looks back a handful of consecutive trading days, this is just a safety buffer
+
+SOURCE_ENTRY_PAGI_MOMENTUM = "entry_pagi_momentum"
+SOURCE_ENTRY_PAGI_BOUNCE = "entry_pagi_bounce"
+
+# Research thresholds (see module docstring above for the backtest numbers
+# behind these):
+ENTRY_PAGI_MOMENTUM_STREAK_BOOST_MIN = 2   # streak>=2 -> boost UP (momentum: repeat = better, no exhaustion)
+ENTRY_PAGI_BOUNCE_STREAK_PENALTY_MIN = 5   # streak>=5 -> push DOWN (bounce: long streak = mild exhaustion)
+
+
+def _load_entry_pagi_pick_history() -> list[dict]:
+    if not os.path.exists(ENTRY_PAGI_PICK_HISTORY_FILE):
+        return []
+    try:
+        with open(ENTRY_PAGI_PICK_HISTORY_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_entry_pagi_pick_history(history: list[dict]):
+    dates = sorted({p["pick_date"] for p in history}, reverse=True)
+    keep_dates = set(dates[:ENTRY_PAGI_PICK_HISTORY_MAX_DAYS])
+    trimmed = [p for p in history if p["pick_date"] in keep_dates]
+    with open(ENTRY_PAGI_PICK_HISTORY_FILE, "w") as f:
+        json.dump(trimmed, f, indent=2)
+
+
+def get_entry_pagi_streak(ticker: str, source: str, pick_date: str | None = None) -> int:
+    """Consecutive trading days (ending at pick_date, INCLUSIVE of today)
+    this ticker has triggered this archetype's gate, per the history
+    recorded so far -- call this BEFORE record_entry_pagi_picks() for
+    today, same calling convention as lock_daily_daytrade_picks elsewhere
+    in this codebase ("history yang dipakai belum termasuk entri baru yang
+    sedang dibangun sekarang")."""
+    pick_date = pick_date or _today_str()
+    history = _load_entry_pagi_pick_history()
+    return core.compute_consecutive_appearance_streak(ticker, source, pick_date, history)
+
+
+def record_entry_pagi_picks(tickers: list[str], source: str, pick_date: str | None = None):
+    """Append today's gate-pass tickers for one archetype to the shared
+    pick-history cache. Idempotent per (ticker, pick_date, source) -- safe
+    to call more than once on the same trading day (e.g. /allsetup run
+    manually several times)."""
+    pick_date = pick_date or _today_str()
+    history = _load_entry_pagi_pick_history()
+    existing = {(p["ticker"], p["pick_date"], p["source"]) for p in history}
+    changed = False
+    for t in tickers:
+        key = (t, pick_date, source)
+        if key not in existing:
+            history.append({"ticker": t, "pick_date": pick_date, "source": source})
+            existing.add(key)
+            changed = True
+    if changed:
+        _save_entry_pagi_pick_history(history)
+
+
+def entry_pagi_momentum_streak_tag(streak: int) -> str:
+    """Informational only -- NOT a gate/exclude, same 'missing=neutral,
+    tag don't filter' convention as _smart_money_tag etc."""
+    if streak >= ENTRY_PAGI_MOMENTUM_STREAK_BOOST_MIN:
+        return f" 🔁 {streak}x berturut (riset: performa lebih baik)"
+    return ""
+
+
+def entry_pagi_bounce_streak_tag(streak: int) -> str:
+    if streak >= ENTRY_PAGI_BOUNCE_STREAK_PENALTY_MIN:
+        return f" ⚠️ {streak}x berturut (riset: performa melemah)"
+    return ""
+
+
+def entry_pagi_momentum_sort_key(streak: int) -> int:
+    """Lower sorts first. streak>=2 boosted ABOVE streak==1 -- ties within
+    a tier broken by the caller's own secondary sort key."""
+    return 0 if streak >= ENTRY_PAGI_MOMENTUM_STREAK_BOOST_MIN else 1
+
+
+def entry_pagi_bounce_sort_key(streak: int) -> int:
+    """Lower sorts first. streak>=5 pushed to the BOTTOM -- ties within a
+    tier broken by the caller's own secondary sort key."""
+    return 1 if streak >= ENTRY_PAGI_BOUNCE_STREAK_PENALTY_MIN else 0
+
+
 def load_entry_pagi_state_for_consensus() -> dict:
     """
     Public helper (MBSS v2, user request 2026-09-06 -- /consensus jadi
@@ -3090,6 +3195,21 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
     display/logging, bukan gate.
     """
     atr_p75 = compute_atr_pct14_p75(scored)
+
+    # MBSS v2 (2026-10-02, user request -- streak-ordered tagging): record/
+    # read streak from the FULL DNA-gate-pass population (over `scored`,
+    # the whole nightly universe), NOT just today's or_data/5min-confirm
+    # survivors -- this matches research/entrypagi_streak_backtest_2026_
+    # 10_01.py's `gate_momentum` definition exactly (EOD-only, no intraday
+    # filter), so streak reflects the backtested character, not whichever
+    # subset happened to also clear 5-min-confirm today. Streak computed
+    # BEFORE recording today's pass so it reflects PRIOR days only (same
+    # convention as lock_daily_daytrade_picks).
+    pick_date = _today_str()
+    gate_pass_tickers = [t for t, info in scored.items() if entry_pagi_dna_gate_pass(info, atr_p75)]
+    streak_by_ticker = {t: get_entry_pagi_streak(t, SOURCE_ENTRY_PAGI_MOMENTUM, pick_date) for t in gate_pass_tickers}
+    record_entry_pagi_picks(gate_pass_tickers, SOURCE_ENTRY_PAGI_MOMENTUM, pick_date)
+
     rows = []
     for t, snap in or_data.items():
         info = scored.get(t)
@@ -3099,14 +3219,19 @@ def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
         chg_5min_pct = (entry_ref / open_price - 1) * 100
         if chg_5min_pct < ENTRY_PAGI_CONFIRM_5MIN_PCT:
             continue  # "kalau bergerak turun, skip" -- user request 2026-09-28
+        streak = streak_by_ticker.get(t, 1)
         rows.append({
             "ticker": t, "entry_ref": entry_ref, "value_traded": info.get("value_traded"),
             "chg_5min_pct": chg_5min_pct,
             "whitelist_accumulation_net_pct": info.get("whitelist_accumulation_net_pct"),
             "whitelist_num_brokers": info.get("whitelist_num_brokers"),
             "new_high_tag": _entry_pagi_new_high_tag(info),
+            "streak": streak,
+            "streak_tag": entry_pagi_momentum_streak_tag(streak),
         })
-    rows.sort(key=lambda r: r["chg_5min_pct"], reverse=True)
+    # Streak-tier first (research-favorable streak>=2 on top), chg_5min_pct
+    # DESCENDING as before within each tier.
+    rows.sort(key=lambda r: (entry_pagi_momentum_sort_key(r["streak"]), -r["chg_5min_pct"]))
     return rows[:ENTRY_PAGI_TOP_N]
 
 
@@ -3202,9 +3327,10 @@ def _render_entry_pagi_message(picks: list[dict], skipped: list[dict] | None = N
         avgdown_note = " (avg down TERISI)" if p.get("filled_avgdown") else ""
         sm_tag = _smart_money_tag(p.get("whitelist_accumulation_net_pct"), p.get("whitelist_num_brokers"))
         nh_tag = p.get("new_high_tag") or ""
+        streak_tag = p.get("streak_tag") or ""
         blocks.append(
             f"TICK {i}\n"
-            f"{p['ticker']} — {entry:,.0f} (harga alert){sm_tag}{nh_tag}\n"
+            f"{p['ticker']} — {entry:,.0f} (harga alert){sm_tag}{nh_tag}{streak_tag}\n"
             f"Entry Range : {lo:,.0f}-{hi:,.0f}\n"
             f"TP : {tp:,.0f}\n"
             f"SL : {sl:,.0f}\n"
@@ -3382,6 +3508,7 @@ async def run_entry_pagi_scan_once(force: bool = False) -> dict:
             "whitelist_accumulation_net_pct": r.get("whitelist_accumulation_net_pct"),
             "whitelist_num_brokers": r.get("whitelist_num_brokers"),
             "new_high_tag": r.get("new_high_tag", ""),
+            "streak_tag": r.get("streak_tag", ""),
         })
 
     new_state = {

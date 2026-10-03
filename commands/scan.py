@@ -367,14 +367,34 @@ async def all_setup_candidates_command(update, context):
     entry_pagi_pool = [
         r for r in all_values if scanalert_engine.entry_pagi_dna_gate_pass(r, entry_pagi_atr_p75)
     ]
-    entry_pagi_top20 = sorted(entry_pagi_pool, key=lambda r: r["atr_pct14"], reverse=True)[:20]
-    lines.append(f"\n🌅 ENTRY PAGI pre-filter ({len(entry_pagi_pool)} lolos DNA gate, top 20 by ATR%)")
+    # MBSS v2 (2026-10-02, user request -- streak-ordered tagging): record
+    # here TOO (idempotent, same key dedup as the live 09:05 lane) so streak
+    # keeps accumulating even on days the auto lane is toggled off/fails and
+    # only this manual preview ran. Streak>=2 boosted to TOP (research:
+    # momentum repeat = better, no exhaustion) ahead of the existing ATR%
+    # sort, not replacing it.
+    entry_pagi_streak_by_ticker = {
+        r["ticker"]: scanalert_engine.get_entry_pagi_streak(r["ticker"], scanalert_engine.SOURCE_ENTRY_PAGI_MOMENTUM)
+        for r in entry_pagi_pool
+    }
+    scanalert_engine.record_entry_pagi_picks(
+        [r["ticker"] for r in entry_pagi_pool], scanalert_engine.SOURCE_ENTRY_PAGI_MOMENTUM
+    )
+    entry_pagi_top20 = sorted(
+        entry_pagi_pool,
+        key=lambda r: (
+            scanalert_engine.entry_pagi_momentum_sort_key(entry_pagi_streak_by_ticker.get(r["ticker"], 1)),
+            -r["atr_pct14"],
+        ),
+    )[:20]
+    lines.append(f"\n🌅 ENTRY PAGI pre-filter ({len(entry_pagi_pool)} lolos DNA gate, top 20 by ATR%, diurutkan ulang by streak)")
     if not entry_pagi_top20:
         lines.append("  (kosong)")
     else:
         for r in entry_pagi_top20:
             sm_tag = scanalert_engine._smart_money_tag(r.get("whitelist_accumulation_net_pct"), r.get("whitelist_num_brokers"))
-            lines.append(f"  {r['ticker']} | ATR {r['atr_pct14']:.1f}% | %B {r['pct_b']:.2f} | ret5d {r['ret_5d_pct']:+.1f}%{sm_tag}")
+            streak_tag = scanalert_engine.entry_pagi_momentum_streak_tag(entry_pagi_streak_by_ticker.get(r["ticker"], 1))
+            lines.append(f"  {r['ticker']} | ATR {r['atr_pct14']:.1f}% | %B {r['pct_b']:.2f} | ret5d {r['ret_5d_pct']:+.1f}%{sm_tag}{streak_tag}")
         lines.append(
             "  ⚠️ Ini kandidat PRE-filter (D-1 close), BELUM lewat konfirmasi 5-menit 09:00-09:05 "
             "-- fallback manual kalau scan otomatis ENTRY PAGI 09:05 gagal, bukan pengganti alert asli."
@@ -390,17 +410,37 @@ async def all_setup_candidates_command(update, context):
     oversold_pool = [
         r for r in all_values if scanalert_engine.entry_pagi_oversold_bounce_gate_pass(r, oversold_thresholds)
     ]
-    oversold_top = sorted(oversold_pool, key=lambda r: r["rsi"])[:scanalert_engine.ENTRY_PAGI_OVERSOLD_TOP_N]
-    lines.append(f"\n🩸 OVERSOLD BOUNCE watchlist ({len(oversold_pool)} lolos gate, top {scanalert_engine.ENTRY_PAGI_OVERSOLD_TOP_N} by RSI terendah)")
+    # MBSS v2 (2026-10-02, user request -- streak-ordered tagging, same
+    # mechanism as ENTRY PAGI momentum lane): streak dibaca/direkam dari
+    # SELURUH oversold_pool (matches research/entrypagi_streak_backtest_
+    # 2026_10_01.py's `gate_bounce` population persis), BUKAN kebalikan dari
+    # momentum -- streak panjang (>=5x) di-DORONG KE BAWAH (riset: mild
+    # exhaustion), bukan ke atas.
+    oversold_streak_by_ticker = {
+        r["ticker"]: scanalert_engine.get_entry_pagi_streak(r["ticker"], scanalert_engine.SOURCE_ENTRY_PAGI_BOUNCE)
+        for r in oversold_pool
+    }
+    scanalert_engine.record_entry_pagi_picks(
+        [r["ticker"] for r in oversold_pool], scanalert_engine.SOURCE_ENTRY_PAGI_BOUNCE
+    )
+    oversold_top = sorted(
+        oversold_pool,
+        key=lambda r: (
+            scanalert_engine.entry_pagi_bounce_sort_key(oversold_streak_by_ticker.get(r["ticker"], 1)),
+            r["rsi"],
+        ),
+    )[:scanalert_engine.ENTRY_PAGI_OVERSOLD_TOP_N]
+    lines.append(f"\n🩸 OVERSOLD BOUNCE watchlist ({len(oversold_pool)} lolos gate, top {scanalert_engine.ENTRY_PAGI_OVERSOLD_TOP_N} by RSI terendah, diurutkan ulang by streak)")
     if not oversold_top:
         lines.append("  (kosong)")
     else:
         for r in oversold_top:
             sm_tag = scanalert_engine._smart_money_tag(r.get("whitelist_accumulation_net_pct"), r.get("whitelist_num_brokers"))
             ff_tag = scanalert_engine._oversold_bounce_ff_tag(r.get("foreign_net_ratio_1d"))
+            streak_tag = scanalert_engine.entry_pagi_bounce_streak_tag(oversold_streak_by_ticker.get(r["ticker"], 1))
             lines.append(
                 f"  {r['ticker']} | RSI {r['rsi']:.1f} | vs SMA20 {r['price_vs_sma20_pct']:+.1f}% | "
-                f"ret1d {(r.get('ret_1d_pct') or 0):+.1f}%{ff_tag}{sm_tag}"
+                f"ret1d {(r.get('ret_1d_pct') or 0):+.1f}%{ff_tag}{sm_tag}{streak_tag}"
             )
         lines.append(
             "  ⚠️ WATCHLIST MANUAL, BUKAN sinyal auto-entry -- belum ada riset TP/SL/exit utk archetype ini "
@@ -408,7 +448,9 @@ async def all_setup_candidates_command(update, context):
             "baru dipertimbangkan masuk.\n"
             "  ℹ️ RSI/vs-SMA20/ret1d makin ekstrem (crash makin dalam) + FF asing net-buy/kurang net-sell "
             "secara historis korelasi win rate lebih tinggi (riset 2026-09-29, n=296, lihat memory "
-            "project_oversold_bounce_1m_winner_loser_2026_09_29) -- info tambahan buat prioritas, BUKAN gate."
+            "project_oversold_bounce_1m_winner_loser_2026_09_29) -- info tambahan buat prioritas, BUKAN gate.\n"
+            "  ℹ️ Muncul berturut-turut (>=5x) secara backtest 2 tahun justru PERFORMA MELEMAH (bukan konfirmasi) "
+            "-- lihat tag ⚠️, lihat memory project_entrypagi_streak_backtest_2026_10_01."
         )
 
     all_tickers = (
