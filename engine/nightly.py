@@ -462,6 +462,18 @@ async def run_nightly_full_scan(context):
         except Exception as e:
             print(f"⚠️ Gagal menjalankan BSJP v2 nightly step: {e}")
 
+        # BSJP-PUMP (Lane 2, 2026-10-05, merged brand -- see engine/bsjp_pump.py
+        # docstring + memory project_bsjp_dna_matching_production_design_
+        # 2026_10_05.md). Same reuse-of-`results` pattern, separate try block
+        # so a failure here never blocks BSJP v2 (or vice versa) above.
+        try:
+            import engine.bsjp_pump as bsjp_pump_engine
+            bsjp_pump_confirmed = bsjp_pump_engine.finalize_bsjp_pump_confirmations(results_by_ticker)
+            bsjp_pump_watchlist = bsjp_pump_engine.build_bsjp_pump_watchlist(results_by_ticker)
+            print(f"🌆 BSJP-PUMP: {len(bsjp_pump_confirmed)} pick terkonfirmasi hari ini, {len(bsjp_pump_watchlist)} watchlist baru buat besok.")
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan BSJP-PUMP nightly step: {e}")
+
         # MBSS v2 (user request — /broksum): fetch broker-summary batch buat
         # 250 ticker berskor tertinggi SEKALI di sini, pakai HABIS kuota
         # harian Index Alpha (5 panggilan batch x 50 = 250 ticker, persis

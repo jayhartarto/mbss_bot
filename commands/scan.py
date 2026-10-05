@@ -2622,8 +2622,13 @@ async def bsjp2_screening_command(update, context):
     Stage-1 confirmations (engine/bsjp2.build_bsjp2_tp_message), meant to be
     read tonight or before D2's open tomorrow.
     """
+    import engine.bsjp_pump as bsjp_pump_engine
+
     if context.args and context.args[0].lower() == "tp":
-        await core.safe_reply(update.message, bsjp2_engine.build_bsjp2_tp_message())
+        await core.safe_reply(
+            update.message,
+            bsjp2_engine.build_bsjp2_tp_message() + "\n\n" + bsjp_pump_engine.build_bsjp_pump_tp_message(),
+        )
         return
 
     # No weekday/holiday gate here (bugfix 2026-09-20, live case: user ran
@@ -2643,12 +2648,14 @@ async def bsjp2_screening_command(update, context):
             (ticker, (bsjp2_engine._load_json_state("bsjp2_watchlist_state.json").get("candidates") or {}).get(ticker, {}), t_state)
             for ticker, t_state in live_state["tickers"].items()
         ]
-        await core.safe_reply(update.message, bsjp2_engine._render_bsjp2_intraday_message(active))
-        return
+        text = bsjp2_engine._render_bsjp2_intraday_message(active)
+    else:
+        watchlist_state = bsjp2_engine._load_json_state("bsjp2_watchlist_state.json")
+        candidates = list((watchlist_state.get("candidates") or {}).values())
+        text = bsjp2_engine.build_bsjp2_watchlist_message(candidates)
 
-    watchlist_state = bsjp2_engine._load_json_state("bsjp2_watchlist_state.json")
-    candidates = list((watchlist_state.get("candidates") or {}).values())
-    await core.safe_reply(update.message, bsjp2_engine.build_bsjp2_watchlist_message(candidates))
+    text += "\n\n" + bsjp_pump_engine.build_bsjp_pump_status_message()
+    await core.safe_reply(update.message, text)
 
 
 async def entry_pagi_manual_command(update, context):

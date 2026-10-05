@@ -64,6 +64,7 @@ import engine.broker as broker_engine
 import engine.fundamental_health as fundamental_health_engine
 
 _bsjp2_error_logged = False  # reset per process restart -- see compute_bsjp2_features call below
+_bsjp_pump_error_logged = False  # reset per process restart -- see compute_bsjp_pump_features call below
 
 # MBSS v2 (user request — log /eodscan terlalu berisik): PB/PE anomali dari
 # yfinance (lihat PB_SANITY_MAX/PE_SANITY_MAX di compute_factor_scoring) itu
@@ -2588,8 +2589,24 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
             traceback.print_exc()
             _bsjp2_error_logged = True
 
+    # BSJP-PUMP (Lane 2, 2026-10-05) -- same zero-extra-fetch convention,
+    # same soft-fail-once-logged pattern as BSJP v2 above. See
+    # engine/bsjp_pump.py for the formulas.
+    global _bsjp_pump_error_logged
+    try:
+        import engine.bsjp_pump as bsjp_pump_engine
+        bsjp_pump_fields = bsjp_pump_engine.compute_bsjp_pump_features(hist) or {}
+    except Exception as e:
+        bsjp_pump_fields = {}
+        if not _bsjp_pump_error_logged:
+            import traceback
+            print(f"⚠️ BSJP-PUMP compute_bsjp_pump_features gagal (ticker {ticker}): {e}")
+            traceback.print_exc()
+            _bsjp_pump_error_logged = True
+
     result = {
         **bsjp2_fields,
+        **bsjp_pump_fields,
         "ticker": ticker,
         "name": company_name,
         "sector": sector,

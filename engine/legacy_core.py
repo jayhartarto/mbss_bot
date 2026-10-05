@@ -7640,6 +7640,28 @@ async def run_bsjp2_intraday_tick_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ BSJP v2 intraday tick job gagal: {e}")
 
 
+async def run_bsjp_pump_session1_tick_job(context: ContextTypes.DEFAULT_TYPE):
+    """JobQueue callback -- BSJP-PUMP (Lane 2) session-1 checkpoint tracker.
+    No-op outside 09:00-12:10 WIB or once today's checkpoint already fired
+    (engine/bsjp_pump.py run_bsjp_pump_session1_tick)."""
+    try:
+        import engine.bsjp_pump as bsjp_pump_engine
+        await bsjp_pump_engine.run_bsjp_pump_session1_tick()
+    except Exception as e:
+        print(f"⚠️ BSJP-PUMP session-1 tick job gagal: {e}")
+
+
+async def run_bsjp_pump_session2_tick_job(context: ContextTypes.DEFAULT_TYPE):
+    """JobQueue callback -- BSJP-PUMP (Lane 2) session-2 dip-tracking.
+    No-op outside 13:30-15:50 WIB or with no checkpoint survivors today
+    (engine/bsjp_pump.py run_bsjp_pump_session2_tick)."""
+    try:
+        import engine.bsjp_pump as bsjp_pump_engine
+        await bsjp_pump_engine.run_bsjp_pump_session2_tick()
+    except Exception as e:
+        print(f"⚠️ BSJP-PUMP session-2 tick job gagal: {e}")
+
+
 async def run_entry_pagi_scan_job(context: ContextTypes.DEFAULT_TYPE):
     """
     JobQueue callback TERPISAH (MBSS v2, user request 2026-09-06 -- lane
@@ -7999,6 +8021,13 @@ def build_app():
         # avoids aligning with conviction_sweep (first=100/900s) or
         # entry_pagi jobs (70/95/115/180s) at the same modulus.
         app.job_queue.run_repeating(run_bsjp2_intraday_tick_job, interval=300, first=280)
+        # BSJP-PUMP (Lane 2, 2026-10-05, engine/bsjp_pump.py): two SEPARATE
+        # intraday jobs (session-1 checkpoint, session-2 dip-tracking), same
+        # 300s cadence and self-gating no-op convention as BSJP v2 above --
+        # both are cheap no-ops outside their own time window so registering
+        # them to run all day (like every other job here) is safe.
+        app.job_queue.run_repeating(run_bsjp_pump_session1_tick_job, interval=300, first=290)
+        app.job_queue.run_repeating(run_bsjp_pump_session2_tick_job, interval=300, first=295)
         # MBSS v2 (user request 2026-09-06 -- lane ENTRY PAGI baru, lihat
         # blok panjang "ENTRY PAGI" di engine/scanalert.py utk mekanisme
         # lengkap): TIGA job TERPISAH, semua interval=180s (sama cadence dgn

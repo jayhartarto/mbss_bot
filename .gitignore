@@ -18,5 +18,6 @@ failed_fetch_tracking.json
 rapidapi_idx_quota.json
 rapidapi_idx_ondemand_cache.json
 rapidapi_intraday_checkpoint.json
+bsjp_pump_*.json
 __pycache__/
 *.pyc
