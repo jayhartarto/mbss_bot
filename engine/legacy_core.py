@@ -2646,7 +2646,7 @@ def resolve_daytrade_picks():
 
     if changed:
         save_daytrade_picks_history(history)
-    return changed
+    return {"changed": changed, "newly_disconfirmed": newly_disconfirmed}
 
 
 
