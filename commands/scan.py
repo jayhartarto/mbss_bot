@@ -4131,19 +4131,26 @@ async def buy_on_weakness_command(update, context):
 
 async def swing_command(update, context):
     """
-    /swing — MBSS v2 (2026-09-21). Unified swing-trade signal, replaces the
-    old /buyonweakness (/bow) command. Shows BOW ("buy the quiet dip in an
-    uptrend") and VCP ("buy the breakout after a volatility squeeze") as two
-    SEPARATE labeled sections, NOT merged into one score/list — confirmed
-    0% day-level overlap between the two (see memory
+    /swing — MBSS v2 (2026-09-21, OSB-v2 lane added 2026-10-06). Unified
+    swing-trade signal, replaces the old /buyonweakness (/bow) command.
+    Shows BOW ("buy the quiet dip in an uptrend"), OSB-v2 ("buy the deep-
+    oversold bounce during a confirmed IHSG bear regime" — near-mutually-
+    exclusive with BOW by construction, see engine/oversold_bounce_v2.py),
+    and VCP ("buy the breakout after a volatility squeeze") as SEPARATE
+    labeled sections, NOT merged into one score/list — confirmed 0% day-
+    level overlap between BOW and VCP (see memory
     project_bow_vcp_overlap_2026_09_21.md), so a merge would just be
-    misleading. Both read the picks history each nightly job already
+    misleading. All read the picks history each nightly job already
     maintains (see engine/nightly.py hooks) — no live scan here, same
     "cache-only" pattern as /broksum.
     """
     bow_picks = buy_on_weakness_engine.load_buy_on_weakness_picks()
     bow_active = [p for p in bow_picks if p.get("status") == "ALIVE"]
     bow_active.sort(key=lambda p: (p["tier"], -p["age_days"]))
+
+    osb_picks = oversold_bounce_v2_engine.load_oversold_bounce_v2_picks()
+    osb_active = [p for p in osb_picks if p.get("status") == "ALIVE"]
+    osb_active.sort(key=lambda p: (p.get("ff_ratio_5d") is None, -(p.get("ff_ratio_5d") or 0)))
 
     vcp_picks = vcp_pillar_engine.load_vcp_picks()
     vcp_active = [p for p in vcp_picks if p.get("status") == "ALIVE"]
@@ -4183,15 +4190,15 @@ async def swing_command(update, context):
                         -(macd_confirm_pillar_engine.win_rate_of(p) or 0))
     )
 
-    if not bow_active and not vcp_active and not macd_confirm_active:
+    if not bow_active and not osb_active and not vcp_active and not macd_confirm_active:
         await core.safe_reply(
             update.message,
-            "🧭 SWING — belum ada sinyal aktif saat ini (BOW, VCP, maupun MACD-confirm). "
+            "🧭 SWING — belum ada sinyal aktif saat ini (BOW, OSB-v2, VCP, maupun MACD-confirm). "
             "Lane ini jalan otomatis tiap malam via /eodscan, cek lagi besok."
         )
         return
 
-    lines = [f"🧭 SWING — {len(bow_active)} BOW + {len(vcp_active)} VCP + "
+    lines = [f"🧭 SWING — {len(bow_active)} BOW + {len(osb_active)} OSB-v2 + {len(vcp_active)} VCP + "
              f"{len(macd_confirm_active)} MACD-confirm sinyal aktif"]
 
     lines.append(f"\n🪶 BUY ON WEAKNESS ({len(bow_active)})")
@@ -4210,6 +4217,24 @@ async def swing_command(update, context):
             f"TP1: {p['tp1_price']:,.0f} (+{p['tp1_pct']:.2f}%){tp1_note}\n"
             f"TP2: {p['tp2_price_latest']:,.0f}\n"
             f"Swing Length: ~{p['swing_length_days_typical']} hari."
+        )
+
+    lines.append(f"\n🔄 OVERSOLD BOUNCE v2 ({len(osb_active)})")
+    if not osb_active:
+        lines.append("— tidak ada sinyal aktif (lane ini hanya nyala saat IHSG dd_100<=-10%).")
+    for p in osb_active:
+        age = p["age_days"]
+        age_label = f"NEW (Day {age}/{oversold_bounce_v2_engine.ALERT_MAX_AGE_DAYS})" if age <= 1 else f"AGING (Day {age}/{oversold_bounce_v2_engine.ALERT_MAX_AGE_DAYS}) — ALIVE"
+        ff = p.get("ff_ratio_5d")
+        ff_tag = f" | 🟢 FF {ff:+.1f}% (5d)" if ff is not None and ff > 0 else (f" | 🔴 FF {ff:+.1f}% (5d)" if ff is not None else "")
+        tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
+        lines.append(
+            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger){ff_tag}\n"
+            f"{age_label}\n"
+            f"Entry ref: {p['entry_ref_price']:,.0f}\n"
+            f"SL: {p['sl_price']:,.0f} (-20%, WAJIB)\n"
+            f"TP1: {p['tp1_price']:,.0f} (+5%, referensi konservatif){tp1_note}\n"
+            f"TP2: {p['tp2_price']:,.0f} (+10%, referensi utama)"
         )
 
     lines.append(f"\n📐 VCP BREAKOUT ({len(vcp_active)})")
@@ -4304,11 +4329,13 @@ async def swing_command(update, context):
         "(sudah divalidasi di semua statistik di atas)."
     )
     lines.append(
-        "\n⚠️ BOW, VCP & MACD-CONFIRM tiga pilar terpisah (JANGAN digabung jadi "
-        "satu skor). BOW: winrate tinggi, gain stabil. VCP: TP1 cepat & "
-        "reliable, TP2/TP3 upside tapi tail-driven (persentase touch-rate "
-        "BUKAN jaminan). MACD-CONFIRM: BARU, langsung produksi tanpa live-track "
-        "2 minggu (keputusan eksplisit user, lihat memory) — tag VALID/STRONG/"
-        "VERY STRONG dikunci di Day 5. SL wajib dipakai, bukan opsional."
+        "\n⚠️ BOW, OSB-v2, VCP & MACD-CONFIRM empat pilar terpisah (JANGAN digabung "
+        "jadi satu skor). BOW: winrate tinggi, gain stabil, butuh uptrend intak. "
+        "OSB-v2: kebalikan BOW (butuh trend RUSAK + IHSG bearish dd_100<=-10%), "
+        "watchlist-only belum ada auto-entry. VCP: TP1 cepat & reliable, TP2/TP3 "
+        "upside tapi tail-driven (persentase touch-rate BUKAN jaminan). "
+        "MACD-CONFIRM: BARU, langsung produksi tanpa live-track 2 minggu "
+        "(keputusan eksplisit user, lihat memory) — tag VALID/STRONG/VERY STRONG "
+        "dikunci di Day 5. SL wajib dipakai, bukan opsional."
     )
     await core.safe_reply(update.message, "\n\n".join(lines))
