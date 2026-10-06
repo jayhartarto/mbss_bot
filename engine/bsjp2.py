@@ -688,10 +688,10 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
                 "entry baru di sini sudah kehilangan sebagian besar target yang dihitung"
             )
         else:
-            block.append(f"TP1 {tp_sl['tp1']:,.0f} (+{(tp_sl['tp1']/price_now-1)*100:.1f}% dari now)")
-            block.append(f"TP2 {tp_sl['tp2']:,.0f} (+{(tp_sl['tp2']/price_now-1)*100:.1f}% dari now)")
+            block.append(f"TP1 {tp_sl['tp1']:,.0f} ({(tp_sl['tp1']/price_now-1)*100:+.1f}% dari now)")
+            block.append(f"TP2 {tp_sl['tp2']:,.0f} ({(tp_sl['tp2']/price_now-1)*100:+.1f}% dari now)")
             if tp_sl["tp3"] is not None:
-                block.append(f"TP3 {tp_sl['tp3']:,.0f} (+{(tp_sl['tp3']/price_now-1)*100:.1f}% dari now)*")
+                block.append(f"TP3 {tp_sl['tp3']:,.0f} ({(tp_sl['tp3']/price_now-1)*100:+.1f}% dari now)*")
         block.append(f"SL {tp_sl['sl']:,.0f} ({(tp_sl['sl']/price_now-1)*100:.1f}% dari now)")
         block.append(f"Trigger/fading: {trigger:,.0f}")
         lines.append("\n".join(block))
