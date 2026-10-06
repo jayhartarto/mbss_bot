@@ -51,6 +51,20 @@ a chronological train/test split found real regime degradation tied to the
 Jan-Jun 2026 IHSG crash — this combo has NO market-wide regime gate yet,
 it is pure stock-level technicals. Treat backtest hit-rates as upper
 bounds in a favorable regime, not an unconditional forward guarantee.
+
+RS-DISCRIMINATOR addition (2026-10-05, memory project_oversold_bounce_v2_
+locked_design_2026_10_05.md "BOW positioning vs OSB-v2" section): BOW's own
+mean return flips negative once IHSG dd_100<=-10% (checked via a live
+15-day sample, not the full 2-year backtest). The cleanest discriminator
+found was `rs20_vs_ihsg` (same RS20d metric already used as the RS20_MAX
+exclusion below) — filtering to the top two RS quartiles flips the
+degraded-regime mean positive (+0.9% vs -5.0% for the discarded half).
+Only ACTIVE when dd_100<=-10% (outside that regime BOW runs unfiltered, as
+before) — this is a derate/filter, not a hide: even the worst quartile
+still wins ~20-24% of the time. CAVEAT: this threshold comes from one
+continuous 15-day live sample (serially correlated, not independent
+periods like the main backtest numbers above) — treat as directional, not
+with the same confidence as the rest of this file's OOS-split findings.
 """
 from __future__ import annotations
 
@@ -90,6 +104,9 @@ FF_EXTREME_SELL = -10.0
 TIER_MEDIAN_RET = {1: 5.85, 2: 6.19, 3: 5.28}
 TIER_SWING_DAYS = {1: 10, 2: 8, 3: 7}
 ALERT_MAX_AGE_DAYS = 5
+
+RS_DISCRIMINATOR_DD100_GATE = -10.0  # only active once IHSG dd_100 is this deep or deeper
+RS_DISCRIMINATOR_FLOOR = 3.0         # rs_20d must be >= this (top ~2 quartiles) in that regime
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +228,8 @@ def _assign_tier(pctb: float, cmf20: float) -> int:
     return 3
 
 
-def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, rs20_ihsg: float | None) -> dict | None:
+def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, rs20_ihsg: float | None,
+                     ihsg_dd100: float | None = None) -> dict | None:
     """Returns a candidate dict if `ticker` qualifies TODAY, else None."""
     df = core.get_ohlcv_daily_from_db(ticker, limit=250)
     feats = _compute_latest_features(df)
@@ -244,6 +262,9 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, rs20_ihsg: float | Non
     if rs20_ihsg is not None and feats["stock_ret_20d"] is not None:
         rs_20d = feats["stock_ret_20d"] - rs20_ihsg
         if rs_20d > RS20_MAX:
+            return None
+        if (ihsg_dd100 is not None and ihsg_dd100 <= RS_DISCRIMINATOR_DD100_GATE
+                and rs_20d < RS_DISCRIMINATOR_FLOOR):
             return None
 
     tier = _assign_tier(feats["pctb"], feats["cmf_20"])
@@ -281,10 +302,11 @@ def compute_buy_on_weakness_candidates(tickers: list[str]) -> list[dict]:
     call update_and_save_picks() with the result to persist/merge)."""
     ff_lookup = _load_ff_lookup()
     rs20_ihsg = market_engine.get_ihsg_return_nd(20)
+    ihsg_dd100 = market_engine.get_ihsg_drawdown_100d()
     candidates = []
     for t in tickers:
         try:
-            c = evaluate_ticker(t, ff_lookup, rs20_ihsg)
+            c = evaluate_ticker(t, ff_lookup, rs20_ihsg, ihsg_dd100)
         except Exception as e:
             print(f"⚠️ Buy on Weakness: gagal evaluasi {t}: {e}")
             continue

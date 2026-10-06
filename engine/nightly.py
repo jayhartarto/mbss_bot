@@ -65,6 +65,7 @@ import engine.news_sentiment as news_sentiment_engine
 import engine.dividend_calendar as dividend_calendar_engine
 import engine.fundamental_health as fundamental_health_engine
 import engine.buy_on_weakness as buy_on_weakness_engine
+import engine.oversold_bounce_v2 as oversold_bounce_v2_engine
 import engine.vcp_pillar as vcp_pillar_engine
 import engine.macd_confirm_pillar as macd_confirm_pillar_engine
 import engine.bsjp2 as bsjp2_engine
@@ -496,6 +497,23 @@ async def run_nightly_full_scan(context):
             print(f"🪶 Buy on Weakness: {len(bow_candidates)} kandidat baru hari ini.")
         except Exception as e:
             print(f"⚠️ Gagal menjalankan Buy on Weakness: {e}")
+
+        # MBSS v2 (user request 2026-10-05/06 -- OVERSOLD BOUNCE v2, new lane
+        # INSIDE /bow, replaces the old entry_pagi_oversold_bounce_gate_pass
+        # lane retired from /allsetup and /pingpong). IHSG dd_100<=-10% macro
+        # gate means this produces [] most of the time outside a confirmed
+        # bear regime -- that's by design, not a bug. See engine/
+        # oversold_bounce_v2.py docstring + memory project_oversold_bounce_
+        # v2_locked_design_2026_10_05.md for the full research trail.
+        try:
+            osb_v2_tickers = [r["ticker"] for r in results if r and r.get("ticker")]
+            osb_v2_candidates = await asyncio.to_thread(
+                oversold_bounce_v2_engine.compute_oversold_bounce_v2_candidates, osb_v2_tickers
+            )
+            oversold_bounce_v2_engine.update_and_save_picks(osb_v2_candidates)
+            print(f"🔄 Oversold Bounce v2: {len(osb_v2_candidates)} kandidat baru hari ini.")
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan Oversold Bounce v2: {e}")
 
         # MBSS v2 (user request 2026-09-21 -- VCP, second swing pillar):
         # breakout-after-squeeze screen, confirmed 0% day-level overlap

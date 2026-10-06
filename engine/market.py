@@ -116,6 +116,38 @@ def get_gold_return_nd(n: int = 5):
         return None
 
 
+_ihsg_dd100_cache = {"date": None, "dd_100": None}
+
+
+def get_ihsg_drawdown_100d():
+    """
+    IHSG's current drawdown vs its own trailing 100-trading-day high
+    (close/high_100 - 1, as %) -- added for OVERSOLD BOUNCE v2's macro
+    regime gate and BUY ON WEAKNESS's RS-discriminator filter, both LOCKED
+    2026-10-05 (memory project_oversold_bounce_v2_locked_design_2026_10_05.md).
+    Same formula as research/ihsg_regime_phases_2026_10_04.py's `dd_100`
+    (rolling 100, min_periods=20 so it degrades gracefully with less
+    history instead of returning None outright). Cached per calendar day
+    (WIB), same convention as get_ihsg_return_today()/get_ihsg_return_nd().
+    """
+    today_str = datetime.datetime.now(core.WIB).strftime("%Y-%m-%d")
+    if _ihsg_dd100_cache["date"] == today_str and _ihsg_dd100_cache.get("dd_100") is not None:
+        return _ihsg_dd100_cache["dd_100"]
+
+    try:
+        hist = core.get_yf_ticker("^JKSE").history(period="1y", timeout=15)
+        if len(hist) < 20:
+            return None
+        high_100 = hist["Close"].rolling(100, min_periods=20).max()
+        dd_100 = (hist["Close"].iloc[-1] / high_100.iloc[-1] - 1) * 100
+        _ihsg_dd100_cache["date"] = today_str
+        _ihsg_dd100_cache["dd_100"] = float(dd_100)
+        return float(dd_100)
+    except Exception as e:
+        print(f"⚠️ Gagal hitung IHSG dd_100 untuk OSB-v2/BOW RS-discriminator: {e}")
+        return None
+
+
 def get_ihsg_return_today():
     """
     Return % IHSG (Jakarta Composite Index, ^JKSE) HARI INI SAJA (close terakhir

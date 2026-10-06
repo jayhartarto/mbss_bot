@@ -2778,34 +2778,15 @@ ENTRY_PAGI_NEW_HIGH_CLOSE_POS_MIN = 0.7
 ENTRY_PAGI_CONFIRM_5MIN_PCT = 2.0
 ENTRY_PAGI_TOP_N = 5  # diturunkan dari 10 -- sinyal ini jauh lebih ketat (~3-4 lolos/hari di backtest), TOP_N lama akan sering kosongkan hari yg justru kandidatnya sehat
 
-# Oversold-bounce DNA gate (arketipe ke-2 dari session1_rally_dna_2026_09_28.py,
-# SENGAJA di-park saat ship momentum-pump 2026-09-28 -- alasan lama "butuh
-# field dist_sma20_pct baru" ternyata KELIRU, field itu SUDAH ADA sbg
-# `price_vs_sma20_pct` (causal, dihitung compute_factor_scoring) -- proxy
-# pct_b yg dulu dipakai & gagal bukan berarti field aslinya tidak ada.
-# Live-validated 2026-09-29 (memory project_entry_pagi_oversold_bounce_
-# live_2026_09_29): dari 6 saham yg rally sesi-1 >5% hari itu, gate
-# momentum-pump di atas cuma nangkep 1 (HELI) -- 5 sisanya (MNCN/MSIN/LPKR/
-# BMTR/KPIG) semua match archetype INI dgn persis: RSI14 di persentil 0-2
-# se-universe, price_vs_sma20_pct di persentil 0-2 (turun 30-38% di bawah
-# SMA20-nya sendiri), TAPI likuiditas tetap sehat (persentil 78-93) --
-# semua abis crash/limit-down berat D-1 (ret_1d -12% s/d -19%). Thresholds
-# p10/p10/median (bukan p5) SENGAJA dilonggarkan atas permintaan user --
-# "kasih kelonggaran agar case spt KPIG tertangkap juga masih OK" (KPIG
-# RSI14=24.3 ada di persentil ~9, nyaris kepotong di p5). Backtest
-# `research/session1_rally_dna_2026_09_28.py` versi lama (proxy pct_b)
-# nemuin EV close-to-close NEGATIF (-1.81%) utk archetype ini -- TAPI itu
-# proxy yg salah & horizon exit yg belum tentu cocok (lihat feedback_
-# backtest_exit_horizon_match_usage.md), BUKAN bukti archetype-nya buruk.
-# SENGAJA WATCHLIST-ONLY (BUKAN auto-entry/TP/SL/avg-down spt momentum-
-# pump) -- user eksplisit mau decision manual sendiri (lihat bid depth +
-# kecepatan rally di apps trading-nya), dan belum ada riset TP/SL/exit utk
-# archetype ini. Jangan wire ke run_entry_pagi_scan_once/_rank_entry_pagi_
-# candidates (posisi tracking) sebelum riset exit terpisah dilakukan.
-ENTRY_PAGI_OVERSOLD_RSI_PERCENTILE = 0.10        # RSI14 <= p10 cross-sectional (rendah ekstrem)
-ENTRY_PAGI_OVERSOLD_DIST_SMA20_PERCENTILE = 0.10  # price_vs_sma20_pct <= p10 (jauh di bawah SMA20-nya sendiri)
-ENTRY_PAGI_OVERSOLD_LIQUIDITY_PERCENTILE = 0.50   # value_traded >= median ("likuiditas masih sehat", bukan saham mati)
-ENTRY_PAGI_OVERSOLD_TOP_N = 20  # watchlist longgar by design (n=20 saat live-check 09-29) -- user grouping manual di tab favorite, bukan Top-5 auto-entry
+# Oversold-bounce DNA gate (arketipe ke-2 dari session1_rally_dna_2026_09_28.py)
+# RETIRED 2026-10-06 -- superseded by OVERSOLD BOUNCE v2 (engine/
+# oversold_bounce_v2.py), which lives as a lane inside /bow now, not here.
+# Old gate's live-validation history (6-case MNCN/MSIN/LPKR/BMTR/KPIG/HELI
+# session, cross-sectional RSI<=p10/dist_sma20<=p10/liquidity>=median) is
+# in memory project_entry_pagi_oversold_bounce_live_2026_09_29 and the full
+# locked-design decision trail (why RSI absolute band + trigger + IHSG
+# regime gate replaced it) is in memory
+# project_oversold_bounce_v2_locked_design_2026_10_05.md.
 ENTRY_PAGI_AVGDOWN_PCT = -3.0
 # TP/SL dihitung DARI entry (harga confirm 09:05), bukan dari open -- lihat
 # research/session1_rally_dna_filter_test_2026_09_28.py bagian TP/SL
@@ -2901,12 +2882,10 @@ ENTRY_PAGI_PICK_HISTORY_FILE = os.path.join(core.PROJECT_ROOT, "entry_pagi_pick_
 ENTRY_PAGI_PICK_HISTORY_MAX_DAYS = 30  # keep file small -- streak logic only ever looks back a handful of consecutive trading days, this is just a safety buffer
 
 SOURCE_ENTRY_PAGI_MOMENTUM = "entry_pagi_momentum"
-SOURCE_ENTRY_PAGI_BOUNCE = "entry_pagi_bounce"
 
 # Research thresholds (see module docstring above for the backtest numbers
 # behind these):
 ENTRY_PAGI_MOMENTUM_STREAK_BOOST_MIN = 2   # streak>=2 -> boost UP (momentum: repeat = better, no exhaustion)
-ENTRY_PAGI_BOUNCE_STREAK_PENALTY_MIN = 5   # streak>=5 -> push DOWN (bounce: long streak = mild exhaustion)
 
 
 def _load_entry_pagi_pick_history() -> list[dict]:
@@ -2966,22 +2945,10 @@ def entry_pagi_momentum_streak_tag(streak: int) -> str:
     return ""
 
 
-def entry_pagi_bounce_streak_tag(streak: int) -> str:
-    if streak >= ENTRY_PAGI_BOUNCE_STREAK_PENALTY_MIN:
-        return f" ⚠️ {streak}x berturut (riset: performa melemah)"
-    return ""
-
-
 def entry_pagi_momentum_sort_key(streak: int) -> int:
     """Lower sorts first. streak>=2 boosted ABOVE streak==1 -- ties within
     a tier broken by the caller's own secondary sort key."""
     return 0 if streak >= ENTRY_PAGI_MOMENTUM_STREAK_BOOST_MIN else 1
-
-
-def entry_pagi_bounce_sort_key(streak: int) -> int:
-    """Lower sorts first. streak>=5 pushed to the BOTTOM -- ties within a
-    tier broken by the caller's own secondary sort key."""
-    return 1 if streak >= ENTRY_PAGI_BOUNCE_STREAK_PENALTY_MIN else 0
 
 
 def load_entry_pagi_state_for_consensus() -> dict:
@@ -3119,53 +3086,6 @@ def _entry_pagi_new_high_tag(info: dict) -> str:
     return " 🚀 4x (new high 20d, closing kuat -- potensi lanjut ke +10-17%)"
 
 
-def compute_oversold_bounce_thresholds(records) -> dict | None:
-    """Cross-sectional thresholds populasi malam ini utk oversold-bounce
-    gate (lihat catatan panjang di ENTRY_PAGI_OVERSOLD_* di atas) -- shared
-    helper, pola PERSIS compute_atr_pct14_p75 supaya threshold tidak bisa
-    divergen antar tempat. None kalau salah satu field datanya kurang dari
-    20 (percentile tidak stabil)."""
-    rsi_p10 = _cross_sectional_percentile(records, "rsi", ENTRY_PAGI_OVERSOLD_RSI_PERCENTILE)
-    dist_sma20_p10 = _cross_sectional_percentile(records, "price_vs_sma20_pct", ENTRY_PAGI_OVERSOLD_DIST_SMA20_PERCENTILE)
-    liquidity_median = _cross_sectional_percentile(records, "value_traded", ENTRY_PAGI_OVERSOLD_LIQUIDITY_PERCENTILE)
-    if rsi_p10 is None or dist_sma20_p10 is None or liquidity_median is None:
-        return None
-    return {"rsi_p10": rsi_p10, "dist_sma20_p10": dist_sma20_p10, "liquidity_median": liquidity_median}
-
-
-def entry_pagi_oversold_bounce_gate_pass(info: dict, thresholds: dict | None) -> bool:
-    """Oversold-bounce DNA gate (arketipe ke-2, live-validated 2026-09-29 --
-    lihat catatan panjang di ENTRY_PAGI_OVERSOLD_* di atas utk riwayat
-    lengkap). Semua field REUSE dari cache EOD nightly (`scored[t]`), TANPA
-    fetch tambahan:
-      - rsi<=p10 cross-sectional malam ini (RSI rendah ekstrem, BUKAN
-        adaptive-per-stock spt momentum/sentiment_score -- gate ini sengaja
-        cross-sectional spt ATR di gate momentum-pump)
-      - price_vs_sma20_pct<=p10 (jauh di bawah SMA20-nya sendiri -- deep
-        pullback/capitulation, KEBALIKAN dari pct_b>=0.6 di momentum-pump)
-      - value_traded>=median ("likuiditas masih sehat" -- saring saham mati/
-        gorengan sepi yg RSI-nya rendah krn tidak ada transaksi, bukan krn
-        capitulation beneran)
-
-    WATCHLIST ONLY -- gate ini SENGAJA tidak dipakai utk auto-entry/TP/SL/
-    avg-down spt momentum-pump (belum ada riset exit-horizon utk archetype
-    ini, backtest lama pakai proxy pct_b yg keliru). Jangan wire ke
-    run_entry_pagi_scan_once/_rank_entry_pagi_candidates sebelum riset
-    exit terpisah."""
-    if not thresholds:
-        return False
-    rsi = info.get("rsi")
-    dist_sma20 = info.get("price_vs_sma20_pct")
-    liquidity = info.get("value_traded")
-    if rsi is None or dist_sma20 is None or liquidity is None:
-        return False
-    return (
-        rsi <= thresholds["rsi_p10"]
-        and dist_sma20 <= thresholds["dist_sma20_p10"]
-        and liquidity >= thresholds["liquidity_median"]
-    )
-
-
 def _rank_entry_pagi_candidates(scored: dict, or_data: dict) -> list[dict]:
     """
     MBSS v2, 2026-09-28 -- REPLACED (bukan tuning). Funnel RSI>=65/MACD>0
@@ -3249,24 +3169,6 @@ def _smart_money_tag(net_pct, num_brokers) -> str:
     if net_pct >= 15 and (num_brokers or 0) >= 2:
         return f" 💰 Smart Money +{net_pct:.0f}% ({num_brokers}broker)"
     return ""
-
-
-def _oversold_bounce_ff_tag(foreign_net_ratio_1d) -> str:
-    """Label singkat foreign_net_ratio_1d utk watchlist OVERSOLD BOUNCE
-    (MBSS v2, 2026-09-29 -- riset winner/loser 1m di 12 hari bearish-
-    regime, n=296, lihat memory project_oversold_bounce_1m_winner_loser_
-    2026_09_29). Asing net-buy/kurang net-sell di hari crash korelasi win
-    rate lebih tinggi (21.6% vs 11.5% di median split) -- TAPI paling
-    lemah sendirian dari semua fitur yg diriset, jadi INFO tambahan saja
-    (murni tampilan, BUKAN gate/exclude) -- 0.0 dipakai sbg garis pembagi
-    natural (net-buy vs net-sell), bukan angka median hasil fit sample
-    kecil ini spy tidak overfit. Kosong kalau None (missing=neutral,
-    konvensi RapidAPI project ini)."""
-    if foreign_net_ratio_1d is None or not isinstance(foreign_net_ratio_1d, (int, float)):
-        return ""
-    pct = foreign_net_ratio_1d * 100
-    icon = "🟢" if pct >= 0 else "🔴"
-    return f" | FF {icon}{pct:+.1f}%"
 
 
 def format_vcp_tag(vcp_pass) -> str:

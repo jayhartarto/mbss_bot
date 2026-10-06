@@ -58,6 +58,7 @@ import engine.swing_horizon_confidence as swing_horizon_confidence
 import engine.daytrade_hc_confidence as daytrade_hc_confidence
 import engine.daytrade_2d_screen as daytrade_2d_screen
 import engine.buy_on_weakness as buy_on_weakness_engine
+import engine.oversold_bounce_v2 as oversold_bounce_v2_engine
 import engine.vcp_pillar as vcp_pillar_engine
 import engine.macd_confirm_pillar as macd_confirm_pillar_engine
 import engine.bsjp2 as bsjp2_engine
@@ -400,63 +401,15 @@ async def all_setup_candidates_command(update, context):
             "-- fallback manual kalau scan otomatis ENTRY PAGI 09:05 gagal, bukan pengganti alert asli."
         )
 
-    # MBSS v2 (2026-09-29, live-validated dari kasus MNCN/MSIN/LPKR/BMTR/
-    # KPIG -- lihat catatan panjang di engine/scanalert.py ENTRY_PAGI_
-    # OVERSOLD_*): arketipe ke-2 session1_rally_dna_2026_09_28.py, WATCHLIST
-    # MANUAL saja (bukan auto-entry/TP/SL spt ENTRY PAGI di atas) -- user
-    # pantau sendiri dari pagi (bid depth + kecepatan rally), grouping ke
-    # tab favorite di apps trading-nya.
-    oversold_thresholds = scanalert_engine.compute_oversold_bounce_thresholds(all_values)
-    oversold_pool = [
-        r for r in all_values if scanalert_engine.entry_pagi_oversold_bounce_gate_pass(r, oversold_thresholds)
-    ]
-    # MBSS v2 (2026-10-02, user request -- streak-ordered tagging, same
-    # mechanism as ENTRY PAGI momentum lane): streak dibaca/direkam dari
-    # SELURUH oversold_pool (matches research/entrypagi_streak_backtest_
-    # 2026_10_01.py's `gate_bounce` population persis), BUKAN kebalikan dari
-    # momentum -- streak panjang (>=5x) di-DORONG KE BAWAH (riset: mild
-    # exhaustion), bukan ke atas.
-    oversold_streak_by_ticker = {
-        r["ticker"]: scanalert_engine.get_entry_pagi_streak(r["ticker"], scanalert_engine.SOURCE_ENTRY_PAGI_BOUNCE)
-        for r in oversold_pool
-    }
-    scanalert_engine.record_entry_pagi_picks(
-        [r["ticker"] for r in oversold_pool], scanalert_engine.SOURCE_ENTRY_PAGI_BOUNCE
-    )
-    oversold_top = sorted(
-        oversold_pool,
-        key=lambda r: (
-            scanalert_engine.entry_pagi_bounce_sort_key(oversold_streak_by_ticker.get(r["ticker"], 1)),
-            r["rsi"],
-        ),
-    )[:scanalert_engine.ENTRY_PAGI_OVERSOLD_TOP_N]
-    lines.append(f"\n🩸 OVERSOLD BOUNCE watchlist ({len(oversold_pool)} lolos gate, top {scanalert_engine.ENTRY_PAGI_OVERSOLD_TOP_N} by RSI terendah, diurutkan ulang by streak)")
-    if not oversold_top:
-        lines.append("  (kosong)")
-    else:
-        for r in oversold_top:
-            sm_tag = scanalert_engine._smart_money_tag(r.get("whitelist_accumulation_net_pct"), r.get("whitelist_num_brokers"))
-            ff_tag = scanalert_engine._oversold_bounce_ff_tag(r.get("foreign_net_ratio_1d"))
-            streak_tag = scanalert_engine.entry_pagi_bounce_streak_tag(oversold_streak_by_ticker.get(r["ticker"], 1))
-            lines.append(
-                f"  {r['ticker']} | RSI {r['rsi']:.1f} | vs SMA20 {r['price_vs_sma20_pct']:+.1f}% | "
-                f"ret1d {(r.get('ret_1d_pct') or 0):+.1f}%{ff_tag}{sm_tag}{streak_tag}"
-            )
-        lines.append(
-            "  ⚠️ WATCHLIST MANUAL, BUKAN sinyal auto-entry -- belum ada riset TP/SL/exit utk archetype ini "
-            "(live-validated 1 hari, 2026-09-29). Pantau sendiri dari pagi: kalau mulai rally cepat + bid buy tebal, "
-            "baru dipertimbangkan masuk.\n"
-            "  ℹ️ RSI/vs-SMA20/ret1d makin ekstrem (crash makin dalam) + FF asing net-buy/kurang net-sell "
-            "secara historis korelasi win rate lebih tinggi (riset 2026-09-29, n=296, lihat memory "
-            "project_oversold_bounce_1m_winner_loser_2026_09_29) -- info tambahan buat prioritas, BUKAN gate.\n"
-            "  ℹ️ Muncul berturut-turut (>=5x) secara backtest 2 tahun justru PERFORMA MELEMAH (bukan konfirmasi) "
-            "-- lihat tag ⚠️, lihat memory project_entrypagi_streak_backtest_2026_10_01."
-        )
+    # OVERSOLD BOUNCE lane RETIRED from here 2026-10-06 (old entry_pagi_
+    # oversold_bounce_gate_pass, RSI<=p10 cross-sectional/no trigger/no
+    # IHSG gate) -- superseded by OSB-v2, now shown as a lane inside /bow
+    # instead (gate+trigger+TP/SL reference, see engine/oversold_bounce_v2.py
+    # + memory project_oversold_bounce_v2_locked_design_2026_10_05.md).
 
     all_tickers = (
         [r["ticker"] for cands in lanes.values() for r in cands]
         + [r["ticker"] for r in entry_pagi_top20]
-        + [r["ticker"] for r in oversold_top]
     )
     buttons = core.build_check_buttons(all_tickers)
     await core.safe_reply(update.message, "\n".join(lines), reply_markup=buttons)
@@ -2963,10 +2916,9 @@ async def pingpong_watchlist_command(update, context):
     # gate_pass) -- EOD-only, TANPA konfirmasi 5-menit (di luar scope tag
     # informational ini, murni "ada dukungan dari lane lain").
     entry_pagi_atr_p75 = scanalert_engine.compute_atr_pct14_p75(scored)
-    # OVERSOLD BOUNCE cross-tag (MBSS v2, 2026-09-29 -- lihat catatan
-    # ENTRY_PAGI_OVERSOLD_* di engine/scanalert.py): EOD-only, informational
-    # saja spt tag lain di sini, BUKAN gate/ranking baru utk /pingpong sendiri.
-    oversold_thresholds = scanalert_engine.compute_oversold_bounce_thresholds(scored)
+    # OVERSOLD BOUNCE cross-tag REMOVED 2026-10-06 (old entry_pagi_oversold_
+    # bounce_gate_pass retired, superseded by OSB-v2 which lives inside /bow
+    # now -- see engine/oversold_bounce_v2.py).
     for r in candidates:
         r["priority_score"] = r_vol[r["ticker"]] + r_range[r["ticker"]]
         tags = []
@@ -2976,8 +2928,6 @@ async def pingpong_watchlist_command(update, context):
             tags.append("FF DAYTRADE")
         if scanalert_engine.entry_pagi_dna_gate_pass(r, entry_pagi_atr_p75):
             tags.append("ENTRY PAGI")
-        if scanalert_engine.entry_pagi_oversold_bounce_gate_pass(r, oversold_thresholds):
-            tags.append("OVERSOLD BOUNCE")
         if r["ticker"] in hc_selected:
             tags.append("HC")
         r["cross_tags"] = tags
@@ -4092,30 +4042,47 @@ async def broker_discovery_command(update, context):
 
 async def buy_on_weakness_command(update, context):
     """
-    /buyonweakness (alias /bow) — MBSS v2 (2026-09-16). "Buy the quiet dip
-    inside a confirmed long-term uptrend", tiered 1 (best) - 3 (broadest),
-    fire-emoji count reversed to match the /bsjp convention (more fire =
-    better). Full filter/exit rules + research trail in
-    engine/buy_on_weakness.py's docstring and memory
-    project_buy_on_weak_pullback_sweep_2026_09_16.md.
+    /buyonweakness (alias /bow) — MBSS v2 (2026-09-16, OSB-v2 lane added
+    2026-10-06). Two lanes shown together:
+      1. BUY ON WEAKNESS: "buy the quiet dip inside a confirmed long-term
+         uptrend", tiered 1 (best) - 3 (broadest), fire-emoji count
+         reversed to match the /bsjp convention (more fire = better). Full
+         filter/exit rules + research trail in engine/buy_on_weakness.py's
+         docstring and memory project_buy_on_weak_pullback_sweep_2026_09_16.md.
+      2. OVERSOLD BOUNCE v2: "buy the deep-oversold bounce during a
+         confirmed IHSG bear regime" — REPLACES the old entry_pagi_
+         oversold_bounce_gate_pass lane retired from /allsetup + /pingpong
+         this session. Only produces candidates when IHSG dd_100<=-10% —
+         an empty section here most of the time is EXPECTED, not a bug.
+         See engine/oversold_bounce_v2.py docstring + memory
+         project_oversold_bounce_v2_locked_design_2026_10_05.md.
 
-    Reads the picks history the nightly job already maintains (see
-    engine/nightly.py hook) — no live scan here, same "cache-only" pattern
-    as /broksum.
+    Both read the picks history the nightly job already maintains (see
+    engine/nightly.py hooks) — no live scan here, same "cache-only"
+    pattern as /broksum. Shown as two clearly separate sections (not
+    merged into one list/score) since they're structurally near-mutually-
+    exclusive populations (BOW wants an intact uptrend, OSB-v2 wants a
+    broken one) — same "separate lanes" precedent as /swing's BOW+VCP.
     """
     picks = buy_on_weakness_engine.load_buy_on_weakness_picks()
     active = [p for p in picks if p.get("status") == "ALIVE"]
-    if not active:
+    active.sort(key=lambda p: (p["tier"], -p["age_days"]))
+
+    osb_picks = oversold_bounce_v2_engine.load_oversold_bounce_v2_picks()
+    osb_active = [p for p in osb_picks if p.get("status") == "ALIVE"]
+    osb_active.sort(key=lambda p: (p.get("ff_ratio_5d") is None, -(p.get("ff_ratio_5d") or 0)))
+
+    if not active and not osb_active:
         await core.safe_reply(
             update.message,
-            "🪶 BUY ON WEAKNESS — belum ada sinyal aktif saat ini. "
+            "🪶 BUY ON WEAKNESS — belum ada sinyal aktif saat ini (BOW maupun OVERSOLD BOUNCE v2). "
             "Lane ini jalan otomatis tiap malam via /eodscan, cek lagi besok."
         )
         return
 
-    active.sort(key=lambda p: (p["tier"], -p["age_days"]))
-
-    lines = [f"🪶 BUY ON WEAKNESS — {len(active)} sinyal aktif\n"]
+    lines = [f"🪶 BUY ON WEAKNESS — {len(active)} BOW + {len(osb_active)} OVERSOLD BOUNCE v2 sinyal aktif\n"]
+    if not active:
+        lines.append("— tidak ada sinyal BOW aktif.")
     for p in active:
         fire = "🔥" * (4 - p["tier"])  # Tier 1 = 3 fire (best), Tier 3 = 1 fire
         age = p["age_days"]
@@ -4131,10 +4098,34 @@ async def buy_on_weakness_command(update, context):
             f"Swing Length: ~{p['swing_length_days_typical']} hari."
         )
     lines.append(
-        "\n⚠️ Backtest 2-tahun, regime-sensitive (lemah saat IHSG crash "
+        "\n⚠️ BOW: backtest 2-tahun, regime-sensitive (lemah saat IHSG crash "
         "sistemik, lihat catatan riset) — bukan jaminan forward. SL wajib "
         "dipakai, bukan opsional."
     )
+
+    lines.append(f"\n🔄 OVERSOLD BOUNCE v2 ({len(osb_active)})")
+    if not osb_active:
+        lines.append("— tidak ada sinyal aktif (lane ini hanya nyala saat IHSG dd_100<=-10%, cek lagi kalau regime makin bearish).")
+    for p in osb_active:
+        age = p["age_days"]
+        age_label = f"NEW (Day {age}/{oversold_bounce_v2_engine.ALERT_MAX_AGE_DAYS})" if age <= 1 else f"AGING (Day {age}/{oversold_bounce_v2_engine.ALERT_MAX_AGE_DAYS}) — ALIVE"
+        ff = p.get("ff_ratio_5d")
+        ff_tag = f" | 🟢 FF {ff:+.1f}% (5d)" if ff is not None and ff > 0 else (f" | 🔴 FF {ff:+.1f}% (5d)" if ff is not None else "")
+        tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
+        lines.append(
+            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger){ff_tag}\n"
+            f"{age_label}\n"
+            f"Entry ref: {p['entry_ref_price']:,.0f}\n"
+            f"SL: {p['sl_price']:,.0f} (-20%, WAJIB, jangan dipersempit)\n"
+            f"TP1: {p['tp1_price']:,.0f} (+5%, referensi konservatif){tp1_note}\n"
+            f"TP2: {p['tp2_price']:,.0f} (+10%, referensi utama)"
+        )
+    if osb_active:
+        lines.append(
+            "\n⚠️ OSB-v2: watchlist-only, belum ada auto-entry. FF 5d = booster "
+            "urutan prioritas, BUKAN gate. SL -20% wajib, jangan dipersempit "
+            "(satu dari dua episode OOS negatif saat dites di -15%)."
+        )
     await core.safe_reply(update.message, "\n\n".join(lines))
 
 
