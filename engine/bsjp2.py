@@ -89,6 +89,19 @@ def _save_bsjp2_occurrence_log(entries: list[dict]):
     _save_json_state("bsjp2_occurrence_log.json", {"entries": entries})
 
 
+def _peek_bsjp2_occurrence(ticker: str, today: str) -> int:
+    """Read-only occurrence count for a ticker that has NOT been confirmed
+    yet tonight (intraday display use -- see _render_bsjp2_intraday_message)
+    -- counts past confirmations in the trailing window, does NOT append
+    today (today isn't a confirmed event yet, still live/provisional).
+    Returns the count AS IF it confirmed tonight (past count + 1), matching
+    what _prune_and_append_bsjp2_occurrence would return if it did confirm,
+    so the live display's rung classification previews tonight's real one."""
+    entries = _load_bsjp2_occurrence_log()
+    occ_cutoff = (datetime.date.fromisoformat(today) - datetime.timedelta(days=OCCURRENCE_WINDOW_CALENDAR_DAYS)).isoformat()
+    return sum(1 for e in entries if e["ticker"] == ticker and e["date"] >= occ_cutoff) + 1
+
+
 def _prune_and_append_bsjp2_occurrence(today_tickers: list[str], today: str) -> dict[str, int]:
     """Appends tonight's Stage-1-confirmed tickers to the log, prunes
     anything older than the occurrence window (generous 3x prune margin,
@@ -710,11 +723,22 @@ def _tp_tier_and_display(tier: str, rocket: str | None) -> tuple[str, str]:
 
 
 def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
+    """LADDER FILTER applied here too (2026-10-06 research), same as
+    build_bsjp2_tp_message -- STAGE1_BASE/TIER1/TIER2 (non-rocket) are
+    hidden, same "hidden now, reappears if it strengthens" convention
+    already used for FADING below (tier is recomputed live every tick, so
+    a candidate that upgrades to TIER3/TIER_EXTREME later in the session
+    reappears automatically). occurrence is a READ-ONLY peek (see
+    _peek_bsjp2_occurrence) since tonight's confirmation hasn't happened
+    yet -- previews what rung tonight's finalize_bsjp2_confirmations would
+    assign if this ticker confirms as-is."""
     import engine.legacy_core as core_engine
     import engine.scanalert as scanalert_engine
     now_wib = datetime.datetime.now(core_engine.WIB)
+    today = _today_str()
     lines = [f"🔥 BSJP LIVE — status D+1 (update {now_wib.strftime('%H:%M:%S')} WIB)\n"]
     any_hidden_fading = False
+    any_hidden_low_tier = False
     for ticker, c, t_state in active:
         price_now = t_state.get("price_now")
         trigger = scanalert_engine._idx_round_tick_ceil(c["prev_close"] * (1 + STAGE1_RET2D_MIN_PCT / 100.0))
@@ -733,6 +757,11 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
         rocket = t_state.get("rocket")
         rocket = rocket if rocket and rocket != "none" else None
         tier = t_state.get("tier") or "STAGE1_BASE"
+        if tier not in LADDER_TIERS and not rocket:
+            any_hidden_low_tier = True
+            continue
+        occ = _peek_bsjp2_occurrence(ticker, today)
+        rung = ("TOP" if occ >= TOP_RUNG_OCCURRENCE_MIN else "MIDDLE") if not rocket else None
         tp_tier, display_tag = _tp_tier_and_display(tier, rocket)
         # BUGFIX (user report 2026-09-21): TP1/TP2/TP3 now computed from the
         # LOCKED entry price (set once, see run_bsjp2_intraday_tick), NOT the
@@ -745,7 +774,7 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
         # only the swing-high leg; finalize_bsjp2_confirmations adds the
         # BB-upper leg once tonight's full close is available.
         tp_sl = _dynamic_tp_sl(tp_tier, entry_price, trigger, c.get("swing_high_60d_prior"), None)
-        block = [f"{ticker} Now {price_now:,.0f} (entry {entry_price:,.0f}) | {display_tag}"]
+        block = [f"{ticker} Now {price_now:,.0f} (entry {entry_price:,.0f}) | {display_tag} [occurrence {occ}x/5d]"]
         # No-chasing guard (user request 2026-09-25, same logic already
         # validated/shipped for MACD-confirm: project_macd_confirm_sltp_
         # currentprice_and_nochase_2026_09_23). Once the live price has
@@ -758,6 +787,13 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
                 f"⛔ JANGAN DIKEJAR — harga sudah lewat TP2 ({tp_sl['tp2']:,.0f}), "
                 "entry baru di sini sudah kehilangan sebagian besar target yang dihitung"
             )
+        elif rung == "TOP":
+            block.append(
+                f"🟢 TOP RUNG (occurrence>={TOP_RUNG_OCCURRENCE_MIN}x) — JANGAN exit di target kecil. "
+                f"Biarkan jalan, pasang TP ADAPTIF liat bid/offer (riset: begitu TP1 standar "
+                f"{tp_sl['tp1']:,.0f} tersentuh, closing historis median lanjut ke ~+9%)."
+            )
+            block.append(f"Referensi (BUKAN hard exit): TP1 {tp_sl['tp1']:,.0f} | TP2 {tp_sl['tp2']:,.0f}")
         else:
             block.append(f"TP1 {tp_sl['tp1']:,.0f} ({(tp_sl['tp1']/price_now-1)*100:+.1f}% dari now)")
             block.append(f"TP2 {tp_sl['tp2']:,.0f} ({(tp_sl['tp2']/price_now-1)*100:+.1f}% dari now)")
@@ -767,8 +803,7 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
         block.append(f"Trigger/fading: {trigger:,.0f}")
         lines.append("\n".join(block))
     footer = [
-        "\n· = confirmed Stage-1 tapi belum capai TIER1 (konviksi lebih tinggi) -- tetap valid, "
-        "TP pakai angka dasar.\n*TP3 cuma tampil kalau targetnya genuinely di atas TP2.\n"
+        "\n*TP3 cuma tampil kalau targetnya genuinely di atas TP2.\n"
         "TP1/TP2/TP3/SL dikunci di harga saat pertama terkonfirmasi -- TIDAK berubah lagi sepanjang sesi "
         "biar tidak jadi target bergerak; \"dari now\" cuma menunjukkan jarak dari harga saat ini."
     ]
@@ -777,6 +812,12 @@ def _render_bsjp2_intraday_message(active: list[tuple]) -> str:
             "(Ada kandidat FADING (termasuk yang kena pola spike-fade: high hari ini jauh di atas "
             "closing, minimal 5%) yang disembunyikan dari tampilan -- "
             "tetap dipantau, akan muncul lagi kalau recover.)"
+        )
+    if any_hidden_low_tier:
+        footer.append(
+            "(Ada kandidat confirmed Stage-1 tapi belum capai TIER3/TIER-EXTREME yang disembunyikan "
+            "dari tampilan -- riset: tier di bawah itu flat-to-negative di semua level occurrence, "
+            "tetap dipantau, akan muncul lagi kalau naik tier.)"
         )
     lines.append("\n".join(footer))
     return "\n\n".join(lines)
