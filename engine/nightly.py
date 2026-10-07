@@ -457,6 +457,23 @@ async def run_nightly_full_scan(context):
         bsjp2_confirmed, bow_candidates, vcp_candidates, macd_confirm_candidates = [], [], [], []
         try:
             results_by_ticker = {r["ticker"]: r for r in results if r and r.get("ticker")}
+
+            # D2 checkpoint (2026-10-06 research, cut-if-red discipline) --
+            # MUST run BEFORE finalize_bsjp2_confirmations, which overwrites
+            # bsjp2_d2_checkpoint_watch.json with tonight's own fresh seed.
+            # Pushed PROAKTIF (not pull), same timing-sensitive rationale as
+            # the existing "CUT LOSS WATCH" push further below in this same
+            # function -- decision needs to land before tomorrow's open.
+            try:
+                bsjp2_checkpoint = bsjp2_engine.run_bsjp2_d2_checkpoint(results_by_ticker)
+                if bsjp2_checkpoint:
+                    await context.bot.send_message(
+                        chat_id=core.TELEGRAM_CHAT_ID,
+                        text=bsjp2_engine.build_bsjp2_d2_checkpoint_message(bsjp2_checkpoint),
+                    )
+            except Exception as e:
+                print(f"⚠️ Gagal menjalankan BSJP D2 checkpoint: {e}")
+
             bsjp2_confirmed = bsjp2_engine.finalize_bsjp2_confirmations(results_by_ticker)
             bsjp2_watchlist = bsjp2_engine.build_bsjp2_watchlist(results_by_ticker)
             print(f"🌆 BSJP v2: {len(bsjp2_confirmed)} pick terkonfirmasi hari ini, {len(bsjp2_watchlist)} watchlist baru buat besok.")
@@ -469,6 +486,23 @@ async def run_nightly_full_scan(context):
         # so a failure here never blocks BSJP v2 (or vice versa) above.
         try:
             import engine.bsjp_pump as bsjp_pump_engine
+
+            # D2 checkpoint (2026-10-06 re-validation, cut-if-red discipline)
+            # -- MUST run BEFORE finalize_bsjp_pump_confirmations, which
+            # overwrites bsjp_pump_d2_checkpoint_watch.json with tonight's
+            # fresh seed. Pushed proactively, same rationale as BSJP's own
+            # D2 checkpoint above and the existing "CUT LOSS WATCH" push
+            # further below in this function.
+            try:
+                bsjp_pump_checkpoint = bsjp_pump_engine.run_bsjp_pump_d2_checkpoint(results_by_ticker)
+                if bsjp_pump_checkpoint:
+                    await context.bot.send_message(
+                        chat_id=core.TELEGRAM_CHAT_ID,
+                        text=bsjp_pump_engine.build_bsjp_pump_d2_checkpoint_message(bsjp_pump_checkpoint),
+                    )
+            except Exception as e:
+                print(f"⚠️ Gagal menjalankan BSJP-PUMP D2 checkpoint: {e}")
+
             bsjp_pump_confirmed = bsjp_pump_engine.finalize_bsjp_pump_confirmations(results_by_ticker)
             bsjp_pump_watchlist = bsjp_pump_engine.build_bsjp_pump_watchlist(results_by_ticker)
             print(f"🌆 BSJP-PUMP: {len(bsjp_pump_confirmed)} pick terkonfirmasi hari ini, {len(bsjp_pump_watchlist)} watchlist baru buat besok.")

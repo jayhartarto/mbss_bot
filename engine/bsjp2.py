@@ -72,6 +72,39 @@ def _save_json_state(filename: str, state: dict):
 
 
 # =====================================================================
+# Occurrence log -- tracks Stage-1 CONFIRMATION events per ticker (any
+# tier) so the ladder (below) can count how many times Stage-1 confirmed
+# for the same ticker within a trailing window. Same log-and-prune
+# pattern as engine/bsjp_pump.py's _prune_and_append_signal_log, kept as
+# its OWN file/log because this tracks a different event (Stage-1
+# confirmation, not Lane2's D0 loose-gate fire).
+# =====================================================================
+
+def _load_bsjp2_occurrence_log() -> list[dict]:
+    state = _load_json_state("bsjp2_occurrence_log.json")
+    return state.get("entries") or []
+
+
+def _save_bsjp2_occurrence_log(entries: list[dict]):
+    _save_json_state("bsjp2_occurrence_log.json", {"entries": entries})
+
+
+def _prune_and_append_bsjp2_occurrence(today_tickers: list[str], today: str) -> dict[str, int]:
+    """Appends tonight's Stage-1-confirmed tickers to the log, prunes
+    anything older than the occurrence window (generous 3x prune margin,
+    real occurrence count below uses the real window), returns
+    {ticker: occurrence} for tonight's tickers (count includes tonight)."""
+    entries = _load_bsjp2_occurrence_log()
+    cutoff = (datetime.date.fromisoformat(today) - datetime.timedelta(days=OCCURRENCE_WINDOW_CALENDAR_DAYS * 3)).isoformat()
+    entries = [e for e in entries if e.get("date", "") >= cutoff]
+    entries.extend({"ticker": t, "date": today} for t in today_tickers)
+    _save_bsjp2_occurrence_log(entries)
+
+    occ_cutoff = (datetime.date.fromisoformat(today) - datetime.timedelta(days=OCCURRENCE_WINDOW_CALENDAR_DAYS)).isoformat()
+    return {t: sum(1 for e in entries if e["ticker"] == t and e["date"] >= occ_cutoff) for t in today_tickers}
+
+
+# =====================================================================
 # Locked thresholds (memory `project_bsjp_derisk_revisit_2026_09_17.md`,
 # sections "STAGE-1 REVISED", "STAGE-2 REBUILT", "ARA ROCKET TAG REBUILT +
 # FIXED", "TP calibration"). Do not re-tune without new research.
@@ -91,6 +124,29 @@ TIER2_ATR_MIN_PCT = 2.0
 TIER3_ATR_MIN_PCT = 3.0  # ATR-ladder ceiling, don't extend further (memory: tail risk crosses 25% past this)
 TIER_EXTREME_ATR_MAX_PCT = 6.0
 TIER_EXTREME_RSI_MIN = 60.0
+
+# Occurrence ladder (2026-10-06 research, memory project_spike5_nonneg_
+# continuation_dna_2026_10_06.md follow-up checks #6-#12): occurrence --
+# how many times Stage-1 has CONFIRMED for this same ticker within a
+# trailing ~5-trading-day window -- is a REQUIRED multiplier stacked on
+# top of TIER3/TIER_EXTREME, NOT a substitute for the tier filter.
+# STAGE1_BASE/TIER1/TIER2 get ZERO benefit from occurrence at ANY level
+# (confirmed flat-to-negative even at occurrence>=4) -- dropped entirely
+# from the ladder (`build_bsjp2_tp_message`), not just from TIER3/EXTREME.
+# Within TIER3/TIER_EXTREME, occurrence>=4 ("TOP rung") wins MORE often
+# than occurrence 1-3 ("MIDDLE rung") but loses ~2x HARDER when wrong --
+# TOP rung's own forward distribution (median +5.56%, p95 +19%, p99 +25%)
+# runs well past a tight TP, so TOP rung's exit is "hold, no TP cap, cut
+# if red at D+1 close" (same cut rule as MIDDLE, no TP-capping);
+# MIDDLE rung's own TP1 (2.16%, already the existing DYNAMIC_TP_TABLE
+# value) + cut-if-red genuinely beats holding uncapped. Same occurrence-
+# window convention as BSJP-PUMP's own booster (engine/bsjp_pump.py
+# OCCURRENCE_WINDOW_CALENDAR_DAYS) -- kept as a SEPARATE log here because
+# Lane1's occurrence tracks Stage-1 CONFIRMATION (gap_D0+ret_2d_cum>=2%),
+# a different event than Lane2's D0 loose-gate fire.
+OCCURRENCE_WINDOW_CALENDAR_DAYS = 7
+TOP_RUNG_OCCURRENCE_MIN = 4
+LADDER_TIERS = {"TIER3", "TIER_EXTREME"}
 
 # Rocket tag (resolves at D1's OPEN, not at D0's close)
 ROCKET_GAP_OPENING_MIN_PCT = 13.0
@@ -400,6 +456,21 @@ def build_bsjp2_watchlist(results: dict) -> list[dict]:
         # live tracking (rocket tag, fire-icon upgrades) writes into this
         # same ticker dict during D1's session -- see run_bsjp2_intraday_tick
     })
+    # BUGFIX (2026-10-07, live case: '/bsjp' right after tonight's eodscan
+    # crashed with "KeyError: 'prev_close'", self-healing by the next
+    # morning). Without this reset, bsjp2_live_state.json still carries
+    # TODAY's own trading_day_marker (stamped during today's now-finished
+    # intraday session) until market opens again -- so a same-night /bsjp
+    # call takes the "live" branch in commands/scan.py's
+    # bsjp2_screening_command, looks up each still-tracked ticker against
+    # the watchlist candidates dict just overwritten above (tomorrow's
+    # BRAND NEW D0 candidates), gets {} for any ticker no longer in it, and
+    # _render_bsjp2_intraday_message's c["prev_close"] KeyErrors on the
+    # empty dict. Reset here (same pattern engine/bsjp_pump.py's own
+    # build_bsjp_pump_watchlist already uses for its own live state) so a
+    # same-night /bsjp call correctly falls through to the watchlist
+    # branch instead.
+    _save_json_state("bsjp2_live_state.json", {"trading_day_marker": today, "tickers": {}})
     return candidates
 
 
@@ -774,26 +845,175 @@ def finalize_bsjp2_confirmations(results: dict) -> list[dict]:
         })
 
     today = _today_str()
+
+    # Occurrence ladder (2026-10-06 research) -- log EVERY Stage-1
+    # confirmation tonight (any tier, same population the research counted
+    # occurrence over), then attach occurrence/rung to each entry.
+    # STAGE1_BASE/TIER1/TIER2 still get occurrence attached (harmless
+    # metadata for other consumers like apply_momentum_pillar_boosts, which
+    # reads this same list) but the LADDER FILTER (see
+    # build_bsjp2_tp_message) drops them regardless of occurrence --
+    # confirmed dead weight even at occurrence>=4.
+    occurrence_by_ticker = _prune_and_append_bsjp2_occurrence([p["ticker"] for p in confirmed], today)
+    for p in confirmed:
+        occ = occurrence_by_ticker.get(p["ticker"], 1)
+        p["occurrence"] = occ
+        p["rung"] = ("TOP" if occ >= TOP_RUNG_OCCURRENCE_MIN else "MIDDLE") if p["tier"] in LADDER_TIERS else None
+
     _save_json_state("bsjp2_confirmed_picks.json", {"trading_day_marker": today, "picks": confirmed})
+
+    # Seed tomorrow's D2 checkpoint watch (see run_bsjp2_d2_checkpoint) --
+    # only for picks the ladder actually surfaces (LADDER_TIERS or rocket),
+    # since those are the only ones `build_bsjp2_tp_message` tells the user
+    # to act on. entry = close_d1, matching this module's own convention
+    # (position notionally opened at D1's close).
+    checkpoint_positions = {
+        p["ticker"]: {
+            "entry": p["close_d1"], "tier": p["tier"], "rung": p["rung"],
+            "rocket": p["rocket"], "confirmed_date": today,
+        }
+        for p in confirmed
+        if p["tier"] in LADDER_TIERS or p["rocket"]
+    }
+    _save_json_state("bsjp2_d2_checkpoint_watch.json", {"positions": checkpoint_positions})
+
     return confirmed
 
 
 def build_bsjp2_tp_message() -> str:
-    """/bsjp tp -- reads tonight's finalized confirmations."""
+    """/bsjp tp -- reads tonight's finalized confirmations.
+
+    LADDER FILTER (2026-10-06 research): only shows picks whose tier is
+    TIER3/TIER_EXTREME (LADDER_TIERS) or rocket-tagged -- STAGE1_BASE/
+    TIER1/TIER2 are confirmed dead weight (flat-to-negative at EVERY
+    occurrence level, not just occurrence#1) and are no longer displayed
+    here at all, even though they still exist in bsjp2_confirmed_picks.json
+    for apply_momentum_pillar_boosts' own unrelated scoring use. This
+    deliberately shows FEWER picks than before -- that is the point, not
+    a bug (memory project_spike5_nonneg_continuation_dna_2026_10_06.md)."""
     state = _load_json_state("bsjp2_confirmed_picks.json")
-    picks = state.get("picks") or []
-    if not picks:
+    all_picks = state.get("picks") or []
+    picks = [p for p in all_picks if p["tier"] in LADDER_TIERS or p.get("rocket")]
+    if not all_picks:
         return "📋 Tidak ada BSJP pick yang terkonfirmasi Stage-1 hari ini (ret_2d_cum belum tembus 2%)."
-    lines = [f"🎯 BSJP TP/SL REKOMENDASI — {len(picks)} pick terkonfirmasi (siap pasang sebelum open besok)\n"]
-    for p in sorted(picks, key=lambda x: x["ret_2d_cum"], reverse=True):
-        _, display_tag = _tp_tier_and_display(p["tier"], p.get("rocket"))
-        tier_name = p["tier"].replace("_", "-") if p["tier"] != "STAGE1_BASE" else "belum TIER1"
-        tag = display_tag if p.get("rocket") else f"{display_tag} {tier_name}".strip()
-        lines.append(
-            f"{p['ticker']} [{tag}] — closing {p['close_d1']:,.0f} ({p['ret_2d_cum']:+.1f}% 2d)\n"
-            f"  TP1 {p['tp1']:,.0f} | TP2 {p['tp2']:,.0f}"
-            + (f" | TP3 {p['tp3']:,.0f}*" if p.get("tp3") else "")
-            + f"\n  SL {p['sl']:,.0f}"
+    if not picks:
+        return (
+            f"📋 {len(all_picks)} pick confirmed Stage-1, tapi 0 lolos ladder TIER3/TIER_EXTREME "
+            "(atau rocket) -- wajar, ladder ini sengaja ketat (riset: STAGE1_BASE/TIER1/TIER2 "
+            "flat-to-negative di SEMUA level occurrence, bukan worth ditampilkan)."
         )
-    lines.append(f"\n*TP3 cuma tampil kalau targetnya di atas TP2.\n\n{HOLD_CUT_GUIDANCE}")
+    lines = [f"🎯 BSJP TP/SL REKOMENDASI — {len(picks)}/{len(all_picks)} pick lolos ladder (siap pasang sebelum open besok)\n"]
+    for p in sorted(picks, key=lambda x: (x["rung"] != "TOP", -x["ret_2d_cum"])):
+        _, display_tag = _tp_tier_and_display(p["tier"], p.get("rocket"))
+        tier_name = p["tier"].replace("_", "-")
+        tag = display_tag if p.get("rocket") else f"{display_tag} {tier_name}".strip()
+        occ = p.get("occurrence", 1)
+        header = f"{p['ticker']} [{tag}] — closing {p['close_d1']:,.0f} ({p['ret_2d_cum']:+.1f}% 2d, occurrence {occ}x/5d)"
+        if p.get("rocket") or p.get("rung") == "MIDDLE":
+            body = (
+                f"  TP1 {p['tp1']:,.0f} | TP2 {p['tp2']:,.0f}"
+                + (f" | TP3 {p['tp3']:,.0f}*" if p.get("tp3") else "")
+                + f"\n  SL {p['sl']:,.0f}"
+            )
+        else:  # rung == "TOP" -- no hard TP cap, see constant comment above
+            body = (
+                f"  🟢 TOP RUNG (occurrence>={TOP_RUNG_OCCURRENCE_MIN}x) — JANGAN exit di target kecil. "
+                f"Biarkan jalan, pasang TP ADAPTIF liat bid/offer live (riset: begitu TP1 standar "
+                f"{p['tp1']:,.0f} tersentuh, closing historis median lanjut ke ~+9%, p95 ~+19%).\n"
+                f"  Referensi (BUKAN hard exit): TP1 {p['tp1']:,.0f} | TP2 {p['tp2']:,.0f}\n"
+                f"  SL {p['sl']:,.0f}"
+            )
+        lines.append(header + "\n" + body)
+    lines.append(
+        f"\n*TP3 cuma tampil kalau targetnya di atas TP2.\n\n{HOLD_CUT_GUIDANCE}\n\n"
+        "⚠️ WAJIB cek /bsjp checkpoint besok malam SEBELUM closing: kalau besok closing masih "
+        "DI BAWAH entry (close_d1 di atas), riset nunjukkin ~68-91% makin dalam di hari "
+        "berikutnya (lebih parah utk TOP RUNG) -- CUT, jangan tahan berharap recovery."
+    )
+    return "\n\n".join(lines)
+
+
+# =====================================================================
+# Phase D -- D2 checkpoint (cut-if-red discipline, 2026-10-06 research:
+# memory project_spike5_nonneg_continuation_dna_2026_10_06.md follow-up
+# checks #7-#10. Called nightly, SAME call site/results as Phase C, one
+# cycle later -- tonight's `results` is D2's close for whatever Phase C
+# seeded into bsjp2_d2_checkpoint_watch.json last night. Still red at D2's
+# close -> cut (confirmed ~68-91% chance of falling further by D3, worse
+# for TOP rung specifically); still green but short of target -> fine to
+# keep holding (mean/median stay positive, no rung penalty there).
+# =====================================================================
+
+def run_bsjp2_d2_checkpoint(results: dict) -> list[dict]:
+    """Checks every position seeded by the PREVIOUS night's
+    finalize_bsjp2_confirmations against tonight's close, classifies
+    CUT (red) vs HOLD (green). Does NOT clear bsjp2_d2_checkpoint_watch.json
+    itself -- finalize_bsjp2_confirmations (called right after, same
+    nightly cycle) overwrites it with tonight's own fresh seed anyway, so
+    this module never tracks D3+ follow-through, matching the research
+    scope. Call this BEFORE finalize_bsjp2_confirmations. Also caches the
+    result to bsjp2_d2_checkpoint_last_result.json so the `/bsjp checkpoint`
+    pull command can re-render it without needing a fresh live fetch."""
+    watch = _load_json_state("bsjp2_d2_checkpoint_watch.json")
+    positions = watch.get("positions") or {}
+    checked = []
+    if positions:
+        for ticker, pos in positions.items():
+            r = results.get(ticker)
+            if r is None or r.get("bsjp2_close") is None:
+                continue  # no data tonight -- drop silently, same convention as elsewhere in this module
+            entry = pos.get("entry")
+            close_d2 = r["bsjp2_close"]
+            if not entry:
+                continue
+            ret_pct = (close_d2 - entry) / entry * 100.0
+            checked.append({
+                "ticker": ticker,
+                "entry": entry,
+                "close_d2": close_d2,
+                "ret_pct": round(ret_pct, 2),
+                "tier": pos.get("tier"),
+                "rung": pos.get("rung"),
+                "rocket": pos.get("rocket"),
+                "status": "CUT" if ret_pct < 0 else "HOLD",
+            })
+    _save_json_state("bsjp2_d2_checkpoint_last_result.json", {"trading_day_marker": _today_str(), "checked": checked})
+    return checked
+
+
+def read_last_bsjp2_d2_checkpoint() -> list[dict]:
+    """`/bsjp checkpoint` pull path -- re-renders the cached result from
+    the last nightly run_bsjp2_d2_checkpoint call, no live fetch needed."""
+    state = _load_json_state("bsjp2_d2_checkpoint_last_result.json")
+    return state.get("checked") or []
+
+
+def build_bsjp2_d2_checkpoint_message(checked: list[dict]) -> str:
+    """/bsjp checkpoint -- renders run_bsjp2_d2_checkpoint's result."""
+    if not checked:
+        return "📋 Tidak ada posisi BSJP yang perlu di-checkpoint malam ini."
+    cuts = sorted((c for c in checked if c["status"] == "CUT"), key=lambda x: x["ret_pct"])
+    holds = sorted((c for c in checked if c["status"] == "HOLD"), key=lambda x: x["ret_pct"], reverse=True)
+    lines = [f"🔎 BSJP D2 CHECKPOINT — {len(checked)} posisi (entry D1 vs closing hari ini)\n"]
+    if cuts:
+        block = ["🔴 CUT disarankan (closing masih di bawah entry):"]
+        for c in cuts:
+            extra = (
+                " ⚠️ TOP RUNG — riset: ~91% makin dalam kalau ditahan ke D3 (vs ~68% utk MIDDLE rung)"
+                if c["rung"] == "TOP" else ""
+            )
+            block.append(f"  {c['ticker']}: entry {c['entry']:,.0f} → now {c['close_d2']:,.0f} ({c['ret_pct']:+.1f}%){extra}")
+        lines.append("\n".join(block))
+    if holds:
+        block = ["🟢 HOLD (masih di atas entry, aman ditahan 1 hari lagi):"]
+        for c in holds:
+            tag = " [TOP RUNG — biarkan jalan, TP adaptif liat bid/offer]" if c["rung"] == "TOP" else ""
+            block.append(f"  {c['ticker']}: entry {c['entry']:,.0f} → now {c['close_d2']:,.0f} ({c['ret_pct']:+.1f}%){tag}")
+        lines.append("\n".join(block))
+    lines.append(
+        "\n⚠️ Riset (n=6,130 TIER3/TIER_EXTREME, 2024-2026): closing MERAH di titik ini punya "
+        "68-91% chance makin dalam ke hari berikutnya (lebih parah utk TOP RUNG, mean jatuh ke "
+        "~-9% vs ~-4% utk MIDDLE) -- CUT di sini, jangan tahan berharap recovery. Closing HIJAU "
+        "tapi belum TP tetap aman ditahan (mean/median tetap positif, gak ada beda rung)."
+    )
     return "\n\n".join(lines)

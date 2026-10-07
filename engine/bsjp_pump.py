@@ -254,7 +254,26 @@ async def run_bsjp_pump_session1_tick() -> dict:
 
     watchlist_state = _load_json_state("bsjp_pump_watchlist_state.json")
     candidates = watchlist_state.get("candidates") or {}
-    if watchlist_state.get("trading_day_marker") != _today_str() or not candidates:
+    # BUGFIX (2026-10-07, live case: checkpoint silently never fired 2 days
+    # running -- see memory project_bsjp_pump_session1_checkpoint_missed_
+    # 2026_10_06.md). `trading_day_marker` here is stamped with D0's OWN
+    # date (the night build_bsjp_pump_watchlist ran), but this tick runs
+    # during D1 -- a DIFFERENT calendar date -- so the old exact-equality
+    # check `!= _today_str()` could NEVER pass, causing "no_watchlist" to
+    # fire every single day by construction, not just on a stale watchlist.
+    # Use a generous staleness window instead (watchlist built in the last
+    # 4 calendar days -- covers a weekend) -- genuinely stale (multi-night
+    # EOD-scan failure) still gets caught, a normal D0->D1 overnight gap
+    # does not.
+    watchlist_marker = watchlist_state.get("trading_day_marker")
+    if not watchlist_marker or not candidates:
+        summary["skipped_reason"] = "no_watchlist"
+        return summary
+    try:
+        if (now_wib.date() - datetime.date.fromisoformat(watchlist_marker)).days > 4:
+            summary["skipped_reason"] = "stale_watchlist"
+            return summary
+    except ValueError:
         summary["skipped_reason"] = "no_watchlist"
         return summary
 
@@ -430,10 +449,26 @@ def finalize_bsjp_pump_confirmations(results: dict) -> list[dict]:
     passed = checkpoint_state.get("passed") or {}
     if checkpoint_state.get("trading_day_marker") != _today_str() or not passed:
         _save_json_state("bsjp_pump_confirmed_picks.json", {"trading_day_marker": _today_str(), "picks": []})
+        _save_json_state("bsjp_pump_d2_checkpoint_watch.json", {"positions": {}})
         return []
 
     live_state = _load_json_state("bsjp_pump_live_state.json")
     live_tickers = live_state.get("tickers") or {} if live_state.get("trading_day_marker") == _today_str() else {}
+
+    # occurrence (2026-10-06 re-validation, memory project_spike5_nonneg_
+    # continuation_dna_2026_10_06.md follow-up on Lane2's own data,
+    # corrected-entry version): confirmed WIN/SL-rate improves monotonically
+    # with occurrence (win 70.1%->82.2%->89.5% from occ1->occ>=2->occ4+;
+    # SL-hit 29.3%->17.8%->10.5%) -- same direction as Lane1, informational
+    # context here (NOT a rung-based exit split like Lane1 -- TP+5/SL-5
+    # clearly beats pasrah at EVERY occurrence level on Lane2's own data,
+    # unlike Lane1, so the existing exit stays unchanged). Reused from the
+    # watchlist state's own D0-loose-gate occurrence (already computed in
+    # build_bsjp_pump_watchlist) -- still THIS trading day's D0 candidates
+    # at this point in the nightly call order (finalize runs before build
+    # overwrites it), no new log needed.
+    watchlist_state = _load_json_state("bsjp_pump_watchlist_state.json")
+    watchlist_candidates = watchlist_state.get("candidates") or {}
 
     confirmed = []
     for ticker, p in passed.items():
@@ -451,10 +486,20 @@ def finalize_bsjp_pump_confirmations(results: dict) -> list[dict]:
             "had_discount": best_discount is not None,
             "ret_1d_full": r.get("pump_ret_1d") if r else None,
             "close_pos_full": r.get("pump_close_pos") if r else None,
+            "occurrence": (watchlist_candidates.get(ticker) or {}).get("occurrence", 1),
             "tp": tp, "sl": sl,
         })
 
     _save_json_state("bsjp_pump_confirmed_picks.json", {"trading_day_marker": _today_str(), "picks": confirmed})
+
+    # Seed D2 checkpoint (cut-if-red, same research as Lane1's -- on Lane2's
+    # OWN corrected-entry data: still-red-at-D2's-close has 91.3% chance of
+    # falling further by D3, mean/median ~-10%, only 13.8% ever recover).
+    checkpoint_positions = {
+        p["ticker"]: {"entry": p["entry_ref"], "occurrence": p["occurrence"]} for p in confirmed
+    }
+    _save_json_state("bsjp_pump_d2_checkpoint_watch.json", {"positions": checkpoint_positions})
+
     return confirmed
 
 
@@ -489,7 +534,12 @@ def build_bsjp_pump_status_message() -> str:
 
 
 def build_bsjp_pump_tp_message() -> str:
-    """/bsjp tp -- appended after BSJP's own picks (see commands/scan.py)."""
+    """/bsjp tp -- appended after BSJP's own picks (see commands/scan.py).
+
+    occurrence shown as context only (2026-10-06 re-validation confirms it's
+    a real, monotonic signal here too -- win 70.1%->89.5% from occ1->occ4+ --
+    but UNLIKE Lane1, TP+5/SL-5 beats pasrah at every occurrence level on
+    Lane2's own data, so there's no rung-based exit split to apply here)."""
     state = _load_json_state("bsjp_pump_confirmed_picks.json")
     picks = state.get("picks") or []
     if not picks:
@@ -497,9 +547,80 @@ def build_bsjp_pump_tp_message() -> str:
     lines = [f"🎯 BSJP-PUMP TP/SL REKOMENDASI — {len(picks)} pick\n"]
     for p in sorted(picks, key=lambda x: x["ret_s1"], reverse=True):
         discount_tag = " [entry diskon]" if p["had_discount"] else " [entry = close S1, tanpa diskon]"
+        occ = p.get("occurrence", 1)
+        occ_tag = f" [occurrence {occ}x/5d]" if occ >= 2 else ""
         lines.append(
-            f"{p['ticker']}{discount_tag} — ret_s1 {p['ret_s1']:+.1f}%, entry {p['entry_ref']:,.0f}\n"
+            f"{p['ticker']}{discount_tag}{occ_tag} — ret_s1 {p['ret_s1']:+.1f}%, entry {p['entry_ref']:,.0f}\n"
             f"  TP {p['tp']:,.0f} | SL {p['sl']:,.0f}"
         )
-    lines.append(f"\nHorizon 1-3 hari, exit flat di TP/SL -- tidak ada tier/trailing seperti BSJP.")
+    lines.append(
+        f"\nHorizon 1-3 hari, exit flat di TP/SL -- tidak ada tier/trailing seperti BSJP.\n"
+        "⚠️ Cek /bsjp checkpoint besok malam: masih merah di closing besok (belum TP) "
+        "punya ~91% chance makin dalam di hari berikutnya -- CUT, jangan tahan."
+    )
+    return "\n\n".join(lines)
+
+
+# =====================================================================
+# Phase D -- D2 checkpoint (cut-if-red, 2026-10-06 re-validation on Lane2's
+# own corrected-entry data: memory project_spike5_nonneg_continuation_dna_
+# 2026_10_06.md). Called nightly, SAME call site/results as
+# finalize_bsjp_pump_confirmations, one cycle later -- tonight's `results`
+# is D2's close for whatever finalize seeded into bsjp_pump_d2_checkpoint_
+# watch.json last night. Still red at D2's close -> cut (~91.3% chance of
+# falling further by D3, mean/median close ~-10%, only 13.8% ever recover).
+# =====================================================================
+
+def run_bsjp_pump_d2_checkpoint(results: dict) -> list[dict]:
+    """Call BEFORE finalize_bsjp_pump_confirmations, which overwrites
+    bsjp_pump_d2_checkpoint_watch.json with tonight's own fresh seed."""
+    watch = _load_json_state("bsjp_pump_d2_checkpoint_watch.json")
+    positions = watch.get("positions") or {}
+    checked = []
+    if positions:
+        for ticker, pos in positions.items():
+            r = results.get(ticker)
+            if r is None or r.get("pump_close") is None:
+                continue
+            entry = pos.get("entry")
+            close_d2 = r["pump_close"]
+            if not entry:
+                continue
+            ret_pct = (close_d2 - entry) / entry * 100.0
+            checked.append({
+                "ticker": ticker, "entry": entry, "close_d2": close_d2,
+                "ret_pct": round(ret_pct, 2), "occurrence": pos.get("occurrence", 1),
+                "status": "CUT" if ret_pct < 0 else "HOLD",
+            })
+    _save_json_state("bsjp_pump_d2_checkpoint_last_result.json", {"trading_day_marker": _today_str(), "checked": checked})
+    return checked
+
+
+def read_last_bsjp_pump_d2_checkpoint() -> list[dict]:
+    state = _load_json_state("bsjp_pump_d2_checkpoint_last_result.json")
+    return state.get("checked") or []
+
+
+def build_bsjp_pump_d2_checkpoint_message(checked: list[dict]) -> str:
+    """/bsjp checkpoint -- appended after BSJP's own checkpoint message."""
+    if not checked:
+        return "📋 Tidak ada posisi BSJP-PUMP yang perlu di-checkpoint malam ini."
+    cuts = sorted((c for c in checked if c["status"] == "CUT"), key=lambda x: x["ret_pct"])
+    holds = sorted((c for c in checked if c["status"] == "HOLD"), key=lambda x: x["ret_pct"], reverse=True)
+    lines = [f"🔎 BSJP-PUMP D2 CHECKPOINT — {len(checked)} posisi (entry vs closing hari ini)\n"]
+    if cuts:
+        block = ["🔴 CUT disarankan (closing masih di bawah entry):"]
+        for c in cuts:
+            block.append(f"  {c['ticker']}: entry {c['entry']:,.0f} → now {c['close_d2']:,.0f} ({c['ret_pct']:+.1f}%)")
+        lines.append("\n".join(block))
+    if holds:
+        block = ["🟢 HOLD (masih di atas entry, aman ditahan 1 hari lagi):"]
+        for c in holds:
+            block.append(f"  {c['ticker']}: entry {c['entry']:,.0f} → now {c['close_d2']:,.0f} ({c['ret_pct']:+.1f}%)")
+        lines.append("\n".join(block))
+    lines.append(
+        "\n⚠️ Riset (n=2,487, 2024-2026): closing MERAH di titik ini punya ~91.3% chance "
+        "makin dalam ke hari berikutnya (mean/median jatuh ke ~-10%, cuma 13.8% akhirnya "
+        "recover) -- CUT di sini, jangan tahan berharap recovery."
+    )
     return "\n\n".join(lines)

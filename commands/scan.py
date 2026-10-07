@@ -2572,8 +2572,12 @@ async def bsjp2_screening_command(update, context):
     (trigger/fading, fire-icon tier, rocket tag) once the JobQueue's
     run_bsjp2_intraday_tick has sent/edited a message today.
     /bsjp tp -- TP1/TP2/TP3+SL recommendation for tonight's finalized
-    Stage-1 confirmations (engine/bsjp2.build_bsjp2_tp_message), meant to be
-    read tonight or before D2's open tomorrow.
+    Stage-1 confirmations, FILTERED to the TIER3/TIER_EXTREME occurrence
+    ladder (engine/bsjp2.build_bsjp2_tp_message) -- meant to be read
+    tonight or before D2's open tomorrow.
+    /bsjp checkpoint -- cut-if-red D2 check for yesterday's ladder picks
+    (also pushed proactively by the nightly job) -- read before tomorrow's
+    open if the push was missed.
     """
     import engine.bsjp_pump as bsjp_pump_engine
 
@@ -2581,6 +2585,18 @@ async def bsjp2_screening_command(update, context):
         await core.safe_reply(
             update.message,
             bsjp2_engine.build_bsjp2_tp_message() + "\n\n" + bsjp_pump_engine.build_bsjp_pump_tp_message(),
+        )
+        return
+
+    if context.args and context.args[0].lower() == "checkpoint":
+        # Re-renders the cached result from last night's run_bsjp2_d2_checkpoint
+        # / run_bsjp_pump_d2_checkpoint (both already pushed proactively in
+        # engine/nightly.py) -- no live fetch, same cut-if-red discipline
+        # (memory project_spike5_nonneg_continuation_dna_2026_10_06.md).
+        await core.safe_reply(
+            update.message,
+            bsjp2_engine.build_bsjp2_d2_checkpoint_message(bsjp2_engine.read_last_bsjp2_d2_checkpoint())
+            + "\n\n" + bsjp_pump_engine.build_bsjp_pump_d2_checkpoint_message(bsjp_pump_engine.read_last_bsjp_pump_d2_checkpoint()),
         )
         return
 
