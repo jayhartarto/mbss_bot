@@ -2500,7 +2500,9 @@ async def high_conviction_command(update, context):
     # tampil sbg watchlist informational dulu, sama pola AKUMULASI/REBOUND di
     # atas (snapshot + lock utk /winrate, baru dipertimbangkan jadi skor
     # setelah 20-30 hari bursa forward).
-    MIN_STOCK_PRICE_SABAR = 55  # sama konvensi MIN_STOCK_PRICE proyek
+    MIN_STOCK_PRICE_SABAR = 20  # sama konvensi MIN_STOCK_PRICE proyek (diturunkan
+    # 55->20 2026-10-07 bersamaan dengan engine.legacy_core.MIN_STOCK_PRICE --
+    # lihat comment di sana untuk alasan lengkap (floor Rp50 BEI dihapus)
     sabar_excluded = (
         extended_excluded
         | {c["ticker"] for c in momentum_extended_candidates}

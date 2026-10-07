@@ -1248,7 +1248,19 @@ def wilson_lower_bound(wins: int, n: int, confidence: float = 0.95) -> float:
 
 
 MIN_HISTORY_FOR_ADAPTIVE = 120  # ~6 months of trading days needed to build a meaningful per-stock baseline
-MIN_STOCK_PRICE = 55  # diturunkan dari 100 ke 55 (terbukti berhasil untuk JGLE, gain >10%) — filter frozen-price terpisah (harga <=51 + rentang 10hr sempit) tetap aktif untuk menyaring saham beku, tapi rentang 55-99 kini masuk universe screening lagi
+MIN_STOCK_PRICE = 20  # diturunkan dari 55 ke 20 (2026-10-07, user report: BEI resmi
+# menghapus floor harga Rp50, Kep-00136/BEI/09-2026 tgl 21-09-2026, efektif
+# 28-09-2026 -- saham liquid genuine kini bisa diperdagangkan di bawah Rp50,
+# jadi threshold lama 55 keliru membuang mereka. Verifikasi empiris
+# 2026-10-07: 38 ticker harga <55, yang paling liquid (KPIG, JGLE, ELTY, GIAA)
+# semua punya value_traded_20d_avg miliaran rupiah/hari + range 10d 30-65%
+# (genuinely aktif, bukan beku) -- JGLE ironisnya ticker yang JADI JUSTIFIKASI
+# penurunan 100->55 awalnya, sekarang malah kebuang lagi di 55. 20 dipilih
+# (bukan lebih rendah) karena di bawah ~Rp15-19 liquidity riil mulai menipis
+# (lihat research/min_price_floor_check_2026_10_07.py untuk angka lengkap --
+# cek ulang sebelum menurunkan lagi). Filter frozen-price TERPISAH (range 10hr
+# <2%, lihat evaluate_eligibility_from_hist) tetap aktif & independen dari
+# threshold ini, jadi saham beku genuine tetap tersaring di harga manapun.
 
 # ==========================================
 # 📋 MONTHLY TICKER WHITELIST (reduces daily processing from 70 tickers to eligible-only)
@@ -1436,13 +1448,28 @@ def evaluate_eligibility_from_hist(current_price, hist_low, hist_high, min_bars_
     Pure eligibility logic on already-fetched price data — decoupled from the fetch
     itself so it works whether the data came from a single-ticker or batch call.
     Returns (is_eligible, reason).
+
+    FIX (2026-10-07, user report: BEI resmi membuka floor harga di bawah Rp50,
+    lihat MIN_STOCK_PRICE comment di atas untuk detail regulasi): the OLD
+    `current_price <= 51` branch here was NEVER a genuine frozen-stock
+    detector -- it was an unconditional hard price floor mislabeled as
+    "frozen" (an OR with the real range-based check, not an AND). Verified
+    empirically against research/ohlcv_backtest_raw.csv (2026-10-07): 38
+    tickers priced <55 that day, the most liquid ones (KPIG Rp54.9B/day
+    20d-avg value traded, JGLE Rp20.6B/day, ELTY Rp9.8B/day, GIAA Rp3.9B/day)
+    all had 10d price ranges of 30-65% -- genuinely active, nowhere close to
+    "frozen". The REAL frozen detector below (`price_range_pct < 2.0`) works
+    correctly independent of price level (verified against DVLA, Rp1,585,
+    0.95% 10d range -- correctly flagged despite its high price) -- removing
+    the hard floor does NOT reopen the door to dead stocks, that check
+    already covers it on its own.
     """
     support_10d = hist_low.tail(10).min()
     resistance_10d = hist_high.tail(10).max()
     price_range_pct = ((resistance_10d - support_10d) / max(support_10d, 1)) * 100
 
-    if current_price <= 51 or price_range_pct < 2.0:
-        return False, f"frozen/floor price (Rp{int(current_price)}, {price_range_pct:.1f}% 10d range)"
+    if price_range_pct < 2.0:
+        return False, f"frozen price (Rp{int(current_price)}, {price_range_pct:.1f}% 10d range)"
     if current_price < MIN_STOCK_PRICE:
         return False, f"price Rp{int(current_price)} below MIN_STOCK_PRICE ({MIN_STOCK_PRICE})"
     return True, None
@@ -3520,12 +3547,21 @@ def compute_intraday_targets(ticker: str, scoring: dict, hist_daily=None) -> dic
 
 # ==========================================
 # 🚦 BATAS ARA/ARB IDX (MBSS v2, user request — screening BSJP)
-# Diverifikasi lewat riset publik (SK Direksi BEI No. Kep-00055/BEI/03-2023,
-# berlaku efektif 4 September 2023, masih current per pengecekan terakhir).
-# Bertingkat berdasarkan HARGA PENUTUPAN KEMARIN (bukan harga sekarang):
-#   Rp50   - Rp200   -> 35%
-#   >Rp200 - Rp5.000 -> 25%
-#   >Rp5.000         -> 20%
+# UPDATED 2026-10-07 (user report + web verification): BEI resmi menghapus
+# floor harga Rp50 dan mengubah struktur ARA/ARB, SK Direksi BEI No.
+# Kep-00136/BEI/09-2026 tanggal 21-09-2026, efektif 28-09-2026 (menggantikan
+# Kep-00055/BEI/03-2023 yang dipakai sebelumnya). Struktur FASE 1 (berlaku
+# 28-09-2026 s/d 31-12-2026, ARA/ARB asimetris):
+#   Rp1    - Rp10    -> ARA/ARB Rp1 FIXED (bukan persentase)
+#   >Rp10  - Rp200   -> ARA 35%, ARB 15%
+#   >Rp200 - Rp5.000 -> ARA 25% (TIDAK berubah dari aturan lama)
+#   >Rp5.000         -> ARA 20% (TIDAK berubah dari aturan lama)
+# FASE 2 (mulai 1-1-2027): ARB jadi simetris dengan ARA per tier (15%->35%
+# utk tier >Rp10-200) -- tapi PERSENTASE ARA SENDIRI TIDAK BERUBAH lagi,
+# jadi compute_ara_ceiling() di bawah (yang cuma menghitung ARA, bukan ARB)
+# tetap valid untuk kedua fase, tidak perlu update lagi di pergantian tahun.
+# Tier 35% yang dulu "Rp50-200" sekarang jadi ">Rp10-200" -- cuma batas
+# bawahnya yang turun (karena floor Rp50 dihapus), persentasenya sama.
 # CATATAN: saham IPO hari pertama listing punya aturan beda (ditemukan
 # sumber yang saling bertentangan — ada yang bilang 1x lipat, ada yang
 # bilang 2x lipat dari batas normal) — TIDAK diimplementasikan di sini,
@@ -3535,14 +3571,14 @@ def compute_ara_ceiling(prev_close: float) -> float | None:
     """Harga batas ARA hari ini, dihitung dari harga penutupan KEMARIN."""
     if prev_close is None or prev_close <= 0:
         return None
-    if 50 <= prev_close <= 200:
+    if prev_close <= 10:
+        return prev_close + 1  # tier Rp1-10: kenaikan fixed Rp1, bukan persentase
+    if 10 < prev_close <= 200:
         pct = 0.35
     elif 200 < prev_close <= 5000:
         pct = 0.25
-    elif prev_close > 5000:
+    else:  # prev_close > 5000
         pct = 0.20
-    else:
-        return None  # di bawah Rp50 (harusnya sudah tersaring MIN_STOCK_PRICE)
     return prev_close * (1 + pct)
 
 
