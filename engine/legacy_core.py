@@ -7927,6 +7927,10 @@ def build_app():
     # yg baru sbg salah satu cabang.
     # app.add_handler(CommandHandler(["buyonweakness", "bow"], commands_scan.buy_on_weakness_command))
     app.add_handler(CommandHandler(["swing"], commands_scan.swing_command))
+    # MBSS v2 (user request 2026-10-07): /rank -- capital-efficiency ranking
+    # (return/day + win-rate, weighted) across BOW/OSB-v2/VCP/MACD-confirm's
+    # active picks. BSJP deliberately excluded, see engine/capital_rank.py.
+    app.add_handler(CommandHandler(["rank"], commands_scan.rank_command))
     # MBSS v2 (user request 2026-09-21): /entrypagi DINONAKTIFKAN --
     # profitable 46.5% (di bawah 50%!), mean cuma +0.71%, tidak lolos bar
     # "profitable meyakinkan" utk daytrade family (lihat memory

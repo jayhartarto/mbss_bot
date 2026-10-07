@@ -62,6 +62,7 @@ import engine.oversold_bounce_v2 as oversold_bounce_v2_engine
 import engine.vcp_pillar as vcp_pillar_engine
 import engine.macd_confirm_pillar as macd_confirm_pillar_engine
 import engine.bsjp2 as bsjp2_engine
+import engine.capital_rank as capital_rank_engine
 
 
 # MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker, boleh
@@ -4368,3 +4369,40 @@ async def swing_command(update, context):
         "dikunci di Day 5. SL wajib dipakai, bukan opsional."
     )
     await core.safe_reply(update.message, "\n\n".join(lines))
+
+
+async def rank_command(update, context):
+    """
+    /rank — MBSS v2 (2026-10-07). Peringkat ekonomi modal (return per 1
+    hari tahan, digabung dengan win-rate Wilson LB) di seluruh pick AKTIF
+    BOW + OSB-v2 + VCP + MACD-confirm -- lihat engine/capital_rank.py untuk
+    sumber angka/metodologi lengkap (memory project_lane_capital_
+    efficiency_2026_10_07.md).
+
+    BSJP (Lane1 & Lane2) SENGAJA tidak disertakan -- permintaan user
+    sendiri, lihat docstring engine/capital_rank.py untuk alasan lengkap
+    (tanpa SL keras, exit ladder-dependent, mekanisme overnight-gap beda).
+
+    Usage: /rank (bobot default 50% return/hari + 50% win-rate), atau
+    /rank <bobot_return> <bobot_winrate> untuk kustom (contoh: /rank 70 30
+    = lebih berat ke return/hari; dua angka apa saja, dinormalisasi
+    otomatis supaya totalnya 100%).
+    """
+    w_return, w_win = capital_rank_engine.DEFAULT_W_RETURN, capital_rank_engine.DEFAULT_W_WIN
+    if context.args and len(context.args) >= 2:
+        try:
+            w_return = float(context.args[0])
+            w_win = float(context.args[1])
+            if w_return < 0 or w_win < 0 or (w_return + w_win) <= 0:
+                raise ValueError
+        except ValueError:
+            await core.safe_reply(
+                update.message,
+                "⚠️ Format bobot tidak valid. Contoh: /rank 70 30 (70% return/hari, 30% win-rate). "
+                "Tanpa argumen = default 50/50."
+            )
+            return
+
+    ranked = capital_rank_engine.compute_rank(w_return, w_win)
+    message = capital_rank_engine.format_rank_message(ranked, w_return, w_win)
+    await core.safe_reply(update.message, message)
