@@ -220,6 +220,40 @@ def _ff_pctvol_10d(ticker: str, df: pd.DataFrame, ff_lookup: pd.DataFrame) -> fl
     return float(net_sum / vol_sum * 100)
 
 
+def _ff_net_ratio_z60(ticker: str, df: pd.DataFrame, ff_lookup: pd.DataFrame) -> float | None:
+    """z-score of today's foreign net_ratio (foreign_net/volume) vs this
+    ticker's own trailing 60-day baseline (EXCLUDING today) -- booster
+    signal validated 2026-10-07 (memory project_bow_osb_absolute_gate_
+    confirm_2026_10_07.md, within THIS lane's own gate-survivor
+    population): z60>=1.0 lifts win 56.3%->62.1% (wlb 53.4->54.0) AND
+    shrinks the worst-case tail loss (-18.0%->-13.3%). A LONGER baseline
+    window than the generic net_ratio_z20 matters specifically for BOW --
+    it's a slower-moving "quiet pullback in an uptrend" setup, so a 60d
+    FF baseline is more apples-to-apples than a jumpy 10-20d one (see
+    sweep memory project_ff_booster_light_sweep_2026_10_07.md for why
+    shorter windows were weaker here). Clipped to [-10,10] -- an illiquid
+    ticker's trailing std can collapse near zero and blow up an
+    unclipped z-score otherwise. Returns None when there isn't enough FF
+    history (needs 60 PRIOR days + today = 61) -- missing = neutral,
+    NEVER a gate, this is a re-rank tag only (house convention)."""
+    if len(df) < 61:
+        return None
+    last61_dates = df.index[-61:]
+    ffg = ff_lookup[(ff_lookup.ticker == ticker) & (ff_lookup.date.isin(last61_dates))]
+    if len(ffg) < 61:
+        return None
+    vol_by_date = df["Volume"].reindex(last61_dates)
+    net_by_date = ffg.drop_duplicates("date").set_index("date")["foreign_net"].reindex(last61_dates)
+    if vol_by_date.isna().any() or net_by_date.isna().any() or (vol_by_date <= 0).any():
+        return None
+    net_ratio = net_by_date / vol_by_date
+    baseline, today = net_ratio.iloc[:-1], net_ratio.iloc[-1]
+    std = baseline.std()
+    if not std or pd.isna(std):
+        return None
+    return float(np.clip((today - baseline.mean()) / std, -10, 10))
+
+
 def _assign_tier(pctb: float, cmf20: float) -> int:
     if pctb <= PCTB_CEIL_T12 and CMF_TOP_LO < cmf20 <= CMF_TOP_HI:
         return 1
@@ -268,6 +302,10 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, rs20_ihsg: float | Non
             return None
 
     tier = _assign_tier(feats["pctb"], feats["cmf_20"])
+    # BOOSTER (2026-10-07, validated, see _ff_net_ratio_z60 docstring) --
+    # re-rank tag only, never excludes/gates.
+    ff_net_ratio_z60 = _ff_net_ratio_z60(ticker, df, ff_lookup)
+    ff_priority = bool(ff_net_ratio_z60 is not None and ff_net_ratio_z60 >= 1.0)
     entry_ref = feats["close"]
     entry_high = round(feats["peak_price"] * (1 - DEPTH_LO / 100))
     entry_low = round(feats["peak_price"] * (1 - DEPTH_HI / 100))
@@ -291,6 +329,8 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, rs20_ihsg: float | Non
         "tp1_pct": tp1_pct,
         "tp2_price_latest": tp2_price,
         "swing_length_days_typical": TIER_SWING_DAYS[tier],
+        "ff_net_ratio_z60": ff_net_ratio_z60,
+        "ff_priority": ff_priority,
         "resolved_date": None,
         "resolved_ret_pct": None,
     }

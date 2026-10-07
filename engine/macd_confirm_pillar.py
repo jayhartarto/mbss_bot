@@ -160,6 +160,7 @@ import pandas as pd
 
 from engine import legacy_core as core
 from engine import scanalert as scanalert_engine  # IDX tick-size rounding (_idx_round_tick*)
+import engine.buy_on_weakness as bow_engine  # reuse _load_ff_lookup, same FF archive
 
 # ---------------------------------------------------------------------------
 # Constants (all validated in the research trail referenced above)
@@ -349,6 +350,36 @@ def _assign_lane(feats: dict) -> str:
     return "HighRisk/Reward" if is_highrisk else "Core/Neutral"
 
 
+def _ff_net_value_z20_excluded(ticker: str, df: pd.DataFrame, ff_lookup: pd.DataFrame) -> bool:
+    """EXCLUSION (2026-10-07, validated -- memory project_ff_netsell_
+    exclusion_sweep_2026_10_07.md + project_ff_final_revalidation_
+    2026_10_07.md): z-score of today's RAW foreign net-SELL value (not
+    volume-normalized ratio) vs this ticker's own trailing 20-day
+    baseline (excluding today). `net_value_z20<=-1.0` degrades this
+    lane's own Stage-1 win rate 48.6%->43.7% (wlb 47.6->40.4) and nearly
+    halves the mean forward return (+4.46%->+1.91%), on a big sample
+    (n=851 of 8464). NOTE: this is a MEAN/win-rate improvement only --
+    it does NOT tame this lane's fat tail (worst/best single trade are
+    unchanged either way, since the exit is close-only at D12 with no
+    SL/TP trigger at all). Missing FF data NEVER excludes (returns
+    False) -- house convention, missing = neutral."""
+    if len(df) < 21:
+        return False
+    last21_dates = df.index[-21:]
+    ffg = ff_lookup[(ff_lookup.ticker == ticker) & (ff_lookup.date.isin(last21_dates))]
+    if len(ffg) < 21:
+        return False
+    net_by_date = ffg.drop_duplicates("date").set_index("date")["foreign_net"].reindex(last21_dates)
+    if net_by_date.isna().any():
+        return False
+    baseline, today = net_by_date.iloc[:-1], net_by_date.iloc[-1]
+    std = baseline.std()
+    if not std or pd.isna(std):
+        return False
+    z = float(np.clip((today - baseline.mean()) / std, -10, 10))
+    return z <= -1.0
+
+
 def _tag_of(ret_so_far: float | None, age_day: int) -> str:
     if ret_so_far is None or ret_so_far <= 0:
         return "FADING"
@@ -361,14 +392,23 @@ def _tag_of(ret_so_far: float | None, age_day: int) -> str:
     return "VERY STRONG"
 
 
-def evaluate_ticker(ticker: str) -> dict | None:
+def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame | None = None) -> dict | None:
     """Returns a candidate dict if `ticker` qualifies for Stage-1 TODAY,
     else None. entry_ref_price = today's close (same simplification as
     buy_on_weakness.py / vcp_pillar.py -- age_days/tag tracking starts
-    from the NEXT nightly re-evaluation onward)."""
+    from the NEXT nightly re-evaluation onward).
+
+    `ff_lookup` optional (defaults to None -> exclusion check simply
+    skipped, never crashes) so existing callers/tests that don't pass it
+    keep working unchanged."""
     df = core.get_ohlcv_daily_from_db(ticker, limit=150)
     feats = _compute_latest_features(df)
     if feats is None or not _passes_stage1(feats):
+        return None
+
+    # EXCLUSION (2026-10-07, validated, see _ff_net_value_z20_excluded
+    # docstring) -- the ONLY FF filter for this lane (no booster found).
+    if ff_lookup is not None and _ff_net_value_z20_excluded(ticker, df, ff_lookup):
         return None
 
     lane = _assign_lane(feats)
@@ -394,10 +434,11 @@ def compute_macd_confirm_candidates(tickers: list[str]) -> list[dict]:
     """Nightly entry point: evaluate every ticker in `tickers`, return the
     list that qualifies today (does NOT touch the picks-history file --
     call update_and_save_picks() with the result to persist/merge)."""
+    ff_lookup = bow_engine._load_ff_lookup()
     candidates = []
     for t in tickers:
         try:
-            c = evaluate_ticker(t)
+            c = evaluate_ticker(t, ff_lookup)
         except Exception as e:
             print(f"⚠️ MACD-confirm pillar: gagal evaluasi {t}: {e}")
             continue

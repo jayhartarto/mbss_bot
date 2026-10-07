@@ -4082,11 +4082,17 @@ async def buy_on_weakness_command(update, context):
     """
     picks = buy_on_weakness_engine.load_buy_on_weakness_picks()
     active = [p for p in picks if p.get("status") == "ALIVE"]
-    active.sort(key=lambda p: (p["tier"], -p["age_days"]))
+    # FF PRIORITY booster breaks ties within the same tier (validated
+    # 2026-10-07, see engine/buy_on_weakness.py's _ff_net_ratio_z60
+    # docstring) -- tier itself stays the primary sort, never overridden.
+    active.sort(key=lambda p: (p["tier"], not p.get("ff_priority", False), -p["age_days"]))
 
     osb_picks = oversold_bounce_v2_engine.load_oversold_bounce_v2_picks()
     osb_active = [p for p in osb_picks if p.get("status") == "ALIVE"]
-    osb_active.sort(key=lambda p: (p.get("ff_ratio_5d") is None, -(p.get("ff_ratio_5d") or 0)))
+    # FF PRIORITY booster sorts first (validated 2026-10-07, see
+    # engine/oversold_bounce_v2.py's _ff_pos_days_5 docstring), ff_ratio_5d
+    # remains the tiebreak within/outside priority -- never a hard gate.
+    osb_active.sort(key=lambda p: (not p.get("ff_priority", False), p.get("ff_ratio_5d") is None, -(p.get("ff_ratio_5d") or 0)))
 
     if not active and not osb_active:
         await core.safe_reply(
@@ -4103,9 +4109,10 @@ async def buy_on_weakness_command(update, context):
         fire = "🔥" * (4 - p["tier"])  # Tier 1 = 3 fire (best), Tier 3 = 1 fire
         age = p["age_days"]
         age_label = f"NEW (Day {age}/5)" if age <= 1 else f"AGING (Day {age}/5) — ALIVE"
+        priority_tag = " ⭐ FF PRIORITY" if p.get("ff_priority") else ""
         tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
         lines.append(
-            f"{fire} {p['ticker']} — Tier {p['tier']}\n"
+            f"{fire} {p['ticker']} — Tier {p['tier']}{priority_tag}\n"
             f"{age_label}\n\n"
             f"Entry: {p['entry_low']:,.0f} - {p['entry_high']:,.0f}\n"
             f"SL: {p['sl_price']:,.0f}\n"
@@ -4127,9 +4134,10 @@ async def buy_on_weakness_command(update, context):
         age_label = f"NEW (Day {age}/{oversold_bounce_v2_engine.ALERT_MAX_AGE_DAYS})" if age <= 1 else f"AGING (Day {age}/{oversold_bounce_v2_engine.ALERT_MAX_AGE_DAYS}) — ALIVE"
         ff = p.get("ff_ratio_5d")
         ff_tag = f" | 🟢 FF {ff:+.1f}% (5d)" if ff is not None and ff > 0 else (f" | 🔴 FF {ff:+.1f}% (5d)" if ff is not None else "")
+        priority_tag = " ⭐ FF PRIORITY" if p.get("ff_priority") else ""
         tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
         lines.append(
-            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger){ff_tag}\n"
+            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger){ff_tag}{priority_tag}\n"
             f"{age_label}\n"
             f"Entry ref: {p['entry_ref_price']:,.0f}\n"
             f"SL: {p['sl_price']:,.0f} (-20%, WAJIB, jangan dipersempit)\n"
@@ -4162,11 +4170,14 @@ async def swing_command(update, context):
     """
     bow_picks = buy_on_weakness_engine.load_buy_on_weakness_picks()
     bow_active = [p for p in bow_picks if p.get("status") == "ALIVE"]
-    bow_active.sort(key=lambda p: (p["tier"], -p["age_days"]))
+    bow_active.sort(key=lambda p: (p["tier"], not p.get("ff_priority", False), -p["age_days"]))
 
     osb_picks = oversold_bounce_v2_engine.load_oversold_bounce_v2_picks()
     osb_active = [p for p in osb_picks if p.get("status") == "ALIVE"]
-    osb_active.sort(key=lambda p: (p.get("ff_ratio_5d") is None, -(p.get("ff_ratio_5d") or 0)))
+    # FF PRIORITY booster sorts first (validated 2026-10-07, see
+    # engine/oversold_bounce_v2.py's _ff_pos_days_5 docstring), ff_ratio_5d
+    # remains the tiebreak within/outside priority -- never a hard gate.
+    osb_active.sort(key=lambda p: (not p.get("ff_priority", False), p.get("ff_ratio_5d") is None, -(p.get("ff_ratio_5d") or 0)))
 
     vcp_picks = vcp_pillar_engine.load_vcp_picks()
     vcp_active = [p for p in vcp_picks if p.get("status") == "ALIVE"]
@@ -4224,9 +4235,10 @@ async def swing_command(update, context):
         fire = "🔥" * (4 - p["tier"])  # Tier 1 = 3 fire (best), Tier 3 = 1 fire
         age = p["age_days"]
         age_label = f"NEW (Day {age}/5)" if age <= 1 else f"AGING (Day {age}/5) — ALIVE"
+        priority_tag = " ⭐ FF PRIORITY" if p.get("ff_priority") else ""
         tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
         lines.append(
-            f"{fire} {p['ticker']} — Tier {p['tier']}\n"
+            f"{fire} {p['ticker']} — Tier {p['tier']}{priority_tag}\n"
             f"{age_label}\n"
             f"Entry: {p['entry_low']:,.0f} - {p['entry_high']:,.0f}\n"
             f"SL: {p['sl_price']:,.0f}\n"
@@ -4243,9 +4255,10 @@ async def swing_command(update, context):
         age_label = f"NEW (Day {age}/{oversold_bounce_v2_engine.ALERT_MAX_AGE_DAYS})" if age <= 1 else f"AGING (Day {age}/{oversold_bounce_v2_engine.ALERT_MAX_AGE_DAYS}) — ALIVE"
         ff = p.get("ff_ratio_5d")
         ff_tag = f" | 🟢 FF {ff:+.1f}% (5d)" if ff is not None and ff > 0 else (f" | 🔴 FF {ff:+.1f}% (5d)" if ff is not None else "")
+        priority_tag = " ⭐ FF PRIORITY" if p.get("ff_priority") else ""
         tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
         lines.append(
-            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger){ff_tag}\n"
+            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger){ff_tag}{priority_tag}\n"
             f"{age_label}\n"
             f"Entry ref: {p['entry_ref_price']:,.0f}\n"
             f"SL: {p['sl_price']:,.0f} (-20%, WAJIB)\n"

@@ -37,6 +37,7 @@ import datetime
 import json
 import os
 
+import numpy as np
 import pandas as pd
 
 STATE_FILE_BSJP2_WATCHLIST = None  # set lazily, see _state_path()
@@ -69,6 +70,41 @@ def _save_json_state(filename: str, state: dict):
     path = _state_path(filename)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f)
+
+
+# =====================================================================
+# FF booster (2026-10-07, validated -- memory project_bsjp_ff_absolute_
+# gate_confirm_2026_10_07.md): re-rank tag only, never a gate/exclusion
+# (a false-exclusion check on the reverse direction found 27-38% of
+# would-be-excluded candidates were actual TIER1+ winners -- do NOT add
+# an exclusion filter to this lane without re-reading that memory).
+# =====================================================================
+
+def _ff_net_value_z20(ticker: str, df: pd.DataFrame, ff_lookup: pd.DataFrame) -> float | None:
+    """z-score of D1's RAW foreign net-buy value (not volume-normalized
+    ratio) vs this ticker's own trailing 20-day baseline (EXCLUDING
+    today) -- booster validated 2026-10-07: z20>=0.5 lifts this lane's
+    Stage-1-confirmed win rate 64.9%->67.9% (wlb 63.9->66.0) AND shrinks
+    the worst-case tail loss (-33.5%->-27.6%). Clipped to [-10,10] -- an
+    illiquid ticker's trailing std can collapse near zero and blow up an
+    unclipped z-score otherwise. `df` must be OHLCV through D1 (today's
+    row = D1 -- finalize_bsjp2_confirmations runs the night D1 closes).
+    Returns None when there isn't enough FF history (needs 20 PRIOR days
+    + today = 21) -- missing = neutral, never gates."""
+    if len(df) < 21:
+        return None
+    last21_dates = df.index[-21:]
+    ffg = ff_lookup[(ff_lookup.ticker == ticker) & (ff_lookup.date.isin(last21_dates))]
+    if len(ffg) < 21:
+        return None
+    net_by_date = ffg.drop_duplicates("date").set_index("date")["foreign_net"].reindex(last21_dates)
+    if net_by_date.isna().any():
+        return None
+    baseline, today = net_by_date.iloc[:-1], net_by_date.iloc[-1]
+    std = baseline.std()
+    if not std or pd.isna(std):
+        return None
+    return float(np.clip((today - baseline.mean()) / std, -10, 10))
 
 
 # =====================================================================
@@ -833,7 +869,10 @@ def finalize_bsjp2_confirmations(results: dict) -> list[dict]:
     on the watchlist saved the PREVIOUS night, assigns the Stage-2 tier /
     rocket tag, and computes the dynic TP1/TP2/TP3+SL recommendation."""
     import engine.scanalert as scanalert_engine
+    import engine.legacy_core as core_engine
+    import engine.buy_on_weakness as bow_engine  # reuse _load_ff_lookup, same FF archive
 
+    ff_lookup = bow_engine._load_ff_lookup()
     watchlist_state = _load_json_state("bsjp2_watchlist_state.json")
     candidates = watchlist_state.get("candidates") or {}
     if not candidates:
@@ -865,6 +904,12 @@ def finalize_bsjp2_confirmations(results: dict) -> list[dict]:
         rsi14_d1 = r.get("bsjp2_rsi14")  # tonight's own rsi = D1's rsi, since tonight IS D1 for this ticker
         tier = _assign_conviction_tier(ret_2d_cum, pct_b_prior, gap_pct, atr_prior, rsi14_d1)
 
+        # FF BOOSTER (2026-10-07, validated, see _ff_net_value_z20
+        # docstring) -- re-rank tag only, never excludes/gates.
+        ff_df = core_engine.get_ohlcv_daily_from_db(ticker, limit=30)
+        ff_net_value_z20 = _ff_net_value_z20(ticker, ff_df, ff_lookup) if ff_df is not None else None
+        ff_priority = bool(ff_net_value_z20 is not None and ff_net_value_z20 >= 0.5)
+
         rocket = (live_tickers.get(ticker) or {}).get("rocket")
         if rocket == "🚀🚀":
             tier_label = "ROCKET_PLUS"
@@ -883,6 +928,8 @@ def finalize_bsjp2_confirmations(results: dict) -> list[dict]:
             "close_d1": close_d1,
             "ret_2d_cum": round(ret_2d_cum, 2),
             "tp1": tp_sl["tp1"], "tp2": tp_sl["tp2"], "tp3": tp_sl["tp3"], "sl": tp_sl["sl"],
+            "ff_net_value_z20": ff_net_value_z20,
+            "ff_priority": ff_priority,
         })
 
     today = _today_str()
@@ -944,12 +991,16 @@ def build_bsjp2_tp_message() -> str:
             "flat-to-negative di SEMUA level occurrence, bukan worth ditampilkan)."
         )
     lines = [f"🎯 BSJP TP/SL REKOMENDASI — {len(picks)}/{len(all_picks)} pick lolos ladder (siap pasang sebelum open besok)\n"]
-    for p in sorted(picks, key=lambda x: (x["rung"] != "TOP", -x["ret_2d_cum"])):
+    # FF PRIORITY booster breaks ties within rung (validated 2026-10-07,
+    # see _ff_net_value_z20 docstring) -- rung itself stays the primary
+    # sort, never overridden; this is a re-rank tag, never a gate.
+    for p in sorted(picks, key=lambda x: (x["rung"] != "TOP", not x.get("ff_priority", False), -x["ret_2d_cum"])):
         _, display_tag = _tp_tier_and_display(p["tier"], p.get("rocket"))
         tier_name = p["tier"].replace("_", "-")
         tag = display_tag if p.get("rocket") else f"{display_tag} {tier_name}".strip()
         occ = p.get("occurrence", 1)
-        header = f"{p['ticker']} [{tag}] — closing {p['close_d1']:,.0f} ({p['ret_2d_cum']:+.1f}% 2d, occurrence {occ}x/5d)"
+        priority_tag = " ⭐ FF PRIORITY" if p.get("ff_priority") else ""
+        header = f"{p['ticker']} [{tag}]{priority_tag} — closing {p['close_d1']:,.0f} ({p['ret_2d_cum']:+.1f}% 2d, occurrence {occ}x/5d)"
         if p.get("rocket") or p.get("rung") == "MIDDLE":
             body = (
                 f"  TP1 {p['tp1']:,.0f} | TP2 {p['tp2']:,.0f}"

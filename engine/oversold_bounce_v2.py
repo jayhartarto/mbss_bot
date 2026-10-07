@@ -116,6 +116,32 @@ def _ff_ratio_5d(ticker: str, df: pd.DataFrame, ff_lookup: pd.DataFrame) -> floa
     return float(net_sum / vol_sum * 100)
 
 
+def _ff_pos_days_5(ticker: str, df: pd.DataFrame, ff_lookup: pd.DataFrame) -> int | None:
+    """Count of the last 5 trading days with positive net foreign buy
+    (foreign_net/volume > 0) -- booster/exclusion signal validated
+    2026-10-07 (memory project_ff_booster_light_sweep_2026_10_07.md +
+    project_bow_osb_absolute_gate_confirm_2026_10_07.md, within THIS
+    lane's own gate-survivor population): >=3/5 positive days lifts win
+    75.2%->80.7% (wlb 70.9->75.1%); <=1/5 positive days degrades it to
+    68.3% (wlb->58.8%), confirmed as a real exclusion (not just noise).
+    Deliberately a pure day-count, not a magnitude/z-score -- this was
+    the feature shape that actually worked best for this specific lane
+    (see the sweep memory for why other shapes were weaker here).
+    Returns None (not 0) when there's no FF data for any of the last 5
+    days -- missing = neutral, caller must never exclude on None."""
+    last5_dates = df.index[-FF_WINDOW:]
+    ffg = ff_lookup[(ff_lookup.ticker == ticker) & (ff_lookup.date.isin(last5_dates))]
+    if ffg.empty:
+        return None
+    vol_by_date = df["Volume"].reindex(last5_dates)
+    net_by_date = ffg.set_index("date")["foreign_net"].reindex(last5_dates)
+    valid = vol_by_date.notna() & net_by_date.notna() & (vol_by_date > 0)
+    if not valid.any():
+        return None
+    net_ratio = net_by_date[valid] / vol_by_date[valid]
+    return int((net_ratio > 0).sum())
+
+
 def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, ihsg_ret_1d_today: float | None) -> dict | None:
     """Returns a candidate dict if `ticker` qualifies TODAY, else None.
     Caller is responsible for the IHSG dd_100 regime gate (checked once for
@@ -139,6 +165,14 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, ihsg_ret_1d_today: flo
 
     ff_ratio5 = _ff_ratio_5d(ticker, df, ff_lookup)  # missing = neutral, never penalize (house convention)
 
+    # EXCLUSION (2026-10-07, validated -- see _ff_pos_days_5 docstring):
+    # <=1/5 recent positive-FF days is a real, confirmed quality drop
+    # within this lane's own gate survivors. Missing (None) NEVER
+    # excludes -- only a confirmed low count does.
+    ff_pos_days5 = _ff_pos_days_5(ticker, df, ff_lookup)
+    if ff_pos_days5 is not None and ff_pos_days5 <= 1:
+        return None
+
     entry_ref = feats["close"]
     sl_price = round(entry_ref * (1 + SL_PCT / 100))
     tp1_price = round(entry_ref * (1 + TP1_PCT / 100))
@@ -155,6 +189,11 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, ihsg_ret_1d_today: flo
         "tp1_price": tp1_price,
         "tp2_price": tp2_price,
         "ff_ratio_5d": ff_ratio5,
+        "ff_pos_days_5": ff_pos_days5,
+        # BOOSTER (2026-10-07, validated): >=3/5 recent positive-FF days,
+        # a re-rank tag only -- never excludes/gates, house convention
+        # (booster, not hard gate). See _ff_pos_days_5 docstring.
+        "ff_priority": bool(ff_pos_days5 is not None and ff_pos_days5 >= 3),
         "rsi14_at_trigger": round(feats["rsi14"], 1),
         "resolved_date": None,
         "resolved_ret_pct": None,
