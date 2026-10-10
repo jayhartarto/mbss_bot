@@ -42,9 +42,41 @@ the house BSJP fire-emoji convention where more fire = better):
 
 Exit: TP2 = band-touch-with-validity-fix above. TP1 = entry x (1 + tier's
 median backtest return), informational partial-profit marker only, does
-NOT end an alert's lifecycle. SL = entry x (1 - 18%). An alert not resolved
-within 5 trading days of first firing is marked EXPIRED (still shown in
-history, no longer "live").
+NOT end an alert's lifecycle. SL = entry x (1 - 18%).
+
+ALERT_MAX_AGE_DAYS (5) vs RESOLUTION_MAX_AGE_DAYS (30) — FIXED 2026-10-10,
+these were wrongly conflated before. User clarified ALERT_MAX_AGE_DAYS was
+only ever meant to gate "is this still a fresh breakout-conviction entry,"
+not "stop tracking SL/TP for an already-open position." The original code
+used the SAME 5-day counter for both, which forced every pick to EXPIRE
+(mark-to-market, no further tracking) long before its own validated median
+time-to-TP (7-10 days per tier, see TIER_SWING_RANGE below) — this alone
+explained most of the gap between the backtested ~83-89% win-rate and the
+~55-62% that was showing live/in `/rank`'s LANE_STATS. Confirmed by
+re-running the exact gate+exit logic with the window extended: win-rate
+recovers to 83.1% (baseline) / 87.6% (+FF booster) at a 30-day resolution
+window (near-plateau; extending further to 90d only adds ~3pp more). Now:
+ALERT_MAX_AGE_DAYS controls ONLY the "NEW"/"AGING" display label (is this
+still worth a fresh entry), RESOLUTION_MAX_AGE_DAYS controls how long
+`_resolve_active_pick` keeps checking SL/TP before giving up (EXPIRED).
+See memory `project_wyckoff_methodology_exploration_2026_10_09.md` and the
+same-day follow-up thread for the full validation trail.
+
+PRICE-DRIFT ZONE + CONDITIONAL NOTES (2026-10-10, see same memory trail).
+Once a pick has survived a few days, how far price has drifted from the
+trigger-day close (NOT calendar delay alone) predicts forward outcome:
+NETRAL (-1% to +1% drift) is safest; chasing SUDAH_NAIK_KUAT (>=+3% drift)
+is the single worst combination found (lower win AND lower return AND
+higher SL-rate than every other zone, worst in Tier 3). A small number of
+(tier, obs_day, zone) cells have enough independent sample (n>=150) to
+state a PRECISE win-rate for that exact condition — see
+SOLID_CONDITIONAL_CELLS. Everywhere else, only a GENERIC rule-of-thumb
+applies (quiet-zone survivors tend to resolve faster than the tier's own
+median). CRITICAL: these notes are DISPLAY-ONLY — per user's explicit
+fairness concern 2026-10-10, `/rank`'s actual SCORE must never mix
+precision levels across tiers (that would bias ranking toward whichever
+tier happens to have denser research data), so this information never
+feeds into `engine/capital_rank.py`'s LANE_STATS lookup.
 
 CAVEAT carried over from research (do not drop when reporting results):
 a chronological train/test split found real regime degradation tied to the
@@ -102,11 +134,78 @@ SL_PCT = 18.0
 FF_EXTREME_SELL = -10.0
 
 TIER_MEDIAN_RET = {1: 5.85, 2: 6.19, 3: 5.28}
-TIER_SWING_DAYS = {1: 10, 2: 8, 3: 7}
-ALERT_MAX_AGE_DAYS = 5
+TIER_SWING_DAYS = {1: 10, 2: 8, 3: 7}  # kept for backward compat; display now uses TIER_SWING_RANGE
+ALERT_MAX_AGE_DAYS = 5  # entry-freshness label ONLY -- see docstring 2026-10-10 fix
+
+# SL/TP resolution tracking window -- was wrongly hard-capped at
+# ALERT_MAX_AGE_DAYS (5) before 2026-10-10; validated at 30d (near-plateau
+# of the win-rate-vs-window curve, see docstring).
+RESOLUTION_MAX_AGE_DAYS = 30
 
 RS_DISCRIMINATOR_DD100_GATE = -10.0  # only active once IHSG dd_100 is this deep or deeper
 RS_DISCRIMINATOR_FLOOR = 3.0         # rs_20d must be >= this (top ~2 quartiles) in that regime
+
+# Days-to-TP distribution (P25/median/P75), validated 2026-10-10 on n=126
+# (Tier1) / 446 (Tier2) / 350 (Tier3) resolved TP trades at the 40d window
+# -- replaces the single-point TIER_SWING_DAYS estimate for display.
+TIER_SWING_RANGE = {1: (5, 10.5, 16), 2: (4, 8, 13), 3: (4, 7, 11)}
+
+# Price-drift-since-trigger zone classification, validated 2026-10-10
+# (observation days 3/4/5, pooled and per-tier). drift_pct = (current_close
+# - entry_ref_price) / entry_ref_price * 100.
+DRIFT_DISKON_MAX = -3.0
+DRIFT_DISKON_RINGAN_MAX = -1.0
+DRIFT_NAIK_MIN = 1.0
+DRIFT_NAIK_KUAT_MIN = 3.0
+
+# Cells with n>=150 independent trigger episodes in the (tier, obs_day,
+# zone) grid -- from research/bow_dynamic_conditional_stats_2026_10_10.py.
+# obs_day = age_days - 1 (days elapsed since the trigger day itself).
+# DISPLAY-ONLY, see docstring -- never read by engine/capital_rank.py.
+SOLID_CONDITIONAL_CELLS = {
+    (2, 2, "NETRAL"): {"win": 82.0, "wlb": 75.8},
+    (2, 3, "NETRAL"): {"win": 82.7, "wlb": 75.8},
+    (2, 4, "NAIK_KUAT"): {"win": 74.8, "wlb": 67.4},
+    (2, 5, "NAIK_KUAT"): {"win": 75.7, "wlb": 68.3},
+    (2, 7, "NAIK_KUAT"): {"win": 76.0, "wlb": 69.2},
+    (2, 10, "NAIK_KUAT"): {"win": 76.8, "wlb": 70.4},
+}
+# Generic rule-of-thumb window (obs_day range) + zones it applies to --
+# from the Part-2 finding (quiet survivors at day 5 resolve in median 4d
+# vs day-1 entry's median 7d) -- used only where SOLID_CONDITIONAL_CELLS
+# has no exact match for that (tier, obs_day, zone).
+GENERIC_NOTE_OBS_DAY_RANGE = (3, 5)
+GENERIC_NOTE_ZONES = {"NETRAL", "NAIK"}
+
+
+def classify_drift_zone(drift_pct: float) -> tuple[str, str]:
+    """Returns (zone_key, short_display_label). zone_key matches the keys
+    used in SOLID_CONDITIONAL_CELLS/GENERIC_NOTE_ZONES."""
+    if drift_pct <= DRIFT_DISKON_MAX:
+        return "DISKON", "📉 Diskon"
+    if drift_pct <= DRIFT_DISKON_RINGAN_MAX:
+        return "DISKON_RINGAN", "🟡 Diskon ringan"
+    if drift_pct < DRIFT_NAIK_MIN:
+        return "NETRAL", "😌 Netral"
+    if drift_pct < DRIFT_NAIK_KUAT_MIN:
+        return "NAIK", "📈 Sudah naik"
+    return "NAIK_KUAT", "🚀 Naik jauh"
+
+
+def conditional_drift_note(tier: int, age_days: int, zone_key: str) -> str | None:
+    """Short display-only annotation for the pick's current drift
+    condition. Returns None when nothing applicable (most Tier1/3
+    cells, or obs_day outside the validated ranges) -- callers should
+    just omit the line in that case, not show a placeholder."""
+    obs_day = age_days - 1
+    cell = SOLID_CONDITIONAL_CELLS.get((tier, obs_day, zone_key))
+    if cell is not None:
+        zone_short = {"NETRAL": "Netral", "NAIK_KUAT": "Naik jauh"}.get(zone_key, zone_key)
+        return f"📊 {zone_short} H{obs_day}: win≈{cell['win']:.0f}% (data spesifik titik ini)"
+    lo, hi = GENERIC_NOTE_OBS_DAY_RANGE
+    if lo <= obs_day <= hi and zone_key in GENERIC_NOTE_ZONES:
+        return f"⏩ H{obs_day} tenang: histori TP cenderung lebih cepat dari estimasi awal."
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +428,12 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, rs20_ihsg: float | Non
         "tp1_pct": tp1_pct,
         "tp2_price_latest": tp2_price,
         "swing_length_days_typical": TIER_SWING_DAYS[tier],
+        "swing_horizon_p25": TIER_SWING_RANGE[tier][0],
+        "swing_horizon_median": TIER_SWING_RANGE[tier][1],
+        "swing_horizon_p75": TIER_SWING_RANGE[tier][2],
+        "price_drift_pct": 0.0,
+        "drift_zone": "NETRAL",
+        "drift_label": "😌 Baru alert",
         "ff_net_ratio_z60": ff_net_ratio_z60,
         "ff_priority": ff_priority,
         "resolved_date": None,
@@ -425,7 +530,15 @@ def _resolve_active_pick(pick: dict) -> dict:
             pick["tp1_touched"] = True
         pick["age_days"] = pick.get("age_days", 1) + 1
         pick["tp2_price_latest"] = round(today_band) if today_band else pick.get("tp2_price_latest")
-        if pick["age_days"] > ALERT_MAX_AGE_DAYS:
+        drift_pct = (today_close - entry_ref) / entry_ref * 100
+        zone_key, zone_label = classify_drift_zone(drift_pct)
+        pick["price_drift_pct"] = round(drift_pct, 2)
+        pick["drift_zone"] = zone_key
+        pick["drift_label"] = zone_label
+        # RESOLUTION_MAX_AGE_DAYS (not ALERT_MAX_AGE_DAYS) gates SL/TP
+        # tracking -- ALERT_MAX_AGE_DAYS only controls the NEW/AGING
+        # display label (see docstring 2026-10-10 fix).
+        if pick["age_days"] > RESOLUTION_MAX_AGE_DAYS:
             pick["status"] = "EXPIRED"
 
     pick["_last_checked_date"] = today_date

@@ -39,13 +39,37 @@ under C:\\Users\\asus\\.claude\\projects\\...\\memory\\:
 from __future__ import annotations
 
 LANE_STATS = {
-    ("BOW", True): {"win": 62.1, "wlb": 54.0, "ret_per_day": 0.604, "label": "BOW +FF priority"},
-    ("BOW", False): {"win": 55.4, "wlb": 52.3, "ret_per_day": 0.383, "label": "BOW baseline"},
+    # BOW numbers CORRECTED 2026-10-10: the original 55.4%/62.1% figures
+    # (and the ret_per_day values below them) were computed with BOW's
+    # SL/TP tracking wrongly hard-capped at ALERT_MAX_AGE_DAYS=5 -- most
+    # trades never got the chance to reach their own validated median
+    # time-to-TP (7-10 days per tier) before being force-marked EXPIRED.
+    # Re-validated at the corrected 30-day resolution window (near-plateau
+    # of the win-rate-vs-window curve; see engine/buy_on_weakness.py
+    # docstring and research/bow_dynamic_conditional_stats_2026_10_10.py).
+    # Uniform across all 3 tiers by design -- see 2026-10-10 fairness
+    # discussion: a precision-weighted per-tier score would bias ranking
+    # toward whichever tier happens to have denser research data, so
+    # /rank's SCORE always uses this single flat number regardless of
+    # tier; any tier/condition-specific precision is DISPLAY-ONLY (see
+    # buy_on_weakness.conditional_drift_note), never fed back here.
+    ("BOW", True): {"win": 87.6, "wlb": 81.2, "ret_per_day": 0.542, "label": "BOW +FF priority"},
+    ("BOW", False): {"win": 83.1, "wlb": 80.8, "ret_per_day": 0.401, "label": "BOW baseline"},
     ("OSB", True): {"win": 81.9, "wlb": 76.4, "ret_per_day": 0.859, "label": "OSB-v2 +FF priority"},
     ("OSB", False): {"win": 68.9, "wlb": 62.3, "ret_per_day": 0.208, "label": "OSB-v2 baseline"},
     ("VCP", None): {"win": 73.2, "wlb": 70.9, "ret_per_day": 0.009, "label": "VCP (no FF filter)"},
     ("MACD", None): {"win": 49.2, "wlb": 48.1, "ret_per_day": 0.396, "label": "MACD-confirm (post-exclusion)"},
 }
+# NOTE on OSB-v2: deliberately LEFT UNCHANGED 2026-10-10. A feasibility
+# check (research/osb_dynamic_conditional_stats_2026_10_10.py) found
+# OSB-v2's raw episode count overstates independence -- it only fires
+# during IHSG dd_100<=-10% regimes, and 2+ years of data contains just 10
+# distinct drawdown clusters, with many same-cluster trades firing on the
+# same handful of dates. Wilson-LB computed on raw n is overconfident for
+# this lane; don't casually "fix" OSB-v2's numbers the way BOW's were
+# without a cluster-aware (block-bootstrap-by-drawdown-episode) method
+# first -- this is a structural limitation, not a sample-size one that
+# more data alone would resolve.
 
 DEFAULT_W_RETURN = 0.5
 DEFAULT_W_WIN = 0.5
@@ -159,6 +183,15 @@ def format_rank_message(ranked: list[dict], w_return: float = DEFAULT_W_RETURN, 
         )
         if entry and sl:
             block += f"\n   Entry~{entry:,.0f} | SL {sl:,.0f}"
+        # Swing horizon + price-drift -- only present on picks that carry
+        # these fields (currently BOW only, added 2026-10-10). Display-only,
+        # never affects `score` above -- see LANE_STATS fairness note.
+        p25, p75, median_days = p.get("swing_horizon_p25"), p.get("swing_horizon_p75"), p.get("swing_horizon_median")
+        if p25 is not None and p75 is not None:
+            block += f"\n   Swing horizon: ~{p25:g}-{p75:g} hari (median {median_days:g})"
+        drift = p.get("price_drift_pct")
+        if drift is not None:
+            block += f"\n   Pergerakan sejak entry: {drift:+.1f}% — {p.get('drift_label', '')}"
         lines.append(block)
     if len(ranked) > top_n:
         lines.append(f"… +{len(ranked) - top_n} pick lain tidak ditampilkan (gunakan /swing untuk daftar lengkap).")
