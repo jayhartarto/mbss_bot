@@ -4263,17 +4263,38 @@ async def swing_command(update, context):
     for p in bow_active:
         fire = "🔥" * (4 - p["tier"])  # Tier 1 = 3 fire (best), Tier 3 = 1 fire
         age = p["age_days"]
-        age_label = f"NEW (Day {age}/5)" if age <= 1 else f"AGING (Day {age}/5) — ALIVE"
+        tier = p["tier"]
+        # Same 3-tier age label + swing horizon + drift as /bow and /rank
+        # (2026-10-10 fix) -- /bow was folded into /swing, keep them in sync.
+        if age <= 1:
+            age_label = "NEW (Day 1/5)"
+        elif age <= buy_on_weakness_engine.ALERT_MAX_AGE_DAYS:
+            age_label = f"AGING (Day {age}/5) — ALIVE"
+        else:
+            age_label = f"⏳ LEWAT WINDOW ENTRY (Day {age}) — tracking posisi existing, bukan rekomendasi entry baru"
         priority_tag = " ⭐ FF PRIORITY" if p.get("ff_priority") else ""
         tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
+
+        swing_range = buy_on_weakness_engine.TIER_SWING_RANGE[tier]
+        p25 = p.get("swing_horizon_p25", swing_range[0])
+        p75 = p.get("swing_horizon_p75", swing_range[2])
+        median_days = p.get("swing_horizon_median", swing_range[1])
+        drift_pct = p.get("price_drift_pct", 0.0)
+        drift_label = p.get("drift_label", "😌 Baru alert")
+        drift_zone = p.get("drift_zone", "NETRAL")
+        note = buy_on_weakness_engine.conditional_drift_note(tier, age, drift_zone)
+        note_line = f"\n{note}" if note else ""
+
         lines.append(
-            f"{fire} {p['ticker']} — Tier {p['tier']}{priority_tag}\n"
+            f"{fire} {p['ticker']} — Tier {tier}{priority_tag}\n"
             f"{age_label}\n"
             f"Entry: {p['entry_low']:,.0f} - {p['entry_high']:,.0f}\n"
             f"SL: {p['sl_price']:,.0f}\n"
             f"TP1: {p['tp1_price']:,.0f} (+{p['tp1_pct']:.2f}%){tp1_note}\n"
             f"TP2: {p['tp2_price_latest']:,.0f}\n"
-            f"Swing Length: ~{p['swing_length_days_typical']} hari."
+            f"Swing horizon: ~{p25:g}-{p75:g} hari (median {median_days:g})\n"
+            f"Pergerakan sejak entry: {drift_pct:+.1f}% — {drift_label}"
+            f"{note_line}"
         )
 
     lines.append(f"\n🔄 OVERSOLD BOUNCE v2 ({len(osb_active)})")

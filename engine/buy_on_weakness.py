@@ -138,9 +138,15 @@ TIER_SWING_DAYS = {1: 10, 2: 8, 3: 7}  # kept for backward compat; display now u
 ALERT_MAX_AGE_DAYS = 5  # entry-freshness label ONLY -- see docstring 2026-10-10 fix
 
 # SL/TP resolution tracking window -- was wrongly hard-capped at
-# ALERT_MAX_AGE_DAYS (5) before 2026-10-10; validated at 30d (near-plateau
-# of the win-rate-vs-window curve, see docstring).
-RESOLUTION_MAX_AGE_DAYS = 30
+# ALERT_MAX_AGE_DAYS (5) before 2026-10-10. 30d was the near-plateau of
+# the win-rate-vs-window curve (83.1%/87.6%), but user chose to shorten
+# this to Tier 1's own P75 days-to-TP (16d, see TIER_SWING_RANGE below) --
+# a deliberate, smaller trade-off (74.9%/80.0% at 16d, see LANE_STATS
+# comment in engine/capital_rank.py for the exact re-validated numbers)
+# in exchange for not tracking positions indefinitely past a reasonable
+# swing horizon. If this gets tuned again, LANE_STATS must be
+# re-validated AT THE SAME WINDOW -- the two are not independent.
+RESOLUTION_MAX_AGE_DAYS = 16
 
 RS_DISCRIMINATOR_DD100_GATE = -10.0  # only active once IHSG dd_100 is this deep or deeper
 RS_DISCRIMINATOR_FLOOR = 3.0         # rs_20d must be >= this (top ~2 quartiles) in that regime
@@ -159,16 +165,25 @@ DRIFT_NAIK_MIN = 1.0
 DRIFT_NAIK_KUAT_MIN = 3.0
 
 # Cells with n>=150 independent trigger episodes in the (tier, obs_day,
-# zone) grid -- from research/bow_dynamic_conditional_stats_2026_10_10.py.
-# obs_day = age_days - 1 (days elapsed since the trigger day itself).
+# zone) grid. Re-validated 2026-10-10 AT RESOLUTION_MAX_AGE_DAYS=16 (the
+# original research/bow_dynamic_conditional_stats_2026_10_10.py numbers
+# were computed at a 30d window -- shortening the window shrinks the
+# budget left to resolve, so these are NOT the same numbers; re-validate
+# again if RESOLUTION_MAX_AGE_DAYS changes). obs_day = age_days - 1.
 # DISPLAY-ONLY, see docstring -- never read by engine/capital_rank.py.
+# NOTE the (2,10,NAIK_KUAT) cell flipped to a WARNING at this shorter
+# window (win 51.0%, mean_ret -0.18%, n=194) -- chasing a pick that's
+# already up a lot AND has survived 10 days with only ~5 days of budget
+# left is now a coin-flip-or-worse, not a mild positive like it was at
+# the 30d window. Kept in the table deliberately (not dropped) so the
+# note still fires -- it's now informative as a caution, not a highlight.
 SOLID_CONDITIONAL_CELLS = {
-    (2, 2, "NETRAL"): {"win": 82.0, "wlb": 75.8},
-    (2, 3, "NETRAL"): {"win": 82.7, "wlb": 75.8},
-    (2, 4, "NAIK_KUAT"): {"win": 74.8, "wlb": 67.4},
-    (2, 5, "NAIK_KUAT"): {"win": 75.7, "wlb": 68.3},
-    (2, 7, "NAIK_KUAT"): {"win": 76.0, "wlb": 69.2},
-    (2, 10, "NAIK_KUAT"): {"win": 76.8, "wlb": 70.4},
+    (2, 2, "NETRAL"): {"win": 71.0, "wlb": 64.1},
+    (2, 3, "NETRAL"): {"win": 67.3, "wlb": 59.5},
+    (2, 4, "NAIK_KUAT"): {"win": 68.2, "wlb": 60.4},
+    (2, 5, "NAIK_KUAT"): {"win": 66.4, "wlb": 58.6},
+    (2, 7, "NAIK_KUAT"): {"win": 60.9, "wlb": 53.6},
+    (2, 10, "NAIK_KUAT"): {"win": 51.0, "wlb": 44.0},
 }
 # Generic rule-of-thumb window (obs_day range) + zones it applies to --
 # from the Part-2 finding (quiet survivors at day 5 resolve in median 4d
@@ -201,7 +216,8 @@ def conditional_drift_note(tier: int, age_days: int, zone_key: str) -> str | Non
     cell = SOLID_CONDITIONAL_CELLS.get((tier, obs_day, zone_key))
     if cell is not None:
         zone_short = {"NETRAL": "Netral", "NAIK_KUAT": "Naik jauh"}.get(zone_key, zone_key)
-        return f"📊 {zone_short} H{obs_day}: win≈{cell['win']:.0f}% (data spesifik titik ini)"
+        icon = "📊" if cell["win"] >= 60.0 else "⚠️"  # below 60% -> read as caution, not a neutral stat
+        return f"{icon} {zone_short} H{obs_day}: win≈{cell['win']:.0f}% (data spesifik titik ini)"
     lo, hi = GENERIC_NOTE_OBS_DAY_RANGE
     if lo <= obs_day <= hi and zone_key in GENERIC_NOTE_ZONES:
         return f"⏩ H{obs_day} tenang: histori TP cenderung lebih cepat dari estimasi awal."

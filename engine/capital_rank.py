@@ -44,17 +44,20 @@ LANE_STATS = {
     # SL/TP tracking wrongly hard-capped at ALERT_MAX_AGE_DAYS=5 -- most
     # trades never got the chance to reach their own validated median
     # time-to-TP (7-10 days per tier) before being force-marked EXPIRED.
-    # Re-validated at the corrected 30-day resolution window (near-plateau
-    # of the win-rate-vs-window curve; see engine/buy_on_weakness.py
-    # docstring and research/bow_dynamic_conditional_stats_2026_10_10.py).
+    # Re-validated AT engine.buy_on_weakness.RESOLUTION_MAX_AGE_DAYS (16
+    # trading days -- user's deliberate choice, Tier1's own P75
+    # days-to-TP, shortened from the 30d near-plateau value 83.1%/87.6%).
+    # These two numbers are NOT independent -- if RESOLUTION_MAX_AGE_DAYS
+    # changes again, re-run research/bow_dynamic_conditional_stats-style
+    # simulation AT THE NEW WINDOW and update both together.
     # Uniform across all 3 tiers by design -- see 2026-10-10 fairness
     # discussion: a precision-weighted per-tier score would bias ranking
     # toward whichever tier happens to have denser research data, so
     # /rank's SCORE always uses this single flat number regardless of
     # tier; any tier/condition-specific precision is DISPLAY-ONLY (see
     # buy_on_weakness.conditional_drift_note), never fed back here.
-    ("BOW", True): {"win": 87.6, "wlb": 81.2, "ret_per_day": 0.542, "label": "BOW +FF priority"},
-    ("BOW", False): {"win": 83.1, "wlb": 80.8, "ret_per_day": 0.401, "label": "BOW baseline"},
+    ("BOW", True): {"win": 80.0, "wlb": 72.8, "ret_per_day": 0.565, "label": "BOW +FF priority"},
+    ("BOW", False): {"win": 74.9, "wlb": 72.3, "ret_per_day": 0.429, "label": "BOW baseline"},
     ("OSB", True): {"win": 81.9, "wlb": 76.4, "ret_per_day": 0.859, "label": "OSB-v2 +FF priority"},
     ("OSB", False): {"win": 68.9, "wlb": 62.3, "ret_per_day": 0.208, "label": "OSB-v2 baseline"},
     ("VCP", None): {"win": 73.2, "wlb": 70.9, "ret_per_day": 0.009, "label": "VCP (no FF filter)"},
