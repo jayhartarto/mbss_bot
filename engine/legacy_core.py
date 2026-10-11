@@ -7975,6 +7975,7 @@ def build_app():
     # app.add_handler(CommandHandler("entrypagi", commands_scan.entry_pagi_manual_command))
     app.add_handler(CommandHandler("ffdaytrade", commands_scan.ff_daytrade_manual_command))
     app.add_handler(CommandHandler(["eodscan", "nightlyscan"], commands_scan.eodscan_command))
+    app.add_handler(CommandHandler("ffupdate", commands_scan.ffupdate_command))
     app.add_handler(CallbackQueryHandler(commands_scan.gptpick_callback, pattern="^gptpick:(3|5)$"))
     app.add_handler(CommandHandler("brokersum", commands_check.brokersum_upload_command))
     app.add_handler(CommandHandler("executiongate", commands_scan.executiongate_command))

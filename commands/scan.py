@@ -103,6 +103,49 @@ async def eodscan_command(update, context):
         await core.safe_reply(update.message, f"⚠️ EOD scan gagal: {str(e)[:250]}")
 
 
+async def ffupdate_command(update, context):
+    """
+    /ffupdate — MBSS v2 (2026-10-13). Update research/foreign_flow_2y.sqlite
+    LANGSUNG dari VPS lewat Zapi (finance:idx/foreign-flow), tanpa perlu
+    laptop/git-push. Lihat update_foreign_flow_via_zapi_2026_10_13.py
+    (project root) untuk detail lengkap + caveat retensi Zapi (~7 hari di
+    plan gratis -- jadi command ini untuk MENUTUP GAP KECIL/harian, bukan
+    backfill dalam). 1 hari = 5 panggilan Zapi (963 ticker / 200 per page).
+
+    Usage: /ffupdate (default cek 10 hari ke belakang), atau
+    /ffupdate <n> untuk custom jumlah hari ke belakang yang dicek.
+    """
+    max_days_back = 10
+    if context.args:
+        try:
+            max_days_back = int(context.args[0])
+            if max_days_back < 1:
+                raise ValueError
+        except ValueError:
+            await core.safe_reply(update.message, "⚠️ Format tidak valid. Contoh: /ffupdate 5")
+            return
+
+    await core.safe_reply(
+        update.message,
+        f"🌊 Update foreign-flow via Zapi, cek {max_days_back} hari ke belakang "
+        "(skip yang sudah tercatat)..."
+    )
+    try:
+        import update_foreign_flow_via_zapi_2026_10_13 as ff_zapi_updater
+        summary = await asyncio.to_thread(ff_zapi_updater.run_foreign_flow_zapi_update, max_days_back)
+        lines = [
+            f"✅ Selesai. ok={summary['n_ok']} empty={summary['n_empty']} error/skip={summary['n_error']} "
+            f"| {summary['rows_written']} baris ditulis.",
+        ]
+        if summary["dates_ok"]:
+            lines.append("Tanggal terupdate: " + ", ".join(summary["dates_ok"]))
+        if summary["dates_empty"]:
+            lines.append("Tanggal kosong (non-trading/di luar retensi Zapi): " + ", ".join(summary["dates_empty"]))
+        await core.safe_reply(update.message, "\n".join(lines))
+    except Exception as e:
+        await core.safe_reply(update.message, f"⚠️ Update foreign-flow gagal: {str(e)[:250]}")
+
+
 # ---------------------------------------------------------------------
 # /screendaytrade
 # ---------------------------------------------------------------------

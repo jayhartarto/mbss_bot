@@ -612,6 +612,72 @@ def fetch_zapi_foreign_flow(date_str: str = None, code: str = None, sort: str = 
         core.time.sleep(1.1)  # respect confirmed 1 req/sec limit -- sama pola fetch_zapi_orderbook/running_trades, penting utk loop backfill multi-hari
 
 
+def fetch_full_day_foreign_flow(date_str: str = None) -> dict | None:
+    """
+    MBSS v2 (2026-10-13): paginates fetch_zapi_foreign_flow() across the
+    FULL exchange universe for one trading day. Confirmed live 2026-10-11
+    (test_zapi_foreign_flow_manual/shape_2026_10_* at project root) and
+    against Zapi's own published docs (zapi.ink/api/finance/idx, "Foreign
+    Flow" endpoint): `length` is HARD-CAPPED at 200 server-side (not our
+    own default), and the exchange has ~963 listed tickers -- so ONE
+    trading day costs 5 Zapi quota calls (963/200, pages at start=0/200/
+    400/600/800), not 1 as the original `fetch_zapi_foreign_flow` docstring
+    assumed before it had ever been called live.
+
+    Returns {"date": "YYYY-MM-DD", "rows": [...]} on full success (every
+    page fetched), or None if ANY page failed (quota exhausted mid-
+    pagination, rate-limited, etc.) -- deliberately all-or-nothing per
+    day so a partial page never gets written as if it were a complete
+    day's data (see update_foreign_flow_via_zapi_2026_10_13.py, the
+    caller that writes this into foreign_flow_2y.sqlite).
+
+    Each row dict: {"ticker": code, "foreign_buy": foreignBuyShares,
+    "foreign_sell": foreignSellShares, "foreign_net": netForeignShares}
+    -- unit is SHARES (confirmed via the API's own "unit": "shares"
+    field), same convention already used throughout engine/
+    buy_on_weakness.py's foreign-flow ratios.
+    """
+    page = fetch_zapi_foreign_flow(date_str=date_str, start=0, length=200)
+    if page is None:
+        return None
+    outer = page.get("data") if isinstance(page, dict) else None
+    if not isinstance(outer, dict):
+        print(f"⚠️ fetch_full_day_foreign_flow: unexpected response shape (date={date_str}): {type(outer)}")
+        return None
+
+    total = outer.get("total", 0)
+    date_resolved = str(outer.get("date", ""))[:10]
+    rows = []
+
+    def _extract(outer_dict):
+        for r in outer_dict.get("data", []):
+            code = r.get("code")
+            if not code:
+                continue
+            rows.append({
+                "ticker": code,
+                "foreign_buy": r.get("foreignBuyShares"),
+                "foreign_sell": r.get("foreignSellShares"),
+                "foreign_net": r.get("netForeignShares"),
+            })
+
+    _extract(outer)
+    start = 200
+    while start < total:
+        page_n = fetch_zapi_foreign_flow(date_str=date_str, start=start, length=200)
+        if page_n is None:
+            print(f"⚠️ fetch_full_day_foreign_flow: page at start={start} failed (date={date_str}), "
+                  f"got {len(rows)}/{total} rows -- discarding partial day.")
+            return None
+        outer_n = page_n.get("data") if isinstance(page_n, dict) else None
+        if not isinstance(outer_n, dict):
+            return None
+        _extract(outer_n)
+        start += 200
+
+    return {"date": date_resolved, "rows": rows}
+
+
 def fetch_zapi_orderbook(ticker: str) -> dict | None:
     """
     MBSS v2 (user request, real find — endpoint order book ASLI dari Zapi,
