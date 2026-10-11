@@ -21,7 +21,7 @@ import traceback
 from flask import Flask, request
 from telegram import Update
 
-from bot import build_app, TELEGRAM_BOT_TOKEN
+from engine.legacy_core import build_app, TELEGRAM_BOT_TOKEN
 
 flask_app = Flask(__name__)
 

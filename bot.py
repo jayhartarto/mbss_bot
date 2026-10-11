@@ -68,28 +68,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument(
         "--scanalert", dest="scanalert", action="store_true",
         help="One-shot intraday breaking-alert scan (Alert A/B), then exit. NOTE (corrected "
-             "2026-08-27): in the actual GCP production deployment this is NOT invoked by an "
-             "external cron -- engine/legacy_core.py's build_app() already runs it automatically "
-             "every 5 minutes via python-telegram-bot's in-process JobQueue. This CLI flag exists "
-             "for manual/debug runs or alternate deployments without JobQueue.",
+             "2026-10-11): its JobQueue auto-registration in engine/legacy_core.py's build_app() "
+             "was intentionally commented out 2026-09-07 (superseded by ENTRY PAGI/REBOUND LIVE) -- "
+             "it no longer runs automatically in production. This CLI flag still calls the "
+             "underlying scan logic directly for manual/debug runs.",
     )
     mode.add_argument(
         "--scanalert-rebound", dest="scanalert_rebound", action="store_true",
         help="One-shot gap-open REBOUND tier scan (MBSS v2, user request 2026-08-27), then exit. "
-             "SEPARATE from --scanalert (own state file, own cadence). Like --scanalert above, the "
-             "GCP production deployment runs this automatically via JobQueue (every 1 minute, "
-             "no-ops outside 09:00-09:10 WIB internally) -- this CLI flag is for manual/debug runs "
-             "or alternate deployments without JobQueue.",
+             "SEPARATE from --scanalert (own state file, own cadence). NOTE (corrected 2026-10-11): "
+             "like --scanalert above, its JobQueue auto-registration was intentionally commented out "
+             "2026-09-07 -- it no longer runs automatically in production. This CLI flag still calls "
+             "the underlying scan logic directly for manual/debug runs.",
     )
     mode.add_argument(
         "--conviction-sweep", dest="conviction_sweep", action="store_true",
         help="One-shot conviction-sweep intraday scan (MBSS v2, user request 2026-08-27) -- monitors "
              "the union of today's FCM/PRE-CROSS/CONTINUATION/VALIDATION/HC-gap-watch/BSJP-watch "
              "lists for building momentum, then exits. SEPARATE from --scanalert (own state file, "
-             "own cadence). Like --scanalert above, the GCP production deployment runs this "
-             "automatically via JobQueue (every 15 minutes, no-ops outside 10:00-15:55 WIB "
-             "internally) -- this CLI flag is for manual/debug runs or alternate deployments "
-             "without JobQueue.",
+             "own cadence). NOTE (corrected 2026-10-11): like --scanalert above, its JobQueue "
+             "auto-registration was intentionally commented out 2026-09-07 -- it no longer runs "
+             "automatically in production. This CLI flag still calls the underlying scan logic "
+             "directly for manual/debug runs.",
     )
     return parser.parse_args(argv)
 

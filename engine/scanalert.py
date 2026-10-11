@@ -462,21 +462,11 @@ def _exclude_erratic_volatility_profile(tickers: list[str]) -> list[str]:
 
 
 # ── REBOUND (gap-open 4-10%, tier 0.5/1.0/1.5/2.0%) ─────────────────────────
-
-def _load_rebound_state() -> dict:
-    if not os.path.exists(STATE_FILE_REBOUND):
-        return {}
-    try:
-        with open(STATE_FILE_REBOUND) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_rebound_state(state: dict):
-    with open(STATE_FILE_REBOUND, "w") as f:
-        json.dump(state, f, indent=2)
-
+# _load_rebound_state/_save_rebound_state defined once, further down (near
+# _rebound_session_mask) -- audit fix 2026-10-11: this used to be a second,
+# byte-identical copy, permanently shadowed by the later definition (Python
+# keeps only the last binding) and silently dead -- any edit made here had
+# zero effect on live behavior.
 
 def _ensure_rebound_daily_reset(state: dict) -> dict:
     today = _today_str()
