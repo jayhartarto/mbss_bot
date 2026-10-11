@@ -87,9 +87,11 @@ LANE_STATS = {
 # first -- this is a structural limitation, not a sample-size one that
 # more data alone would resolve.
 
-DEFAULT_W_RETURN = 0.35
-DEFAULT_W_WIN = 0.35
-DEFAULT_W_TPGAIN = 0.30
+DEFAULT_W_RETURN = 0.40
+DEFAULT_W_WIN = 0.45
+DEFAULT_W_TPGAIN = 0.15  # user request 2026-10-11: TP gain is a less certain factor
+                         # (target band itself moves, no hard trigger like win/SL) --
+                         # de-emphasized vs win-rate/return, was 0.30
 NEUTRAL_TPGAIN_SCORE = 50.0  # assigned when tp_gain_pct can't be computed for a lane yet
 
 

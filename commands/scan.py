@@ -4503,11 +4503,12 @@ async def rank_command(update, context):
     sendiri, lihat docstring engine/capital_rank.py untuk alasan lengkap
     (tanpa SL keras, exit ladder-dependent, mekanisme overnight-gap beda).
 
-    Usage: /rank (bobot default 35% return/hari + 35% win-rate + 30% sisa
-    jarak ke TP), /rank <return> <winrate> untuk kustom 2 bobot (sisa jarak
-    ke TP tetap di bobot default), atau /rank <return> <winrate> <tpgain>
-    untuk kustom 3 bobot sekaligus. Angka apa saja, dinormalisasi otomatis
-    supaya totalnya 100%.
+    Usage: /rank (bobot default 40% return/hari + 45% win-rate + 15% sisa
+    jarak ke TP -- TP gain diturunkan 2026-10-11, user: bukan hal yang pasti,
+    band target-nya sendiri bergerak, beda dari win/SL yang hard trigger),
+    /rank <return> <winrate> untuk kustom 2 bobot (sisa jarak ke TP tetap di
+    bobot default), atau /rank <return> <winrate> <tpgain> untuk kustom 3
+    bobot sekaligus. Angka apa saja, dinormalisasi otomatis supaya totalnya 100%.
     """
     w_return = capital_rank_engine.DEFAULT_W_RETURN
     w_win = capital_rank_engine.DEFAULT_W_WIN
