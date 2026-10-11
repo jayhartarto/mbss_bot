@@ -68,6 +68,7 @@ import engine.buy_on_weakness as buy_on_weakness_engine
 import engine.oversold_bounce_v2 as oversold_bounce_v2_engine
 import engine.vcp_pillar as vcp_pillar_engine
 import engine.macd_confirm_pillar as macd_confirm_pillar_engine
+import engine.winrate_monitor as winrate_monitor_engine
 import engine.bsjp2 as bsjp2_engine
 
 
@@ -584,6 +585,24 @@ async def run_nightly_full_scan(context):
             print(f"🌀 MACD-confirm: {len(macd_confirm_candidates)} kandidat baru hari ini.")
         except Exception as e:
             print(f"⚠️ Gagal menjalankan MACD-confirm: {e}")
+
+        # Win-rate drift monitor (2026-10-11, user request) -- lightweight
+        # REALIZED-vs-ASSUMED check from each lane's own resolved pick
+        # history (BOW/VCP/MACD-confirm/OSB-v2), no bulk OHLCV needed --
+        # VPS-safe, unlike the laptop-only CSV-based backtest re-runs that
+        # found BOW's and MACD-confirm's numbers stale this session (see
+        # memory project_bow_rank_scoring_redesign_2026_10_10.md). Alert-
+        # only, never auto-corrects LANE_STATS/WIN_RATE_TABLE -- see
+        # engine/winrate_monitor.py docstring for threshold rationale.
+        try:
+            winrate_warnings = winrate_monitor_engine.check_all_lanes()
+            if winrate_warnings:
+                await context.bot.send_message(
+                    chat_id=core.TELEGRAM_CHAT_ID,
+                    text=winrate_monitor_engine.build_alert_message(winrate_warnings),
+                )
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan winrate drift monitor: {e}")
 
         # Momentum score redesign 2026-09-27/28 -- HARUS di sini, SETELAH
         # keempat pilar di atas selesai (lihat docstring apply_momentum_
