@@ -139,6 +139,54 @@ def _bow_tp_gain_pct(pick: dict) -> float | None:
     return (tp2 - current_price) / current_price * 100
 
 
+def _vcp_stats_and_adjustment(pick: dict) -> dict:
+    """Day-indexed win override for VCP's two validated zones (2026-10-11,
+    research/vcp_drift_since_entry_2026_10_11.py) -- NAIK (price continued
+    up since entry, confirms the breakout) and DISKON (price fell,
+    breakout failing, degrades the longer it persists) BOTH have usable
+    per-obs_day tables, so no separate flat bonus is layered on top of
+    the override (unlike BOW's NAIK, which only had a flat bonus because
+    no day-indexed table existed for it) -- would double-count the effect.
+    No hide needed -- see engine/vcp_pillar.py docstring, nothing here is
+    thin/catastrophic enough to warrant dropping, unlike BOW's Tier3."""
+    import engine.vcp_pillar as vcp_engine
+
+    stats = dict(LANE_STATS[("VCP", None)])
+    zone = pick.get("drift_zone", "NETRAL")
+    obs_day = pick.get("age_days", 1) - 1
+    if zone == "NAIK":
+        win = vcp_engine.VCP_NAIK_TP1_RATE_BY_OBS_DAY.get(obs_day)
+        if win is not None:
+            stats["win"], stats["wlb"] = win, max(0.0, win - 8.0)
+    elif zone == "DISKON":
+        win = vcp_engine.VCP_DISKON_TP1_RATE_BY_OBS_DAY.get(obs_day)
+        if win is not None:
+            stats["win"], stats["wlb"] = win, max(0.0, win - 10.0)
+    return stats
+
+
+def _vcp_tp_gain_pct(pick: dict) -> float | None:
+    """NAIK-zone picks target VCP_NAIK_TP_TARGET_PCT (5.5%, the validated
+    economic optimum for that subpopulation -- see engine/vcp_pillar.py)
+    instead of the flat TP1(+2.5%) everyone else uses as the reference
+    target for this dimension."""
+    import engine.vcp_pillar as vcp_engine
+
+    drift = pick.get("price_drift_pct")
+    entry_ref = pick.get("entry_ref_price")
+    if drift is None or not entry_ref:
+        return None
+    current_price = entry_ref * (1 + drift / 100)
+    if current_price <= 0:
+        return None
+    zone = pick.get("drift_zone", "NETRAL")
+    if zone == "NAIK":
+        target = entry_ref * (1 + vcp_engine.VCP_NAIK_TP_TARGET_PCT / 100)
+    else:
+        target = pick.get("tp1_price") or entry_ref * (1 + vcp_engine.TP1_PCT / 100)
+    return (target - current_price) / current_price * 100
+
+
 def _macd_stats_and_tp_gain(pick: dict) -> tuple[dict, float | None]:
     """Per-pick (age_day, lane, tag)-specific win-rate + TP-gain, from
     MACD-confirm's OWN already-validated functions (2026-09-23 research --
@@ -194,9 +242,9 @@ def _gather_candidates():
     for p in vcp_engine.load_vcp_picks():
         if p.get("status") != "ALIVE":
             continue
-        stats = LANE_STATS[("VCP", None)]
         out.append({"lane_key": "VCP", "ff_priority": None, "pick": p,
-                     "stats": dict(stats), "score_bonus": 0.0, "tp_gain_pct": None})
+                     "stats": _vcp_stats_and_adjustment(p), "score_bonus": 0.0,
+                     "tp_gain_pct": _vcp_tp_gain_pct(p)})
 
     # Same filter as swing_command: FADING hidden (not an entry today), and
     # Quality(D2) VERY STRONG hidden (confirmed-bad forward bucket, see
@@ -306,8 +354,8 @@ def format_rank_message(ranked: list[dict], w_return: float = DEFAULT_W_RETURN, 
         lines.append(f"… +{len(ranked) - top_n} pick lain tidak ditampilkan (gunakan /swing untuk daftar lengkap).")
     lines.append(
         "ℹ️ Score = return/hari + win-rate (Wilson LB) + sisa jarak ke TP (ketiganya dinormalisasi 0-100 "
-        "ANTAR pick yang aktif hari ini), DITAMBAH penyesuaian drift BOW (bonus kalau 'sudah naik' 1-5% "
-        "wajar, penalti kalau 'naik jauh' >=5% -- lihat baris Pergerakan). BOW Tier3 yang 'naik jauh' "
-        "disembunyikan sepenuhnya (terbukti konsisten buruk), bukan cuma dipenalti."
+        "ANTAR pick yang aktif hari ini), SUDAH memperhitungkan pergerakan sejak entry (lihat baris "
+        "Pergerakan) -- arahnya KEBALIKAN per lane: BOW 'naik jauh' (≥5%) = chasing, dipenalti (Tier3 "
+        "malah disembunyikan total); VCP 'naik' (1-5%) = breakout terkonfirmasi, dibooster, SL tetap sama."
     )
     return "\n\n".join(lines)

@@ -4334,13 +4334,23 @@ async def swing_command(update, context):
         if p.get("tp3_touched"):
             bonus.append("TP3")
         bonus_note = f" ✅ {'+'.join(bonus)} juga tersentuh (upside bonus)" if bonus else ""
+        drift_pct = p.get("price_drift_pct", 0.0)
+        drift_label = p.get("drift_label", "😌 Baru alert")
+        drift_zone = p.get("drift_zone", "NETRAL")
+        naik_note = (
+            f"\n💡 Konfirmasi lanjut terdeteksi — pertimbangkan target diperpanjang ke "
+            f"~{vcp_pillar_engine.VCP_NAIK_TP_TARGET_PCT:.1f}% (bukan TP1/TP2 baku) berdasarkan riset."
+            if drift_zone == "NAIK" else ""
+        )
         lines.append(
             f"{p['ticker']} (entry ref {p['entry_ref_price']:,.0f})\n"
             f"{age_label}\n"
             f"SL: {p['sl_price']:,.0f} (-{vcp_pillar_engine.SL_PCT:.0f}%)\n"
             f"TP1: {p['tp1_price']:,.0f} (+{vcp_pillar_engine.TP1_PCT:.1f}%, ~{p['tp1_touch_rate']:.0f}% historical touch-rate) — resolusi utama\n"
             f"TP2: {p['tp2_price']:,.0f} (+{vcp_pillar_engine.TP2_PCT:.1f}%, ~{p['tp2_touch_rate']:.0f}% touch-rate)\n"
-            f"TP3: {p['tp3_price']:,.0f} (+{vcp_pillar_engine.TP3_PCT:.1f}%, ~{p['tp3_touch_rate']:.0f}% touch-rate){bonus_note}"
+            f"TP3: {p['tp3_price']:,.0f} (+{vcp_pillar_engine.TP3_PCT:.1f}%, ~{p['tp3_touch_rate']:.0f}% touch-rate){bonus_note}\n"
+            f"Pergerakan sejak entry: {drift_pct:+.1f}% — {drift_label}"
+            f"{naik_note}"
         )
 
     lines.append(f"\n🌀 MACD-CONFIRM ({len(macd_confirm_active)})")

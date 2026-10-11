@@ -88,6 +88,55 @@ TP3_PCT, TP3_TOUCH_RATE = 7.0, 47.7
 SL_PCT = 10.0
 ALERT_MAX_AGE_DAYS = 12
 
+# Price-drift-since-trigger tracking, added 2026-10-11 (research/
+# vcp_drift_since_entry_2026_10_11.py + the TP2/TP3-extension follow-up,
+# memory project_bow_rank_scoring_redesign_2026_10_10.md). Same 5-zone
+# boundaries validated for BOW (see engine/buy_on_weakness.py) were
+# tested here too and held up WITHOUT needing different thresholds --
+# but the MEANING is OPPOSITE: VCP is a breakout-continuation strategy,
+# so price continuing UP since entry confirms the breakout (NAIK =
+# booster), while price falling (DISKON) means the breakout is failing,
+# and gets monotonically WORSE the longer it persists (TP1-rate collapses
+# 37%->5% from obs_day 2 to 10). NAIK_KUAT essentially never occurs
+# unresolved (TP1 is only +2.5%, median time-to-TP1 is 1 day -- the
+# episode almost always exits before drift could reach 5%+), so unlike
+# BOW there's no hide/penalty logic needed for that zone here.
+DRIFT_DISKON_MAX = -3.0
+DRIFT_DISKON_RINGAN_MAX = -1.0
+DRIFT_NAIK_MIN = 1.0
+DRIFT_NAIK_KUAT_MIN = 5.0
+
+# NAIK-zone survivors: TP1-rate stays elevated at every obs_day (69-86%,
+# vs the overall population's 70.0%) and TP2-primary/TP3-primary exits
+# beat TP1-primary on mean_ret -- a finer sweep (5.0-7.0%) found the
+# economic optimum is ~5.5% specifically (pooled +1.70% vs TP2's flat 5%
+# +1.62%, TP3's flat 7% +1.53%), roughly flat across obs_day 2-5 (no
+# clean "shrinks with less time left" pattern at usable sample size).
+VCP_NAIK_TP_TARGET_PCT = 5.5
+VCP_NAIK_TP1_RATE_BY_OBS_DAY = {2: 82.1, 3: 82.8, 4: 81.7, 5: 85.7, 7: 69.7, 10: 57.1}
+
+# DISKON-zone survivors: TP1-rate by obs_day, monotonically degrading --
+# used as a day-scaled PENALTY (not a hide -- no cell is thin/
+# catastrophic enough to warrant that, per the research verdict).
+VCP_DISKON_TP1_RATE_BY_OBS_DAY = {2: 37.3, 3: 36.1, 4: 29.5, 5: 25.0, 7: 11.4, 10: 5.3}
+
+
+def classify_drift_zone(drift_pct: float) -> tuple[str, str]:
+    """Returns (zone_key, short_display_label) -- same boundaries as
+    buy_on_weakness.classify_drift_zone, duplicated locally rather than
+    cross-imported since the two pillar modules are siblings, not meant
+    to depend on each other, and the MEANING of each zone is opposite
+    here (see module-level comment above)."""
+    if drift_pct <= DRIFT_DISKON_MAX:
+        return "DISKON", "📉 Diskon (breakout melemah)"
+    if drift_pct <= DRIFT_DISKON_RINGAN_MAX:
+        return "DISKON_RINGAN", "🟡 Diskon ringan"
+    if drift_pct < DRIFT_NAIK_MIN:
+        return "NETRAL", "😌 Netral"
+    if drift_pct < DRIFT_NAIK_KUAT_MIN:
+        return "NAIK", "📈 Konfirmasi lanjut (booster)"
+    return "NAIK_KUAT", "🚀 Naik jauh (jarang terjadi di VCP)"
+
 
 # ---------------------------------------------------------------------------
 # Feature computation — single ticker, TODAY's row only.
@@ -217,6 +266,9 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, rs20_ihsg: float | Non
         "tp1_price": tp1_price, "tp1_touch_rate": TP1_TOUCH_RATE,
         "tp2_price": tp2_price, "tp2_touch_rate": TP2_TOUCH_RATE,
         "tp3_price": tp3_price, "tp3_touch_rate": TP3_TOUCH_RATE,
+        "price_drift_pct": 0.0,
+        "drift_zone": "NETRAL",
+        "drift_label": "😌 Baru alert",
         "resolved_date": None,
         "resolved_ret_pct": None,
     }
@@ -308,6 +360,12 @@ def _resolve_active_pick(pick: dict) -> dict:
             pick["tp2_touched"] = True
         if today_high >= pick["tp3_price"]:
             pick["tp3_touched"] = True
+        today_close = float(df["Close"].iloc[-1])
+        drift_pct = (today_close - entry_ref) / entry_ref * 100
+        zone_key, zone_label = classify_drift_zone(drift_pct)
+        pick["price_drift_pct"] = round(drift_pct, 2)
+        pick["drift_zone"] = zone_key
+        pick["drift_label"] = zone_label
         pick["age_days"] = pick.get("age_days", 1) + 1
         if pick["age_days"] > ALERT_MAX_AGE_DAYS:
             pick["status"] = "EXPIRED"
