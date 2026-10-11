@@ -151,6 +151,54 @@ RESOLUTION_MAX_AGE_DAYS = 16
 RS_DISCRIMINATOR_DD100_GATE = -10.0  # only active once IHSG dd_100 is this deep or deeper
 RS_DISCRIMINATOR_FLOOR = 3.0         # rs_20d must be >= this (top ~2 quartiles) in that regime
 
+# PATH-DEPENDENCE findings, validated 2026-10-13. The point-in-time
+# drift_zone classification above only looks at TODAY's drift -- it
+# can't tell "calmly sat here the whole time" apart from "rallied/dipped
+# hard and came back here," even though those have very different
+# forward outcomes (user's own observation on real live picks --
+# OKAS/CSIS/BEST/SMGA-style round-trips). Tracked via two new running
+# fields on each pick: max_drift_pct / min_drift_pct (peak/trough drift
+# reached since entry) and a running mean_vol_ratio (volume/its own 20d
+# average, averaged over every day held so far).
+#
+# 1. RALLIED THEN FADED (currently NETRAL, but peaked in NAIK territory
+#    and gave most of it back): n=686, win 58.3%/wlb 54.6% -- vs 76.1%/
+#    73.9% for a NETRAL pick that never rallied that far. An 18pp gap,
+#    consistent across obs_day 2-10. This is NOT the same population as
+#    a currently-NAIK pick that's merely off its own peak (see #3) --
+#    this one has fully round-tripped back to netral.
+RALLIED_THEN_FADED_MIN_PEAK = 1.0      # must have reached at least the NAIK boundary at some point
+RALLIED_THEN_FADED_MIN_GIVEBACK = 2.0  # and given back >=2pp from that peak to sit NETRAL now
+RALLIED_THEN_FADED_WIN, RALLIED_THEN_FADED_WLB = 58.3, 54.6
+
+# 2. CALM + QUIET VOLUME (currently NETRAL, never rallied/dipped hard,
+#    AND below-median average volume-ratio the whole time held) is
+#    BETTER than the already-good "calm" baseline, not just neutral:
+#    n=735, win 80.1%/wlb 77.1% vs 72.5%/69.2% for calm-but-noisy
+#    volume, and the gap widens further at the extremes (very-high
+#    volume calm picks drop to 66.3% win, SL-rate more than doubles).
+#    Deep-dip-then-recovered volume/wick conditioning was ALSO tested
+#    (does a big-volume or weak-close dip predict worse forward outcome
+#    than a quiet/wicked one) but n collapsed to 2-6 once split that
+#    finely -- genuinely inconclusive, deliberately NOT wired below.
+CALM_QUIET_VOL_RATIO_MAX = 0.46   # median split of the never-rallied/dipped population
+CALM_QUIET_MAX_DRIFT = 1.0        # "never rallied" bound, matches RALLIED_THEN_FADED_MIN_PEAK
+CALM_QUIET_MIN_DRIFT = -5.0       # "never deep-dipped" bound (excludes the inconclusive deep-dip cases)
+CALM_QUIET_WIN, CALM_QUIET_WLB = 80.1, 77.1
+
+# 3. FADING WITHIN NAIK, LATE (currently still in NAIK, 1-5% drift, but
+#    off its own peak by >=2pp AND this is happening at obs_day>=8): a
+#    real but MUCH milder effect than #1 -- mean_ret doesn't degrade
+#    (sometimes even improves, more room left to the moving TP target
+#    than a pick still sitting at its own peak), but win% does, and only
+#    clearly so once obs_day>=8 (pooled day 8-10: n=302, win 55.3%/
+#    wlb 49.7% vs ~71-77% for at-peak/still-climbing NAIK at the same
+#    days). Earlier obs_days (<=7) showed no clean degradation -- don't
+#    apply this before day 8.
+FADING_NAIK_LATE_OBS_DAY_MIN = 8
+FADING_NAIK_MIN_GIVEBACK = 2.0
+FADING_NAIK_LATE_WIN, FADING_NAIK_LATE_WLB = 55.3, 49.7
+
 # Days-to-TP distribution (P25/median/P75), validated 2026-10-10 on n=126
 # (Tier1) / 446 (Tier2) / 350 (Tier3) resolved TP trades at the 40d window
 # -- replaces the single-point TIER_SWING_DAYS estimate for display.
@@ -250,6 +298,42 @@ def should_hide_from_rank(tier: int, zone_key: str) -> bool:
     return tier == 3 and zone_key == "NAIK_KUAT" and TIER3_NAIK_KUAT_HIDE
 
 
+def classify_path_condition(pick: dict) -> dict | None:
+    """Path-dependence override (2026-10-13, see constants above) --
+    checks whether this pick's PEAK/TROUGH drift since entry (not just
+    today's point-in-time zone) puts it in one of three validated
+    conditions. Returns {"key", "win", "wlb", "label"} or None if no
+    condition applies (the common case -- most picks are just plain
+    NETRAL/DISKON/NAIK/DISKON_RINGAN with no special path history).
+    Checked BEFORE the zone-level NAIK_KUAT/NAIK overrides in
+    engine/capital_rank.py's _bow_stats_and_adjustment -- these three
+    conditions take priority since they're based on more specific,
+    validated populations than the plain point-in-time zone buckets."""
+    zone = pick.get("drift_zone", "NETRAL")
+    drift = pick.get("price_drift_pct", 0.0)
+    max_drift = pick.get("max_drift_pct", 0.0)
+    min_drift = pick.get("min_drift_pct", 0.0)
+    age_days = pick.get("age_days", 1)
+    obs_day = age_days - 1
+
+    if zone == "NETRAL":
+        if max_drift >= RALLIED_THEN_FADED_MIN_PEAK and (max_drift - drift) >= RALLIED_THEN_FADED_MIN_GIVEBACK:
+            return {"key": "rallied_then_faded", "win": RALLIED_THEN_FADED_WIN, "wlb": RALLIED_THEN_FADED_WLB,
+                    "label": f"⚠️ Sempat naik +{max_drift:.1f}%, sudah turun kembali ke netral"}
+        if max_drift < CALM_QUIET_MAX_DRIFT and min_drift > CALM_QUIET_MIN_DRIFT:
+            vr_days = pick.get("vol_ratio_days", 0)
+            if vr_days > 0:
+                mean_vol = pick.get("vol_ratio_sum", 0.0) / vr_days
+                if mean_vol <= CALM_QUIET_VOL_RATIO_MAX:
+                    return {"key": "calm_quiet", "win": CALM_QUIET_WIN, "wlb": CALM_QUIET_WLB,
+                            "label": "✨ Tenang & volume sepi sejak entry -- sinyal paling sehat yang tervalidasi"}
+    elif zone == "NAIK":
+        if obs_day >= FADING_NAIK_LATE_OBS_DAY_MIN and (max_drift - drift) >= FADING_NAIK_MIN_GIVEBACK:
+            return {"key": "fading_naik_late", "win": FADING_NAIK_LATE_WIN, "wlb": FADING_NAIK_LATE_WLB,
+                    "label": f"⚠️ Sudah {obs_day} hari, turun dari puncak +{max_drift:.1f}% -- momentum melemah"}
+    return None
+
+
 def conditional_drift_note(tier: int, age_days: int, zone_key: str) -> str | None:
     """Short display-only annotation for the pick's current drift
     condition. Returns None when nothing applicable -- callers should
@@ -340,6 +424,7 @@ def _compute_latest_features(df: pd.DataFrame) -> dict | None:
         "sma100": float(sma100.iloc[-1]) if not pd.isna(sma100.iloc[-1]) else None,
         "pctb": float(pctb.iloc[-1]) if not pd.isna(pctb.iloc[-1]) else None,
         "bb_upper": float(bb_upper.iloc[-1]) if not pd.isna(bb_upper.iloc[-1]) else None,
+        "vol_ratio": float(vol_ratio.iloc[-1]) if not pd.isna(vol_ratio.iloc[-1]) else None,
         "atr_pct_20d": float(atr_pct_20d.iloc[-1]) if not pd.isna(atr_pct_20d.iloc[-1]) else None,
         "cmf_20": float(cmf_20.iloc[-1]) if not pd.isna(cmf_20.iloc[-1]) else None,
         "obv_bearish_div": bool(obv_bearish_div.iloc[-1]),
@@ -499,6 +584,10 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, rs20_ihsg: float | Non
         "price_drift_pct": 0.0,
         "drift_zone": "NETRAL",
         "drift_label": "😌 Baru alert",
+        "max_drift_pct": 0.0,
+        "min_drift_pct": 0.0,
+        "vol_ratio_sum": 0.0,
+        "vol_ratio_days": 0,
         "ff_net_ratio_z60": ff_net_ratio_z60,
         "ff_priority": ff_priority,
         "resolved_date": None,
@@ -600,6 +689,17 @@ def _resolve_active_pick(pick: dict) -> dict:
         pick["price_drift_pct"] = round(drift_pct, 2)
         pick["drift_zone"] = zone_key
         pick["drift_label"] = zone_label
+        # Path-dependence tracking (2026-10-13, see constants above) --
+        # running peak/trough drift and a running mean volume-ratio, so
+        # classify_path_condition() can tell "calmly sat here the whole
+        # time" apart from "rallied/dipped hard and came back here,"
+        # which the point-in-time drift_zone above can't see on its own.
+        pick["max_drift_pct"] = round(max(pick.get("max_drift_pct", 0.0), drift_pct), 2)
+        pick["min_drift_pct"] = round(min(pick.get("min_drift_pct", 0.0), drift_pct), 2)
+        vr_today = feats.get("vol_ratio")
+        if vr_today is not None:
+            pick["vol_ratio_sum"] = pick.get("vol_ratio_sum", 0.0) + vr_today
+            pick["vol_ratio_days"] = pick.get("vol_ratio_days", 0) + 1
         # RESOLUTION_MAX_AGE_DAYS (not ALERT_MAX_AGE_DAYS) gates SL/TP
         # tracking -- ALERT_MAX_AGE_DAYS only controls the NEW/AGING
         # display label (see docstring 2026-10-10 fix).

@@ -4178,7 +4178,8 @@ async def buy_on_weakness_command(update, context):
         drift_pct = p.get("price_drift_pct", 0.0)
         drift_label = p.get("drift_label", "😌 Baru alert")
         drift_zone = p.get("drift_zone", "NETRAL")
-        note = buy_on_weakness_engine.conditional_drift_note(tier, age, drift_zone)
+        path_cond = buy_on_weakness_engine.classify_path_condition(p)
+        note = path_cond["label"] if path_cond else buy_on_weakness_engine.conditional_drift_note(tier, age, drift_zone)
         note_line = f"\n{note}" if note else ""
 
         lines.append(
@@ -4331,7 +4332,8 @@ async def swing_command(update, context):
         drift_pct = p.get("price_drift_pct", 0.0)
         drift_label = p.get("drift_label", "😌 Baru alert")
         drift_zone = p.get("drift_zone", "NETRAL")
-        note = buy_on_weakness_engine.conditional_drift_note(tier, age, drift_zone)
+        path_cond = buy_on_weakness_engine.classify_path_condition(p)
+        note = path_cond["label"] if path_cond else buy_on_weakness_engine.conditional_drift_note(tier, age, drift_zone)
         note_line = f"\n{note}" if note else ""
 
         lines.append(
@@ -4405,8 +4407,10 @@ async def swing_command(update, context):
         tag_icon = macd_confirm_pillar_engine.TAG_ICONS.get(tag, "")
         age_label = macd_confirm_pillar_engine.format_age_label(p)
         ret_note = f" ({p['ret_so_far_pct']:+.2f}% vs entry ref)" if p.get("ret_so_far_pct") is not None else ""
-        win_rate = macd_confirm_pillar_engine.win_rate_of(p)
+        fade_cond = macd_confirm_pillar_engine.classify_fade_from_peak(p)
+        win_rate = fade_cond["win"] if fade_cond else macd_confirm_pillar_engine.win_rate_of(p)
         win_rate_line = f"Win Rate: ~{win_rate:.0f}%\n" if win_rate is not None else ""
+        fade_note = f"\n{fade_cond['label']}" if fade_cond else ""
         upgrade = macd_confirm_pillar_engine.next_tier_price(p)
         upgrade_line = f"Upgrade to {upgrade[0]}: {upgrade[1]:,.0f}\n" if upgrade else ""
         entry_ref = p["entry_ref_price"]
@@ -4457,6 +4461,7 @@ async def swing_command(update, context):
             f"Horizon: {macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS} hari"
             f"{chase_note}"
             f"{hard_sl_note}"
+            f"{fade_note}"
         )
 
     lines.append(

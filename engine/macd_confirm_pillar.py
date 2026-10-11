@@ -443,6 +443,7 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame | None = None) -> dict 
         "sl_price": scanalert_engine._idx_round_tick_floor(entry_ref * (1 - SL_PCT / 100)),
         "tag": "VALID" if 1 in TAG_THRESHOLDS else "FADING",  # placeholder, resolved tomorrow onward
         "ret_so_far_pct": None,
+        "max_ret_so_far_pct": 0.0,
         "resolved_date": None,
         "resolved_ret_pct": None,
     }
@@ -523,6 +524,13 @@ def _resolve_active_pick(pick: dict) -> dict:
     ret_so_far = (feats["close"] - entry_ref) / entry_ref
     pick["ret_so_far_pct"] = round(ret_so_far * 100, 2)
     pick["tag"] = _tag_of(ret_so_far, pick["age_days"])
+    # Path-dependence tracking (2026-10-13) -- running peak of
+    # ret_so_far_pct, so classify_fade_from_peak() can tell "already
+    # giving back a chunk of its own gain" apart from "still at/near its
+    # own high," which the current tag alone can't see (user's own
+    # observation: some picks near the upper %B had already pulled back
+    # hard from an even bigger earlier gain).
+    pick["max_ret_so_far_pct"] = max(pick.get("max_ret_so_far_pct", 0.0), pick["ret_so_far_pct"])
 
     pick["current_price"] = feats["close"]
     pick["sl_price"] = scanalert_engine._idx_round_tick_floor(feats["close"] * (1 - SL_PCT / 100))
@@ -669,3 +677,43 @@ def win_rate_of(pick: dict) -> float | None:
         return None
     day = min(pick.get("age_days", 1), MAX_TAG_DAY)
     return WIN_RATE_TABLE.get(day, {}).get(pick["lane"], {}).get(tag)
+
+
+# DEEP FADE FROM PEAK (2026-10-13) -- user's own observation: some picks
+# sitting near the upper %B (so they LOOK strong on a chart) had already
+# given back a big chunk of an even larger earlier gain within D1-D5.
+# Validated with research/macd_confirm_peak_fade_2026_10_13.py (reusing
+# this module's own Stage-1 gate): within the positive-tag population at
+# day 5, win-rate degrades mildly through small/medium pullbacks from the
+# day's-own peak (44.7% at-peak -> 46.8% at 2-5pp giveback, basically flat)
+# but drops clearly once the giveback is >=10pp (40.5% win, mean_ret
+# -0.45% -- the ONLY cell in this whole sweep with a negative mean) --
+# n=37, thinner than ideal but directionally consistent with the wider
+# >=5pp cut (n=84, same 40.5% win). Separately, this session also
+# reconfirmed the module's existing "chasing is fine" finding: the
+# biggest day-5 movers (ret_day5>=8%, the ones that visually look most
+# like chasing) had the BEST win-rate (47.2%) and by far the best mean
+# return (+7.66%) of any ret_day5 bucket tested -- so a high CURRENT
+# ret_so_far is not itself a warning sign; giving back >=10pp from a
+# PRIOR peak is the specific, narrower thing that is.
+DEEP_FADE_MIN_GIVEBACK = 10.0
+DEEP_FADE_WIN, DEEP_FADE_WLB = 40.5, 26.3
+
+
+def classify_fade_from_peak(pick: dict) -> dict | None:
+    """Returns {"win", "wlb", "label"} if this pick has given back
+    >=DEEP_FADE_MIN_GIVEBACK points from its own peak ret_so_far_pct
+    (and still has a real, non-FADING tag -- a pick that's gone back to
+    FADING is already flagged by the existing tag system, this is for
+    "still technically positive/strong-looking, but has pulled back
+    hard from where it was"). None if not applicable (the common case)."""
+    tag = pick.get("tag")
+    ret_now = pick.get("ret_so_far_pct")
+    max_ret = pick.get("max_ret_so_far_pct")
+    if tag is None or tag == "FADING" or ret_now is None or max_ret is None:
+        return None
+    giveback = max_ret - ret_now
+    if giveback >= DEEP_FADE_MIN_GIVEBACK:
+        return {"win": DEEP_FADE_WIN, "wlb": DEEP_FADE_WLB,
+                "label": f"⚠️ Sudah turun {giveback:.1f}pp dari puncak +{max_ret:.1f}% -- momentum melemah meski tag masih {tag}"}
+    return None

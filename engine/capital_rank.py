@@ -110,6 +110,17 @@ def _bow_stats_and_adjustment(pick: dict) -> tuple[dict, float, bool]:
 
     stats = dict(base)
     bonus = 0.0
+
+    # Path-dependence override (2026-10-13) takes PRIORITY over the
+    # plain zone-level overrides below -- it's based on a more specific
+    # validated population (peak/trough drift since entry, not just
+    # today's point-in-time zone). See engine/buy_on_weakness.py's
+    # classify_path_condition docstring for the three conditions.
+    path_cond = bow_engine.classify_path_condition(pick)
+    if path_cond is not None:
+        stats["win"], stats["wlb"] = path_cond["win"], path_cond["wlb"]
+        return stats, bonus, False
+
     if zone == "NAIK_KUAT":
         obs_day = pick.get("age_days", 1) - 1
         if tier == 2:
@@ -201,6 +212,15 @@ def _macd_stats_and_tp_gain(pick: dict) -> tuple[dict, float | None]:
         stats["win"] = win
         stats["wlb"] = max(0.0, win - 6.0)  # WIN_RATE_TABLE has no precomputed Wilson-LB either
         stats["label"] = f"MACD-confirm {pick.get('lane', '?')}/{pick.get('tag', '?')} D{min(pick.get('age_days', 1), 5)}"
+
+    # Deep-fade-from-peak override (2026-10-13) takes PRIORITY over the
+    # plain (day,lane,tag) win_rate_of() above -- it's based on a more
+    # specific validated population (has this pick given back a big
+    # chunk of an earlier, bigger gain, not just what its tag says
+    # today). See engine/macd_confirm_pillar.py's classify_fade_from_peak.
+    fade_cond = macd_engine.classify_fade_from_peak(pick)
+    if fade_cond is not None:
+        stats["win"], stats["wlb"] = fade_cond["win"], fade_cond["wlb"]
 
     tp_gain = None
     tp = macd_engine.tp_prices(pick)
