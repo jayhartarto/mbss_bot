@@ -245,26 +245,44 @@ CHASE_CUTOFF_BY_DAY_QUALITY_D2 = {1: 3.6, 2: 3.6, 3: 4.9, 4: 7.3, 5: 8.8}
 # 2026-09-23 REWORK: now P(remaining_close_ret>0) computed from that
 # day's own price forward to D12 (current-price basis, matches the TP
 # table above), NOT from entry_ref like the original 2026-09-22 table.
-# Day 1 reuses day 2's numbers (day 1 itself has no real tag yet). ---
+# Day 1 reuses day 2's numbers (day 1 itself has no real tag yet).
+#
+# REFRESHED 2026-10-11 (re-ran research/macd_confirm_d1d5_sl_tp_touch_
+# winrate_2026_09_23.py as-is against the now-extended OHLCV CSV, no
+# methodology change -- just more data through 2026-10-07 instead of
+# 2026-09-23). Real, systematic drift found, not noise:
+#   - Core/Neutral (the largest lane): down 2-7pt almost everywhere.
+#   - HighRisk/Reward VERY STRONG (the cell with the hard-SL warning,
+#     see needs_hard_sl_warning): down 7.5-12.2pt at EVERY day (was
+#     52.4-60.9%, now 43.6-48.7%) -- the single worst drift, and it
+#     compounds with that cell's already-known fat loss tail.
+#   - Quality(D2) is mixed/thin (VALID down ~4-7pt, STRONG/VERY STRONG
+#     UP at some days but n<15-29, too thin to fully trust).
+# FADING values and Quality(D2) Day2 VERY STRONG kept at their OLD
+# (2026-09-23) numbers -- the refresh script skips FADING entirely (not
+# shown/used for entry anyway) and Quality(D2) Day2 VERY STRONG had
+# n<15 fresh (too thin to overwrite with a guess). Everything else
+# below is the fresh number. See memory project_bow_rank_scoring_
+# redesign_2026_10_10.md for the full before/after comparison.
 _WIN_RATE_DAY2 = {
-    "Quality(D2)": {"FADING": 57.4, "VALID": 50.0, "STRONG": 45.5, "VERY STRONG": 21.1},
-    "Core/Neutral": {"FADING": 51.8, "VALID": 50.2, "STRONG": 49.1, "VERY STRONG": 52.1},
-    "HighRisk/Reward": {"FADING": 46.7, "VALID": 54.7, "STRONG": 57.6, "VERY STRONG": 60.9},
+    "Quality(D2)": {"FADING": 57.4, "VALID": 46.0, "STRONG": 54.5, "VERY STRONG": 21.1},
+    "Core/Neutral": {"FADING": 51.8, "VALID": 45.2, "STRONG": 44.0, "VERY STRONG": 46.6},
+    "HighRisk/Reward": {"FADING": 46.7, "VALID": 47.0, "STRONG": 53.7, "VERY STRONG": 48.7},
 }
 _WIN_RATE_DAY3 = {
-    "Quality(D2)": {"FADING": 55.2, "VALID": 52.9, "STRONG": 44.8, "VERY STRONG": 26.9},
-    "Core/Neutral": {"FADING": 51.9, "VALID": 49.8, "STRONG": 43.6, "VERY STRONG": 51.2},
-    "HighRisk/Reward": {"FADING": 46.0, "VALID": 46.8, "STRONG": 41.0, "VERY STRONG": 55.8},
+    "Quality(D2)": {"FADING": 55.2, "VALID": 50.7, "STRONG": 25.0, "VERY STRONG": 36.4},
+    "Core/Neutral": {"FADING": 51.9, "VALID": 43.0, "STRONG": 43.0, "VERY STRONG": 45.0},
+    "HighRisk/Reward": {"FADING": 46.0, "VALID": 43.0, "STRONG": 33.3, "VERY STRONG": 45.9},
 }
 _WIN_RATE_DAY4 = {
-    "Quality(D2)": {"FADING": 53.9, "VALID": 40.9, "STRONG": 57.6, "VERY STRONG": 36.4},
-    "Core/Neutral": {"FADING": 51.4, "VALID": 51.4, "STRONG": 44.9, "VERY STRONG": 48.8},
-    "HighRisk/Reward": {"FADING": 44.4, "VALID": 53.9, "STRONG": 40.0, "VERY STRONG": 52.4},
+    "Quality(D2)": {"FADING": 53.9, "VALID": 45.2, "STRONG": 52.6, "VERY STRONG": 45.8},
+    "Core/Neutral": {"FADING": 51.4, "VALID": 46.7, "STRONG": 42.0, "VERY STRONG": 44.3},
+    "HighRisk/Reward": {"FADING": 44.4, "VALID": 41.5, "STRONG": 35.7, "VERY STRONG": 43.6},
 }
 _WIN_RATE_DAY5 = {
-    "Quality(D2)": {"FADING": 48.7, "VALID": 50.0, "STRONG": 61.1, "VERY STRONG": 43.2},
-    "Core/Neutral": {"FADING": 48.7, "VALID": 53.4, "STRONG": 44.8, "VERY STRONG": 46.8},
-    "HighRisk/Reward": {"FADING": 40.4, "VALID": 55.2, "STRONG": 38.2, "VERY STRONG": 53.2},
+    "Quality(D2)": {"FADING": 48.7, "VALID": 43.1, "STRONG": 47.4, "VERY STRONG": 48.3},
+    "Core/Neutral": {"FADING": 48.7, "VALID": 48.2, "STRONG": 43.2, "VERY STRONG": 42.0},
+    "HighRisk/Reward": {"FADING": 40.4, "VALID": 44.5, "STRONG": 35.5, "VERY STRONG": 45.7},
 }
 WIN_RATE_TABLE = {1: _WIN_RATE_DAY2, 2: _WIN_RATE_DAY2, 3: _WIN_RATE_DAY3, 4: _WIN_RATE_DAY4, 5: _WIN_RATE_DAY5}
 
