@@ -497,6 +497,23 @@ def save_macd_confirm_picks(picks: list):
             pass
 
 
+def _reconstruct_historical_peak_ret(trigger_date, entry_ref: float, df: pd.DataFrame) -> float:
+    """Self-heal helper for _resolve_active_pick (2026-10-11 audit fix,
+    see call site) -- recomputes the true peak ret_so_far_pct over the
+    pick's whole life so far (from trigger_date through today's bar in
+    `df`), for a pick that predates the max_ret_so_far_pct field."""
+    try:
+        trigger = pd.Timestamp(trigger_date).date()
+    except Exception:
+        return 0.0
+    idx_dates = pd.to_datetime(df.index).date
+    window = df.loc[idx_dates >= trigger, "Close"]
+    if window.empty:
+        return 0.0
+    rets = (window - entry_ref) / entry_ref * 100
+    return float(rets.max())
+
+
 def _resolve_active_pick(pick: dict) -> dict:
     """Re-check one still-ALIVE pick against fresh OHLCV: bump age, compute
     ret_so_far vs entry_ref_price, re-derive tag (locked after age_day 5),
@@ -530,6 +547,14 @@ def _resolve_active_pick(pick: dict) -> dict:
     # own high," which the current tag alone can't see (user's own
     # observation: some picks near the upper %B had already pulled back
     # hard from an even bigger earlier gain).
+    # Self-heal (2026-10-11 audit fix): a pick that was already ALIVE
+    # before this field existed has no "max_ret_so_far_pct" key at all --
+    # seeding it at *today's* ret_so_far would hide any fade that already
+    # happened earlier in its life (the exact already-round-tripped case
+    # this field exists to catch). Reconstruct the true peak once from
+    # entry_ref_price, then it accumulates normally from here on.
+    if "max_ret_so_far_pct" not in pick:
+        pick["max_ret_so_far_pct"] = _reconstruct_historical_peak_ret(pick.get("trigger_date"), entry_ref, df)
     pick["max_ret_so_far_pct"] = max(pick.get("max_ret_so_far_pct", 0.0), pick["ret_so_far_pct"])
 
     pick["current_price"] = feats["close"]

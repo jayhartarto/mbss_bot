@@ -648,6 +648,23 @@ def save_buy_on_weakness_picks(picks: list):
             pass
 
 
+def _reconstruct_historical_drift(trigger_date, entry_ref: float, df: pd.DataFrame) -> tuple[float, float]:
+    """Self-heal helper for _resolve_active_pick (2026-10-11 audit fix,
+    see call site) -- recomputes the true peak/trough price_drift_pct
+    over the pick's whole life so far (from trigger_date through today's
+    bar in `df`), for a pick that predates max_drift_pct/min_drift_pct."""
+    try:
+        trigger = pd.Timestamp(trigger_date).date()
+    except Exception:
+        return 0.0, 0.0
+    idx_dates = pd.to_datetime(df.index).date
+    window = df.loc[idx_dates >= trigger, "Close"]
+    if window.empty:
+        return 0.0, 0.0
+    drifts = (window - entry_ref) / entry_ref * 100
+    return float(drifts.max()), float(drifts.min())
+
+
 def _resolve_active_pick(pick: dict) -> dict:
     """Re-check one still-ALIVE pick against fresh OHLCV: SL first
     (conservative, same-day-ambiguity convention used throughout this
@@ -694,6 +711,21 @@ def _resolve_active_pick(pick: dict) -> dict:
         # classify_path_condition() can tell "calmly sat here the whole
         # time" apart from "rallied/dipped hard and came back here,"
         # which the point-in-time drift_zone above can't see on its own.
+        # Self-heal (2026-10-11 audit fix): a pick already ALIVE before
+        # these fields existed has no "max_drift_pct"/"min_drift_pct" key
+        # at all -- seeding them at *today's* drift would hide a rally-
+        # then-fade (or dip-then-recover) that already happened earlier
+        # in the pick's life, exactly the case classify_path_condition()'s
+        # "rallied_then_faded" branch exists to catch. Reconstruct both
+        # once from entry_ref_price; vol_ratio_sum/days has no equivalent
+        # cheap reconstruction (needs per-day feature recompute) so it
+        # stays at 0/0 for these old picks -- only means the "calm_quiet"
+        # branch (which requires vol_ratio_days > 0) won't fire for them,
+        # not a false-negative on a warning.
+        if "max_drift_pct" not in pick or "min_drift_pct" not in pick:
+            hist_max, hist_min = _reconstruct_historical_drift(pick.get("trigger_date"), entry_ref, df)
+            pick.setdefault("max_drift_pct", hist_max)
+            pick.setdefault("min_drift_pct", hist_min)
         pick["max_drift_pct"] = round(max(pick.get("max_drift_pct", 0.0), drift_pct), 2)
         pick["min_drift_pct"] = round(min(pick.get("min_drift_pct", 0.0), drift_pct), 2)
         vr_today = feats.get("vol_ratio")

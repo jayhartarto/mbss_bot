@@ -1671,8 +1671,20 @@ PENDING_BROKERSUM_TIMEOUT_MINUTES = 5
 # ===========================================================================
 
 def init_ohlcv_db():
-    """Buat tabel kalau belum ada — idempotent, aman dipanggil berulang."""
-    conn = sqlite3.connect(OHLCV_DB_FILE)
+    """Buat tabel kalau belum ada — idempotent, aman dipanggil berulang.
+
+    PRAGMA journal_mode=WAL (audit fix 2026-10-11): mbss_ohlcv.db dibaca/
+    ditulis oleh 10+ JobQueue job berbeda tiap 3-5 menit saat jam pasar,
+    semuanya lewat koneksi sqlite3 baru per call (bukan pool) dengan
+    default rollback-journal mode -- itu artinya satu writer bisa blokir
+    semua reader lain dan sebaliknya, jalur realistis ke
+    `sqlite3.OperationalError: database is locked` tepat saat jam pasar.
+    WAL mengizinkan reader jalan concurrent dengan satu writer, dan
+    tersimpan permanen di header file (sekali diset, idempotent dipanggil
+    ulang) -- dikombinasikan dengan timeout=30 di tiap sqlite3.connect()
+    supaya writer-vs-writer yang masih collide retry dulu sebelum error."""
+    conn = sqlite3.connect(OHLCV_DB_FILE, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ohlcv_daily (
             ticker TEXT NOT NULL,
@@ -1706,7 +1718,7 @@ def upsert_ohlcv_daily(ticker: str, df: pd.DataFrame):
     """Simpan/update bar harian ke SQLite — INSERT OR REPLACE (upsert)."""
     if df is None or df.empty:
         return
-    conn = sqlite3.connect(OHLCV_DB_FILE)
+    conn = sqlite3.connect(OHLCV_DB_FILE, timeout=30)
     rows = [
         (ticker, str(idx.date() if hasattr(idx, 'date') else idx),
          row.get("Open"), row.get("High"), row.get("Low"), row.get("Close"), row.get("Volume"))
@@ -1722,7 +1734,7 @@ def upsert_ohlcv_daily(ticker: str, df: pd.DataFrame):
 
 def get_ohlcv_daily_from_db(ticker: str, limit: int = 500) -> pd.DataFrame:
     """Ambil bar harian dari SQLite, diurutkan ascending (lama ke baru)."""
-    conn = sqlite3.connect(OHLCV_DB_FILE)
+    conn = sqlite3.connect(OHLCV_DB_FILE, timeout=30)
     rows = conn.execute(
         "SELECT date, open, high, low, close, volume FROM ohlcv_daily "
         "WHERE ticker=? ORDER BY date DESC LIMIT ?",
@@ -1749,7 +1761,7 @@ def repair_thin_tickers(min_bars_healthy: int = 20) -> dict:
     untuk masing-masing (mengabaikan latest_in_db, treat seperti ticker baru).
     """
     init_ohlcv_db()
-    conn = sqlite3.connect(OHLCV_DB_FILE)
+    conn = sqlite3.connect(OHLCV_DB_FILE, timeout=30)
     rows = conn.execute(
         "SELECT ticker, COUNT(*) as bar_count FROM ohlcv_daily GROUP BY ticker HAVING bar_count < ?",
         (min_bars_healthy,)
@@ -1794,7 +1806,7 @@ def repair_thin_tickers(min_bars_healthy: int = 20) -> dict:
 
 def get_latest_daily_date_in_db(ticker: str) -> str | None:
     """Return tanggal bar terbaru untuk ticker ini di DB, atau None kalau kosong."""
-    conn = sqlite3.connect(OHLCV_DB_FILE)
+    conn = sqlite3.connect(OHLCV_DB_FILE, timeout=30)
     row = conn.execute(
         "SELECT MAX(date) FROM ohlcv_daily WHERE ticker=?", (ticker,)
     ).fetchone()
@@ -1805,7 +1817,7 @@ def get_latest_daily_date_in_db(ticker: str) -> str | None:
 
 def set_db_metadata(key: str, value: str):
     init_ohlcv_db()
-    conn = sqlite3.connect(OHLCV_DB_FILE)
+    conn = sqlite3.connect(OHLCV_DB_FILE, timeout=30)
     conn.execute(
         "INSERT OR REPLACE INTO db_metadata(key, value, updated_at) VALUES(?, ?, ?)",
         (key, str(value), datetime.datetime.now(WIB).isoformat(timespec="seconds")),
@@ -1818,7 +1830,7 @@ def get_db_metadata(key: str, default=None):
     if not os.path.exists(OHLCV_DB_FILE):
         return default
     try:
-        conn = sqlite3.connect(OHLCV_DB_FILE)
+        conn = sqlite3.connect(OHLCV_DB_FILE, timeout=30)
         row = conn.execute("SELECT value FROM db_metadata WHERE key=?", (key,)).fetchone()
         conn.close()
         return row[0] if row and row[0] is not None else default
@@ -1953,7 +1965,7 @@ def upsert_ohlcv_4h(ticker: str, df: pd.DataFrame):
     """Simpan bar 4H dari Yahoo Finance ke SQLite."""
     if df is None or df.empty:
         return
-    conn = sqlite3.connect(OHLCV_DB_FILE)
+    conn = sqlite3.connect(OHLCV_DB_FILE, timeout=30)
     rows = [
         (ticker, str(idx), row.get("Open"), row.get("High"),
          row.get("Low"), row.get("Close"), row.get("Volume"))
@@ -1976,7 +1988,7 @@ def get_ohlcv_4h(ticker: str, period: str = "1mo") -> pd.DataFrame:
     """
     init_ohlcv_db()
     today_str = datetime.datetime.now(WIB).strftime("%Y-%m-%d")
-    conn = sqlite3.connect(OHLCV_DB_FILE)
+    conn = sqlite3.connect(OHLCV_DB_FILE, timeout=30)
     rows = conn.execute(
         "SELECT datetime, open, high, low, close, volume FROM ohlcv_4h "
         "WHERE ticker=? ORDER BY datetime DESC LIMIT 50",
@@ -2005,7 +2017,7 @@ def get_ohlcv_4h(ticker: str, period: str = "1mo") -> pd.DataFrame:
 def get_db_stats() -> dict:
     """Statistik DB — untuk command /dbstats atau logging."""
     try:
-        conn = sqlite3.connect(OHLCV_DB_FILE)
+        conn = sqlite3.connect(OHLCV_DB_FILE, timeout=30)
         daily_count = conn.execute("SELECT COUNT(DISTINCT ticker) FROM ohlcv_daily").fetchone()[0]
         daily_rows = conn.execute("SELECT COUNT(*) FROM ohlcv_daily").fetchone()[0]
         h4_count = conn.execute("SELECT COUNT(DISTINCT ticker) FROM ohlcv_4h").fetchone()[0]

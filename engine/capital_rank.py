@@ -119,6 +119,7 @@ def _bow_stats_and_adjustment(pick: dict) -> tuple[dict, float, bool]:
     path_cond = bow_engine.classify_path_condition(pick)
     if path_cond is not None:
         stats["win"], stats["wlb"] = path_cond["win"], path_cond["wlb"]
+        stats["label"] = path_cond["label"]  # audit fix 2026-10-11: label must match the win/wlb actually shown
         return stats, bonus, False
 
     if zone == "NAIK_KUAT":
@@ -221,6 +222,7 @@ def _macd_stats_and_tp_gain(pick: dict) -> tuple[dict, float | None]:
     fade_cond = macd_engine.classify_fade_from_peak(pick)
     if fade_cond is not None:
         stats["win"], stats["wlb"] = fade_cond["win"], fade_cond["wlb"]
+        stats["label"] = fade_cond["label"]  # audit fix 2026-10-11: label must match the win/wlb actually shown
 
     tp_gain = None
     tp = macd_engine.tp_prices(pick)
