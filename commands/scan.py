@@ -4199,6 +4199,12 @@ async def swing_command(update, context):
     """
     bow_picks = buy_on_weakness_engine.load_buy_on_weakness_picks()
     bow_active = [p for p in bow_picks if p.get("status") == "ALIVE"]
+    # Tier3+NAIK_KUAT hidden entirely (user call 2026-10-10) -- uniquely/
+    # robustly bad at nearly every obs_day tested, unlike Tier1/2's
+    # NAIK_KUAT which only degrades late and gets a penalty instead (see
+    # engine/buy_on_weakness.py's should_hide_from_rank docstring).
+    bow_active = [p for p in bow_active
+                  if not buy_on_weakness_engine.should_hide_from_rank(p["tier"], p.get("drift_zone", "NETRAL"))]
     bow_active.sort(key=lambda p: (p["tier"], not p.get("ff_priority", False), -p["age_days"]))
 
     osb_picks = oversold_bounce_v2_engine.load_oversold_bounce_v2_picks()
@@ -4432,26 +4438,31 @@ async def rank_command(update, context):
     sendiri, lihat docstring engine/capital_rank.py untuk alasan lengkap
     (tanpa SL keras, exit ladder-dependent, mekanisme overnight-gap beda).
 
-    Usage: /rank (bobot default 50% return/hari + 50% win-rate), atau
-    /rank <bobot_return> <bobot_winrate> untuk kustom (contoh: /rank 70 30
-    = lebih berat ke return/hari; dua angka apa saja, dinormalisasi
-    otomatis supaya totalnya 100%).
+    Usage: /rank (bobot default 35% return/hari + 35% win-rate + 30% sisa
+    jarak ke TP), /rank <return> <winrate> untuk kustom 2 bobot (sisa jarak
+    ke TP tetap di bobot default), atau /rank <return> <winrate> <tpgain>
+    untuk kustom 3 bobot sekaligus. Angka apa saja, dinormalisasi otomatis
+    supaya totalnya 100%.
     """
-    w_return, w_win = capital_rank_engine.DEFAULT_W_RETURN, capital_rank_engine.DEFAULT_W_WIN
+    w_return = capital_rank_engine.DEFAULT_W_RETURN
+    w_win = capital_rank_engine.DEFAULT_W_WIN
+    w_tpgain = capital_rank_engine.DEFAULT_W_TPGAIN
     if context.args and len(context.args) >= 2:
         try:
             w_return = float(context.args[0])
             w_win = float(context.args[1])
-            if w_return < 0 or w_win < 0 or (w_return + w_win) <= 0:
+            if len(context.args) >= 3:
+                w_tpgain = float(context.args[2])
+            if w_return < 0 or w_win < 0 or w_tpgain < 0 or (w_return + w_win + w_tpgain) <= 0:
                 raise ValueError
         except ValueError:
             await core.safe_reply(
                 update.message,
-                "⚠️ Format bobot tidak valid. Contoh: /rank 70 30 (70% return/hari, 30% win-rate). "
-                "Tanpa argumen = default 50/50."
+                "⚠️ Format bobot tidak valid. Contoh: /rank 40 40 20 (40% return/hari, 40% win-rate, "
+                "20% sisa jarak ke TP). Tanpa argumen = default 35/35/30."
             )
             return
 
-    ranked = capital_rank_engine.compute_rank(w_return, w_win)
-    message = capital_rank_engine.format_rank_message(ranked, w_return, w_win)
+    ranked = capital_rank_engine.compute_rank(w_return, w_win, w_tpgain)
+    message = capital_rank_engine.format_rank_message(ranked, w_return, w_win, w_tpgain)
     await core.safe_reply(update.message, message)

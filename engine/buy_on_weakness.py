@@ -159,10 +159,18 @@ TIER_SWING_RANGE = {1: (5, 10.5, 16), 2: (4, 8, 13), 3: (4, 7, 11)}
 # Price-drift-since-trigger zone classification, validated 2026-10-10
 # (observation days 3/4/5, pooled and per-tier). drift_pct = (current_close
 # - entry_ref_price) / entry_ref_price * 100.
+# NAIK_KUAT boundary CORRECTED 2026-10-10 (user caught the original 3.0%
+# was too aggressive): a fine drift-bucket sweep against the live
+# Bollinger-band TP target (gap_to_tp_pct) showed 3-5% drift performs
+# like 1-3% (win ~71%, mean_ret ~+1.6%, still ~5% average gap left to the
+# band -- the band itself moves up with price, so "+3%" never meant
+# "near TP"). The real inflection is 5-7% (win drops to 59.2%, mean_ret
+# turns negative). See research/bow_naik_kuat_threshold_test_2026_10_10.py
+# (if saved) and memory project_bow_rank_scoring_redesign_2026_10_10.md.
 DRIFT_DISKON_MAX = -3.0
 DRIFT_DISKON_RINGAN_MAX = -1.0
 DRIFT_NAIK_MIN = 1.0
-DRIFT_NAIK_KUAT_MIN = 3.0
+DRIFT_NAIK_KUAT_MIN = 5.0
 
 # Cells with n>=150 independent trigger episodes in the (tier, obs_day,
 # zone) grid. Re-validated 2026-10-10 AT RESOLUTION_MAX_AGE_DAYS=16 (the
@@ -171,20 +179,48 @@ DRIFT_NAIK_KUAT_MIN = 3.0
 # budget left to resolve, so these are NOT the same numbers; re-validate
 # again if RESOLUTION_MAX_AGE_DAYS changes). obs_day = age_days - 1.
 # DISPLAY-ONLY, see docstring -- never read by engine/capital_rank.py.
-# NOTE the (2,10,NAIK_KUAT) cell flipped to a WARNING at this shorter
-# window (win 51.0%, mean_ret -0.18%, n=194) -- chasing a pick that's
-# already up a lot AND has survived 10 days with only ~5 days of budget
-# left is now a coin-flip-or-worse, not a mild positive like it was at
-# the 30d window. Kept in the table deliberately (not dropped) so the
-# note still fires -- it's now informative as a caution, not a highlight.
+# Re-validated AGAIN at the corrected 5% NAIK_KUAT boundary -- under the
+# new split, NONE of these cells reach the strict n>=150 bar any more
+# (the narrower zone has less data per cell), so this table is now
+# BORDER-quality (n>=50) rather than strictly SOLID. Kept because the
+# direction/magnitude is still the most-informed estimate available,
+# not because the sample bar improved.
 SOLID_CONDITIONAL_CELLS = {
     (2, 2, "NETRAL"): {"win": 71.0, "wlb": 64.1},
     (2, 3, "NETRAL"): {"win": 67.3, "wlb": 59.5},
-    (2, 4, "NAIK_KUAT"): {"win": 68.2, "wlb": 60.4},
-    (2, 5, "NAIK_KUAT"): {"win": 66.4, "wlb": 58.6},
-    (2, 7, "NAIK_KUAT"): {"win": 60.9, "wlb": 53.6},
-    (2, 10, "NAIK_KUAT"): {"win": 51.0, "wlb": 44.0},
 }
+
+# Tier2's own NAIK_KUAT (>=5%) win% by obs_day -- validated 2026-10-10,
+# n=65-138 (BORDER). Day-dependent: still fine at day2-3, degrades hard
+# by day7-10. Used by engine/capital_rank.py as an age-scaled PENALTY
+# (not a hide) -- unlike Tier3 (see TIER3_NAIK_KUAT_HIDE below), Tier2's
+# early-day cases are genuinely still good, so hiding them outright would
+# suppress a real positive, not just avoid a bad one.
+TIER2_NAIK_KUAT_WIN_BY_OBS_DAY = {2: 76.9, 3: 74.0, 4: 63.9, 5: 59.8, 7: 58.4, 10: 50.0}
+
+# Tier3's NAIK_KUAT (>=5%) is uniquely bad -- NEGATIVE mean_ret at nearly
+# every obs_day tested (day4:-1.92%, day5:-2.69%, day7:-2.82%, win 44-57%),
+# not just a late-day adverse-selection artifact like Tier2. Validated
+# 2026-10-10, n=34-75 (THIN-BORDER) -- thin individually but consistent
+# in direction across 6 independent day-cuts. User's call: HIDE these
+# from /rank and /swing entirely rather than merely penalize.
+TIER3_NAIK_KUAT_HIDE = True
+
+# Tier1's NAIK_KUAT is thin (n=16-28) but directionally negative
+# throughout -- not enough data to either hide confidently or build a
+# day-specific table; capital_rank.py applies a flat moderate penalty
+# with an explicit low-confidence note instead.
+TIER1_NAIK_KUAT_FLAT_PENALTY_WIN = 55.0  # rough midpoint of the thin 42.9-65.0 range
+
+# NAIK (1-5%, "sudah naik" but not extended) validated 2026-10-10 as a
+# BOOSTER, not neutral -- Tier2 win 63.5-75.4% (consistently above its
+# own 72.5% baseline most days), Tier3 win 62.8-85.9% (well above its
+# 77.7% baseline early, fading by day10). Tier1 thin/noisy but same
+# direction. Applied as a flat, tier-agnostic bonus in capital_rank.py
+# (not a per-day table) -- the day-decay exists but isn't sharp enough
+# to warrant the extra complexity on top of everything else already
+# day-scaled.
+NAIK_ZONE_SCORE_BONUS = 6.0
 # Generic rule-of-thumb window (obs_day range) + zones it applies to --
 # from the Part-2 finding (quiet survivors at day 5 resolve in median 4d
 # vs day-1 entry's median 7d) -- used only where SOLID_CONDITIONAL_CELLS
@@ -207,10 +243,16 @@ def classify_drift_zone(drift_pct: float) -> tuple[str, str]:
     return "NAIK_KUAT", "🚀 Naik jauh"
 
 
+def should_hide_from_rank(tier: int, zone_key: str) -> bool:
+    """Tier3+NAIK_KUAT is uniquely/robustly bad (see TIER3_NAIK_KUAT_HIDE
+    docstring) -- hide from /rank and /swing per user's explicit call
+    2026-10-10, rather than merely penalize like Tier1/2 get."""
+    return tier == 3 and zone_key == "NAIK_KUAT" and TIER3_NAIK_KUAT_HIDE
+
+
 def conditional_drift_note(tier: int, age_days: int, zone_key: str) -> str | None:
     """Short display-only annotation for the pick's current drift
-    condition. Returns None when nothing applicable (most Tier1/3
-    cells, or obs_day outside the validated ranges) -- callers should
+    condition. Returns None when nothing applicable -- callers should
     just omit the line in that case, not show a placeholder."""
     obs_day = age_days - 1
     cell = SOLID_CONDITIONAL_CELLS.get((tier, obs_day, zone_key))
@@ -218,6 +260,13 @@ def conditional_drift_note(tier: int, age_days: int, zone_key: str) -> str | Non
         zone_short = {"NETRAL": "Netral", "NAIK_KUAT": "Naik jauh"}.get(zone_key, zone_key)
         icon = "📊" if cell["win"] >= 60.0 else "⚠️"  # below 60% -> read as caution, not a neutral stat
         return f"{icon} {zone_short} H{obs_day}: win≈{cell['win']:.0f}% (data spesifik titik ini)"
+    if tier == 2 and zone_key == "NAIK_KUAT":
+        win = TIER2_NAIK_KUAT_WIN_BY_OBS_DAY.get(obs_day)
+        if win is not None:
+            icon = "📊" if win >= 60.0 else "⚠️"
+            return f"{icon} Naik jauh H{obs_day}: win≈{win:.0f}% (data spesifik titik ini)"
+    if tier == 1 and zone_key == "NAIK_KUAT":
+        return f"⚠️ Naik jauh (Tier 1 data tipis, win≈{TIER1_NAIK_KUAT_FLAT_PENALTY_WIN:.0f}% perkiraan kasar)"
     lo, hi = GENERIC_NOTE_OBS_DAY_RANGE
     if lo <= obs_day <= hi and zone_key in GENERIC_NOTE_ZONES:
         return f"⏩ H{obs_day} tenang: histori TP cenderung lebih cepat dari estimasi awal."
