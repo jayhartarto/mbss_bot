@@ -388,8 +388,21 @@ async def run_bsjp_pump_session2_tick() -> dict:
             continue
         price_now = bar["current_price"]
         close_s1 = p["close_s1"]
+        # achievable_entry_price (audit fix 2026-10-11): best_discount_price
+        # is the retrospective MINIMUM over the whole session-2 window --
+        # fine for the live message below (at any tick, "best seen so far"
+        # is genuinely known at that instant), but hindsight-optimal if used
+        # as the win-rate/occurrence reporting basis in
+        # finalize_bsjp_pump_confirmations() -- no real user watching
+        # ~300s-cadence ticks can guarantee buying exactly at the session
+        # bottom. Lags by one tick: whenever a new low is set, the price
+        # ONE TICK LATER becomes the "achievable" reference for that low,
+        # re-armed each time an even lower low appears.
+        if t_state.pop("_discount_pending_lag", False):
+            t_state["achievable_entry_price"] = price_now
         if price_now < close_s1 and (t_state["best_discount_price"] is None or price_now < t_state["best_discount_price"]):
             t_state["best_discount_price"] = price_now
+            t_state["_discount_pending_lag"] = True
         t_state["price_now"] = price_now
         active.append((ticker, p, t_state))
 
@@ -445,6 +458,17 @@ def finalize_bsjp_pump_confirmations(results: dict) -> list[dict]:
     checkpoint's own session-1 closing price) for TP/SL."""
     import engine.scanalert as scanalert_engine
 
+    # NOTE (audit fix 2026-10-11): the win 70.1%->82.2%->89.5% /
+    # SL-hit 29.3%->17.8%->10.5% by-occurrence numbers referenced above and
+    # in memory (project_spike5_nonneg_continuation_dna_2026_10_06.md) were
+    # computed against entry_ref = best_discount_price (the session's full
+    # retrospective minimum) -- hindsight-optimal, not necessarily
+    # achievable at ~300s tick cadence. `entry_ref` below now prefers the
+    # one-tick-lagged achievable_entry_price instead, so picks confirmed
+    # FROM THIS FIX ONWARD use a more realistic entry; the quoted
+    # percentages themselves predate the fix and would need re-validation
+    # against the new entry_ref before being trusted again at that exact
+    # precision.
     checkpoint_state = _load_json_state("bsjp_pump_checkpoint_state.json")
     passed = checkpoint_state.get("passed") or {}
     if checkpoint_state.get("trading_day_marker") != _today_str() or not passed:
@@ -474,8 +498,16 @@ def finalize_bsjp_pump_confirmations(results: dict) -> list[dict]:
     for ticker, p in passed.items():
         r = results.get(ticker)
         close_s1 = p["close_s1"]
-        best_discount = (live_tickers.get(ticker) or {}).get("best_discount_price")
-        entry_ref = best_discount or close_s1
+        ticker_live = live_tickers.get(ticker) or {}
+        best_discount = ticker_live.get("best_discount_price")
+        # Prefer achievable_entry_price (one-tick-lagged, see
+        # run_bsjp_pump_session2_tick) over the hindsight-optimal
+        # best_discount_price for the reference used in reported
+        # win-rate/occurrence stats (audit fix 2026-10-11) -- falls back to
+        # best_discount/close_s1 only for the edge case where the day's
+        # final low was set on the very last tick (no later tick to lag
+        # into).
+        entry_ref = ticker_live.get("achievable_entry_price") or best_discount or close_s1
         tp = scanalert_engine._idx_round_tick_ceil(entry_ref * (1 + EXIT_TP_PCT / 100.0))
         sl = scanalert_engine._idx_round_tick_ceil(entry_ref * (1 - EXIT_SL_PCT / 100.0))
         confirmed.append({

@@ -344,12 +344,19 @@ async def all_setup_candidates_command(update, context):
         "EARLY_VALIDATION": "🌱", "CONTINUATION": "📈", "VALIDATION": "📊",
         "LATE_VALIDATION": "🍂", "MOMENTUM_EXTENDED": "🚀",
     }
+    # ⚠️ Belum tervalidasi ulang (audit fix 2026-10-11, lihat AGENT_ONBOARDING.md
+    # §6): angka di bawah ini hardcode dari kalibrasi lama, BUKAN dihitung dari
+    # gate logic saat ini seperti lane lain yang didukung lane_confidence.py --
+    # threshold lane ini sudah berubah tanpa re-validasi, gap 5-14pp terhadap
+    # performa aktual. Jangan dipercaya sebagai angka live, hanya referensi
+    # historis. (Wiring ke lane_confidence.py butuh model kalibrasi baru per
+    # lane -- belum dikerjakan.)
     STATIC_WR = {
-        "FAST_RECOVERY": "hit6~62.4%/hit10~38.8% (n=85)",
-        "EARLY_RECOVERY": "hit6~59.2%/hit10~43.1% (derivasi, n≈262)",
+        "FAST_RECOVERY": "⚠️ hit6~62.4%/hit10~38.8% (n=85, BELUM tervalidasi ulang)",
+        "EARLY_RECOVERY": "⚠️ hit6~59.2%/hit10~43.1% (derivasi, n≈262, BELUM tervalidasi ulang)",
         # MBSS v2 2026-08-31: bukan hit6 (belum ada model lane_confidence) --
         # peluang lanjut ke gain_since_cross>=4% (zona VALIDATION) dlm 1-2h.
-        "EARLY_VALIDATION": "~33% lanjut ke VALIDATION dlm 1-2h (n=661, vs baseline pasar 13.4%)",
+        "EARLY_VALIDATION": "⚠️ ~33% lanjut ke VALIDATION dlm 1-2h (n=661, vs baseline pasar 13.4%, BELUM tervalidasi ulang)",
     }
 
     for lane_name, candidates in lanes.items():
