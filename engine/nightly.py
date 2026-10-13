@@ -68,6 +68,7 @@ import engine.buy_on_weakness as buy_on_weakness_engine
 import engine.oversold_bounce_v2 as oversold_bounce_v2_engine
 import engine.vcp_pillar as vcp_pillar_engine
 import engine.macd_confirm_pillar as macd_confirm_pillar_engine
+import engine.buy_on_strength as buy_on_strength_engine
 import engine.winrate_monitor as winrate_monitor_engine
 import engine.bsjp2 as bsjp2_engine
 
@@ -585,6 +586,28 @@ async def run_nightly_full_scan(context):
             print(f"🌀 MACD-confirm: {len(macd_confirm_candidates)} kandidat baru hari ini.")
         except Exception as e:
             print(f"⚠️ Gagal menjalankan MACD-confirm: {e}")
+
+        # MBSS v2 (user request 2026-10-13 -- BOS "Buy On Strength", fifth
+        # swing pillar): ride an already-proven ret_10d>+5% move during
+        # IHSG's BOUNCE_OFF_LOW recovery phase specifically -- the
+        # complementary opposite of OSB-v2 above (OSB-v2's edge concentrates
+        # in CRASH_FAST, is NEGATIVE in BEARISH_GRIND; this lane is the
+        # reverse). Gated by engine/ihsg_regime.py's is_bounce_off_low(), NOT
+        # OSB-v2's dd_100<=-10% gate -- produces [] most of the time outside
+        # that specific sub-phase, by design. Same reuse-of-`results`
+        # pattern as the other pillars above. See engine/buy_on_strength.py
+        # docstring + memory project_ret10d_crash_bounce_dna_filter_oos_
+        # validated_2026_10_13.md (and its _2026_10_13.md follow-ups) for
+        # the full research trail behind every threshold.
+        try:
+            bos_tickers = [r["ticker"] for r in results if r and r.get("ticker")]
+            bos_candidates = await asyncio.to_thread(
+                buy_on_strength_engine.compute_buy_on_strength_candidates, bos_tickers
+            )
+            buy_on_strength_engine.update_and_save_picks(bos_candidates)
+            print(f"💪 Buy On Strength (BOS): {len(bos_candidates)} kandidat baru hari ini.")
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan Buy On Strength (BOS): {e}")
 
         # Win-rate drift monitor (2026-10-11, user request) -- lightweight
         # REALIZED-vs-ASSUMED check from each lane's own resolved pick

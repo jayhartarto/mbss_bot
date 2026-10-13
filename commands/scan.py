@@ -61,6 +61,7 @@ import engine.buy_on_weakness as buy_on_weakness_engine
 import engine.oversold_bounce_v2 as oversold_bounce_v2_engine
 import engine.vcp_pillar as vcp_pillar_engine
 import engine.macd_confirm_pillar as macd_confirm_pillar_engine
+import engine.buy_on_strength as buy_on_strength_engine
 import engine.bsjp2 as bsjp2_engine
 import engine.capital_rank as capital_rank_engine
 
@@ -4145,7 +4146,8 @@ async def buy_on_weakness_command(update, context):
     # FF PRIORITY booster sorts first (validated 2026-10-07, see
     # engine/oversold_bounce_v2.py's _ff_pos_days_5 docstring), ff_ratio_5d
     # remains the tiebreak within/outside priority -- never a hard gate.
-    osb_active.sort(key=lambda p: (not p.get("ff_priority", False), p.get("ff_ratio_5d") is None, -(p.get("ff_ratio_5d") or 0)))
+    osb_active.sort(key=lambda p: (p.get("tier") != "TIER1", not p.get("ff_priority", False),
+                                    p.get("ff_ratio_5d") is None, -(p.get("ff_ratio_5d") or 0)))
 
     if not active and not osb_active:
         await core.safe_reply(
@@ -4216,8 +4218,15 @@ async def buy_on_weakness_command(update, context):
         ff_tag = f" | 🟢 FF {ff:+.1f}% (5d)" if ff is not None and ff > 0 else (f" | 🔴 FF {ff:+.1f}% (5d)" if ff is not None else "")
         priority_tag = " ⭐ FF PRIORITY" if p.get("ff_priority") else ""
         tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
+        # TIER1 (2026-10-13, CRASH_FAST-only, see engine/oversold_bounce_v2.py
+        # docstring): RSI AND MACD both extreme -- high-conviction subset,
+        # win94-96% in research vs RSI-only's 80-86%. Never set outside
+        # CRASH_FAST -- if this ever shows on a non-CRASH_FAST pick, that's
+        # a bug, not a feature.
+        macd_note = f", MACD {p['macd_line_pct_at_trigger']:.1f}%" if p.get("macd_line_pct_at_trigger") is not None else ""
+        tier1_tag = " 🏆 TIER1 (RSI+MACD, CRASH_FAST)" if p.get("tier") == "TIER1" else ""
         lines.append(
-            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger){ff_tag}{priority_tag}\n"
+            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger{macd_note}){ff_tag}{priority_tag}{tier1_tag}\n"
             f"{age_label}\n"
             f"Entry ref: {p['entry_ref_price']:,.0f}\n"
             f"SL: {p['sl_price']:,.0f} (-20%, WAJIB, jangan dipersempit)\n"
@@ -4240,9 +4249,14 @@ async def swing_command(update, context):
     Shows BOW ("buy the quiet dip in an uptrend"), OSB-v2 ("buy the deep-
     oversold bounce during a confirmed IHSG bear regime" — near-mutually-
     exclusive with BOW by construction, see engine/oversold_bounce_v2.py),
-    and VCP ("buy the breakout after a volatility squeeze") as SEPARATE
-    labeled sections, NOT merged into one score/list — confirmed 0% day-
-    level overlap between BOW and VCP (see memory
+    VCP ("buy the breakout after a volatility squeeze"), and BOS ("Buy On
+    Strength" — buy_on_strength lane added 2026-10-13: ride an already-
+    proven ret_10d>+5% move during IHSG's BOUNCE_OFF_LOW recovery phase,
+    the complementary opposite of OSB-v2's CRASH_FAST deep-oversold bet,
+    see engine/buy_on_strength.py's docstring and memory
+    project_ret10d_crash_bounce_dna_filter_oos_validated_2026_10_13.md +
+    follow-ups) as SEPARATE labeled sections, NOT merged into one score/
+    list — confirmed 0% day-level overlap between BOW and VCP (see memory
     project_bow_vcp_overlap_2026_09_21.md), so a merge would just be
     misleading. All read the picks history each nightly job already
     maintains (see engine/nightly.py hooks) — no live scan here, same
@@ -4263,7 +4277,8 @@ async def swing_command(update, context):
     # FF PRIORITY booster sorts first (validated 2026-10-07, see
     # engine/oversold_bounce_v2.py's _ff_pos_days_5 docstring), ff_ratio_5d
     # remains the tiebreak within/outside priority -- never a hard gate.
-    osb_active.sort(key=lambda p: (not p.get("ff_priority", False), p.get("ff_ratio_5d") is None, -(p.get("ff_ratio_5d") or 0)))
+    osb_active.sort(key=lambda p: (p.get("tier") != "TIER1", not p.get("ff_priority", False),
+                                    p.get("ff_ratio_5d") is None, -(p.get("ff_ratio_5d") or 0)))
 
     vcp_picks = vcp_pillar_engine.load_vcp_picks()
     vcp_active = [p for p in vcp_picks if p.get("status") == "ALIVE"]
@@ -4303,16 +4318,20 @@ async def swing_command(update, context):
                         -(macd_confirm_pillar_engine.win_rate_of(p) or 0))
     )
 
-    if not bow_active and not osb_active and not vcp_active and not macd_confirm_active:
+    bos_picks = buy_on_strength_engine.load_buy_on_strength_picks()
+    bos_active = [p for p in bos_picks if p.get("status") == "ALIVE"]
+    bos_active.sort(key=lambda p: -p.get("ret_10d_at_trigger", 0))
+
+    if not bow_active and not osb_active and not vcp_active and not macd_confirm_active and not bos_active:
         await core.safe_reply(
             update.message,
-            "🧭 SWING — belum ada sinyal aktif saat ini (BOW, OSB-v2, VCP, maupun MACD-confirm). "
+            "🧭 SWING — belum ada sinyal aktif saat ini (BOW, OSB-v2, VCP, MACD-confirm, maupun BOS). "
             "Lane ini jalan otomatis tiap malam via /eodscan, cek lagi besok."
         )
         return
 
     lines = [f"🧭 SWING — {len(bow_active)} BOW + {len(osb_active)} OSB-v2 + {len(vcp_active)} VCP + "
-             f"{len(macd_confirm_active)} MACD-confirm sinyal aktif"]
+             f"{len(macd_confirm_active)} MACD-confirm + {len(bos_active)} BOS sinyal aktif"]
 
     lines.append(f"\n🪶 BUY ON WEAKNESS ({len(bow_active)})")
     if not bow_active:
@@ -4365,8 +4384,15 @@ async def swing_command(update, context):
         ff_tag = f" | 🟢 FF {ff:+.1f}% (5d)" if ff is not None and ff > 0 else (f" | 🔴 FF {ff:+.1f}% (5d)" if ff is not None else "")
         priority_tag = " ⭐ FF PRIORITY" if p.get("ff_priority") else ""
         tp1_note = " ✅ TP1 tersentuh" if p.get("tp1_touched") else ""
+        # TIER1 (2026-10-13, CRASH_FAST-only, see engine/oversold_bounce_v2.py
+        # docstring): RSI AND MACD both extreme -- high-conviction subset,
+        # win94-96% in research vs RSI-only's 80-86%. Never set outside
+        # CRASH_FAST -- if this ever shows on a non-CRASH_FAST pick, that's
+        # a bug, not a feature.
+        macd_note = f", MACD {p['macd_line_pct_at_trigger']:.1f}%" if p.get("macd_line_pct_at_trigger") is not None else ""
+        tier1_tag = " 🏆 TIER1 (RSI+MACD, CRASH_FAST)" if p.get("tier") == "TIER1" else ""
         lines.append(
-            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger){ff_tag}{priority_tag}\n"
+            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger{macd_note}){ff_tag}{priority_tag}{tier1_tag}\n"
             f"{age_label}\n"
             f"Entry ref: {p['entry_ref_price']:,.0f}\n"
             f"SL: {p['sl_price']:,.0f} (-20%, WAJIB)\n"
@@ -4478,15 +4504,65 @@ async def swing_command(update, context):
         "tervalidasi tetap hold close-only s/d D12. SL -10% WAJIB dipakai "
         "(sudah divalidasi di semua statistik di atas)."
     )
+
+    lines.append(f"\n💪 BOS — BUY ON STRENGTH ({len(bos_active)})")
+    if not bos_active:
+        lines.append(
+            "— tidak ada sinyal aktif (lane ini hanya nyala saat IHSG sedang "
+            "BOUNCE_OFF_LOW -- fase recovery di dalam bear regime, bukan "
+            "capitulation/CRASH_FAST maupun pasar normal)."
+        )
+    for p in bos_active:
+        age = p["age_days"]
+        age_label = (f"NEW (Day {age})" if age <= 1
+                     else f"AGING (Day {age}) — ALIVE")
+        hold_note = (
+            f"\n⏰ Sudah Day {age} — menurut backtest, posisi yang belum "
+            f"resolve lewat hari ke-{buy_on_strength_engine.MAX_HOLD_GUIDANCE_DAYS} "
+            "cenderung ret/hari-nya memburuk (bukan auto-exit, pertimbangkan "
+            "manual)."
+            if age >= buy_on_strength_engine.MAX_HOLD_GUIDANCE_DAYS else ""
+        )
+        sl_pct = p.get("sl_pct", buy_on_strength_engine.SL_PCT_NORMAL)
+        quick_sl_note = ""
+        if p.get("quick_sl_alert_pending"):
+            quick_sl_note = (
+                f"\n🚨 QUICK-SL AKTIF — hari pertama closing merah ≥2%, SL "
+                f"diperketat ke {p['sl_price']:,.0f} ({sl_pct:.0f}%). "
+                "KELUAR kalau harga tersentuh level ini."
+            )
+            p["quick_sl_alert_pending"] = False  # shown once, cleared on next save
+        sl_price = p.get("sl_price") or round(p["entry_ref_price"] * (1 + sl_pct / 100))
+        tp_price = round(p["entry_ref_price"] * (1 + buy_on_strength_engine.TP_PCT / 100))
+        lines.append(
+            f"{p['ticker']} (ret_10d {p['ret_10d_at_trigger']:+.1f}% saat trigger)\n"
+            f"{age_label}\n"
+            f"Entry ref: {p['entry_ref_price']:,.0f}\n"
+            f"SL: {sl_price:,.0f} ({sl_pct:.0f}%)\n"
+            f"TP: {tp_price:,.0f} (+{buy_on_strength_engine.TP_PCT:.0f}%)"
+            f"{hold_note}{quick_sl_note}"
+        )
+    if bos_active:
+        buy_on_strength_engine.save_buy_on_strength_picks(bos_picks)  # persist quick_sl_alert_pending clear
     lines.append(
-        "\n⚠️ BOW, OSB-v2, VCP & MACD-CONFIRM empat pilar terpisah (JANGAN digabung "
-        "jadi satu skor). BOW: winrate tinggi, gain stabil, butuh uptrend intak. "
-        "OSB-v2: kebalikan BOW (butuh trend RUSAK + IHSG bearish dd_100<=-10%), "
-        "watchlist-only belum ada auto-entry. VCP: TP1 cepat & reliable, TP2/TP3 "
-        "upside tapi tail-driven (persentase touch-rate BUKAN jaminan). "
-        "MACD-CONFIRM: BARU, langsung produksi tanpa live-track 2 minggu "
-        "(keputusan eksplisit user, lihat memory) — tag VALID/STRONG/VERY STRONG "
-        "dikunci di Day 5. SL wajib dipakai, bukan opsional."
+        "\n⚠️ BOS: ikut kekuatan yang SUDAH terbukti (ret_10d>+5%) khusus saat "
+        "market recovery dari crash -- bukan nebak dasar seperti OSB-v2. SL "
+        "normal -15%, otomatis diperketat ke -7% kalau hari pertama closing "
+        "merah ≥2% (lihat alert QUICK-SL di atas). Max hold 6 hari cuma "
+        "panduan tertulis, BUKAN auto-exit -- keputusan keluar tetap manual."
+    )
+    lines.append(
+        "\n⚠️ BOW, OSB-v2, VCP, MACD-CONFIRM & BOS lima pilar terpisah (JANGAN "
+        "digabung jadi satu skor). BOW: winrate tinggi, gain stabil, butuh "
+        "uptrend intak. OSB-v2: kebalikan BOW (butuh trend RUSAK + IHSG "
+        "bearish dd_100<=-10%), watchlist-only belum ada auto-entry. VCP: TP1 "
+        "cepat & reliable, TP2/TP3 upside tapi tail-driven (persentase "
+        "touch-rate BUKAN jaminan). MACD-CONFIRM: BARU, langsung produksi "
+        "tanpa live-track 2 minggu (keputusan eksplisit user, lihat memory) "
+        "— tag VALID/STRONG/VERY STRONG dikunci di Day 5. BOS: BARU "
+        "(2026-10-13), hanya nyala saat BOUNCE_OFF_LOW, komplementer dengan "
+        "OSB-v2 bukan tumpang-tindih (OSB-v2 nyala di CRASH_FAST). SL wajib "
+        "dipakai di semua pilar, bukan opsional."
     )
     await core.safe_reply(update.message, "\n\n".join(lines))
 

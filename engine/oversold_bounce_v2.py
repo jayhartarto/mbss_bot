@@ -20,8 +20,17 @@ including the trigger day):
     aggregate that hid this). Lane produces NOTHING outside this regime
     (deliberately FROZEN for -0% to -10%, not just "not deep enough yet" --
     that range contains a confirmed-bad sub-zone).
+  - ADDITIVE exclusion (2026-10-13, user-approved): regime_phase==
+    'BEARISH_GRIND' per engine/ihsg_regime.py's 5-phase classifier --
+    confirmed a real loser for THIS lane too (n=95, mean-1.27%, SL rate
+    31.6%, worst of all 5 phases) when re-tested during the ret_10d BOS
+    lane's research. Does NOT change the dd_100<=-10% threshold itself,
+    only adds this on top -- see
+    project_ret10d_wiring_prep_osbv2_liquidity_independence_2026_10_13.md.
   - RSI14 (Wilder, ABSOLUTE value, NOT cross-sectional percentile): 20 <=
-    RSI14 < 40.
+    RSI14 < 40 -- MANDATORY outside CRASH_FAST. INSIDE CRASH_FAST
+    specifically (2026-10-13, user-approved, see TIER1/union note below),
+    relaxed to a UNION with the MACD condition.
   - price_vs_sma20_pct <= -10% (absolute threshold).
   - Liquidity: value_traded (20d avg) >= 1B IDR.
   - Trigger (MANDATORY, not a booster -- without it this RSI band is
@@ -30,9 +39,38 @@ including the trigger day):
     same day (rallying WITH the market-wide move, not an idiosyncratic
     spike).
 
+TIER1 / union widening, CRASH_FAST ONLY (2026-10-13, user-approved):
+a broad DNA search specifically within CRASH_FAST days found
+macd_line_pct (SMA12-26, % of price) at its most-negative extreme is an
+EVEN STRONGER mean-reversion signal than RSI there (8.35pp quintile
+spread vs RSI's 4.68pp) -- re-discovering this lane's own philosophy from
+scratch, not a different pattern. Re-validated via a 2-way time-split
+within episode 14 (the only episode with enough CRASH_FAST days --
+episode 13 only had 1 CRASH_FAST day total, too thin to cross-validate):
+RSI-AND-MACD stack wins 94-96% both directions vs RSI-alone's 80-86%.
+Tested as a UNION (RSI-OR-MACD) replacing RSI outright -- barely moves
+daily pick volume (the MACD-only extras are rare) and underperforms the
+AND-stack, so the design here is: WIDEN the gate to admit RSI-OR-MACD
+qualifiers (keeps volume similar to RSI-only), and flag the AND-overlap
+(both qualify) as `"tier": "TIER1"` for conviction sorting/display.
+`MACD_TIER1_CUTOFF_CRASH_FAST = -18.0` (fixed production cutoff, averaged
+from the 4 OOS-split cutoffs found: -18.42, -18.34, -15.40, -19.86).
+**CRITICAL SCOPE LIMIT, confirmed via a September 2026 retroactive check**:
+this does NOT generalize outside CRASH_FAST -- in September (0 CRASH_FAST
+days, mostly PULLBACK_IN_BOUNCE/BOUNCE_OFF_LOW), the one historical "Tier1"
+match (DWGL) LOST -11.11%, and MACD-only candidates were weak (win50%,
+mean-0.56%, n=2). The RSI-OR-MACD union/TIER1 logic below is gated behind
+`is_crash_fast` -- NEVER applied when the entry-day regime_phase is
+anything else. Also still only validated within ONE bear episode (14) --
+needs a 3rd independent crash to properly cross-validate. See memory
+project_five_lane_regime_phase_audit_2026_10_13.md and its _2026_10_13.md
+follow-ups (osbv2_macd_variant_search, osbv2_tier_sept_checkin) for the
+full trail -- do not re-derive or widen scope without reading that first.
+
 Ranking booster (NOT a gate): foreign_net_ratio_5d > 0 preferred (OOS-
 validated, win 79-84% both episodes vs 50-74% when negative) -- sort
-candidates by this descending, never exclude on it.
+candidates by this descending, never exclude on it. TIER1 (when present)
+takes priority over this in sort order -- see compute_oversold_bounce_v2_candidates.
 
 Exit reference (informational display only -- NO auto-entry, same as the
 old lane): TP1 (+5%, conservative, touch flag only, does NOT end the
@@ -55,6 +93,7 @@ import pandas as pd
 from engine import legacy_core as core
 import engine.market as market_engine
 import engine.buy_on_weakness as bow_engine  # reuse _load_ff_lookup, same FF archive
+import engine.ihsg_regime as ihsg_regime_engine  # BEARISH_GRIND exclusion, 2026-10-13
 
 PICKS_FILE = os.path.join(core.PROJECT_ROOT, "oversold_bounce_v2_picks.json")
 
@@ -70,6 +109,8 @@ TP2_PCT = 10.0  # main resolution
 SL_PCT = -20.0  # do NOT tighten below this, see docstring
 ALERT_MAX_AGE_DAYS = 20  # trading days, matches the TP/SL touch-rate backtest horizon
 
+MACD_TIER1_CUTOFF_CRASH_FAST = -18.0  # see TIER1/union docstring note above; CRASH_FAST-gated only
+
 
 def _compute_latest_features(df: pd.DataFrame) -> dict | None:
     """df: output of core.get_ohlcv_daily_from_db (index=date, columns
@@ -84,11 +125,14 @@ def _compute_latest_features(df: pd.DataFrame) -> dict | None:
     vs_sma20_pct = (close / sma20 - 1) * 100
     value_traded_20d = (close * volume).rolling(20).mean()
     ret_1d_pct = close.pct_change() * 100
+    sma12 = close.rolling(12).mean(); sma26 = close.rolling(26).mean()
+    macd_line_pct = (sma12 - sma26) / close * 100  # TIER1/union, CRASH_FAST-only, see module docstring
 
     rsi_last = rsi_series.iloc[-1]
     vs_sma20_last = vs_sma20_pct.iloc[-1]
     value_traded_last = value_traded_20d.iloc[-1]
     ret_1d_last = ret_1d_pct.iloc[-1]
+    macd_last = macd_line_pct.iloc[-1]
 
     if pd.isna(rsi_last) or pd.isna(vs_sma20_last) or pd.isna(value_traded_last) or pd.isna(ret_1d_last):
         return None
@@ -99,6 +143,7 @@ def _compute_latest_features(df: pd.DataFrame) -> dict | None:
         "vs_sma20_pct": float(vs_sma20_last),
         "value_traded_20d": float(value_traded_last),
         "ret_1d_pct": float(ret_1d_last),
+        "macd_line_pct": float(macd_last) if pd.notna(macd_last) else None,
         "is_green": bool(close.iloc[-1] > open_.iloc[-1]),
         "latest_date": df.index[-1].strftime("%Y-%m-%d"),
     }
@@ -142,10 +187,15 @@ def _ff_pos_days_5(ticker: str, df: pd.DataFrame, ff_lookup: pd.DataFrame) -> in
     return int((net_ratio > 0).sum())
 
 
-def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, ihsg_ret_1d_today: float | None) -> dict | None:
+def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, ihsg_ret_1d_today: float | None,
+                     is_crash_fast: bool = False) -> dict | None:
     """Returns a candidate dict if `ticker` qualifies TODAY, else None.
     Caller is responsible for the IHSG dd_100 regime gate (checked once for
-    the whole batch, not per-ticker -- see compute_oversold_bounce_v2_candidates)."""
+    the whole batch, not per-ticker -- see compute_oversold_bounce_v2_candidates).
+    `is_crash_fast`: whether TODAY's regime_phase is CRASH_FAST -- gates the
+    RSI-OR-MACD union/TIER1 widening, see module docstring. False (the
+    default) reproduces the exact pre-2026-10-13 behavior (RSI mandatory,
+    no MACD/tier logic at all)."""
     if ihsg_ret_1d_today is None:
         return None  # trigger is mandatory and needs IHSG's own day return -- can't evaluate without it
 
@@ -154,8 +204,17 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, ihsg_ret_1d_today: flo
     if feats is None:
         return None
 
-    if not (RSI_LO <= feats["rsi14"] < RSI_HI):
-        return None
+    rsi_ok = RSI_LO <= feats["rsi14"] < RSI_HI
+    macd_ok = (is_crash_fast and feats["macd_line_pct"] is not None
+               and feats["macd_line_pct"] <= MACD_TIER1_CUTOFF_CRASH_FAST)
+    tier1 = is_crash_fast and rsi_ok and macd_ok
+
+    if is_crash_fast:
+        if not (rsi_ok or macd_ok):
+            return None  # union widening, CRASH_FAST only -- see docstring
+    else:
+        if not rsi_ok:
+            return None  # unchanged outside CRASH_FAST -- RSI stays mandatory
     if feats["vs_sma20_pct"] > DIST_SMA20_MAX:
         return None
     if feats["value_traded_20d"] < LIQ_FLOOR:
@@ -195,6 +254,8 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, ihsg_ret_1d_today: flo
         # (booster, not hard gate). See _ff_pos_days_5 docstring.
         "ff_priority": bool(ff_pos_days5 is not None and ff_pos_days5 >= 3),
         "rsi14_at_trigger": round(feats["rsi14"], 1),
+        "macd_line_pct_at_trigger": round(feats["macd_line_pct"], 1) if feats["macd_line_pct"] is not None else None,
+        "tier": "TIER1" if tier1 else None,  # CRASH_FAST-only, see module docstring
         "resolved_date": None,
         "resolved_ret_pct": None,
     }
@@ -207,12 +268,34 @@ def compute_oversold_bounce_v2_candidates(tickers: list[str]) -> list[dict]:
     if ihsg_dd100 is None or ihsg_dd100 > IHSG_DD100_GATE:
         return []  # regime frozen (not deep enough) or unknown -- lane deliberately produces nothing
 
+    # BEARISH_GRIND exclusion (2026-10-13, user-approved): re-tested this
+    # lane's exact production gate tagged by engine/ihsg_regime.py's 5-phase
+    # classifier (see memory project_ret10d_wiring_prep_osbv2_liquidity_
+    # independence_2026_10_13.md) -- BEARISH_GRIND is a confirmed LOSER for
+    # OSB-v2 too (n=95, not thin, mean-1.27%, SL rate 31.6%, worst of all 5
+    # phases) even though it still passes the dd_100<=-10% gate above. This
+    # does NOT touch the dd_100<=-10% threshold itself (that stays exactly
+    # as validated in project_oversold_bounce_v2_locked_design_2026_10_05.md)
+    # -- it ONLY adds an exclusion on top, same "additive, don't re-derive"
+    # discipline as everywhere else in this codebase. Fail-open on regime-
+    # fetch failure (unknown phase does NOT exclude) -- same missing=neutral
+    # convention as the rest of this lane, since the dd_100 gate above is
+    # the primary/already-validated regime check.
+    regime = ihsg_regime_engine.get_ihsg_regime_today()
+    if regime is not None and regime.get("regime_phase") == "BEARISH_GRIND":
+        return []
+    # TIER1/union widening gate flag (2026-10-13, user-approved, CRASH_FAST
+    # only -- see module docstring). Fails closed (False) on regime-fetch
+    # failure, i.e. no widening when phase is unknown -- same conservative
+    # default as everywhere else in this lane.
+    is_crash_fast = bool(regime is not None and regime.get("regime_phase") == "CRASH_FAST")
+
     ihsg_ret_1d_today = market_engine.get_ihsg_return_today()
     ff_lookup = bow_engine._load_ff_lookup()
     candidates = []
     for t in tickers:
         try:
-            c = evaluate_ticker(t, ff_lookup, ihsg_ret_1d_today)
+            c = evaluate_ticker(t, ff_lookup, ihsg_ret_1d_today, is_crash_fast=is_crash_fast)
         except Exception as e:
             print(f"⚠️ Oversold Bounce v2: gagal evaluasi {t}: {e}")
             continue
