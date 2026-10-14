@@ -117,30 +117,23 @@ def check_vcp() -> list[str]:
 
 
 def check_macd() -> list[str]:
-    """Expected win% per resolved pick = win_rate_of() at its LOCKED
-    day-5 tag (the tag stays fixed from day 5 through D12's close-only
-    resolution, so day-5 is the closest apples-to-apples basis for a
-    full-hold comparison)."""
+    """Expected win% = WIN_RATE_FLAT, the single backtested win-rate for
+    the 2026-10-14 regime-gated fixed-exit redesign (BOUNCE_OFF_LOW gate,
+    SL-6%/TP8%/maxhold5 -- see engine/macd_confirm_pillar.py module
+    docstring). No more per-(day,lane,tag) cells to average."""
     import engine.macd_confirm_pillar as macd_engine
 
     resolved = _resolved_recent(macd_engine.load_macd_confirm_picks())
     if len(resolved) < MIN_N:
         return []
     realized = _realized_win_pct(resolved)
-    expected_vals = []
-    for p in resolved:
-        w = macd_engine.win_rate_of({"tag": p.get("tag"), "lane": p.get("lane"), "age_days": 5})
-        if w is not None:
-            expected_vals.append(w)
-    if not expected_vals:
-        return []
-    expected = sum(expected_vals) / len(expected_vals)
+    expected = macd_engine.WIN_RATE_FLAT
     gap = expected - realized
     if gap < GAP_THRESHOLD_PP:
         return []
     return [
         f"⚠️ MACD-confirm: realized win {realized:.0f}% (n={len(resolved)}, {LOOKBACK_DAYS}d) vs "
-        f"rata-rata ekspektasi tabel {expected:.0f}% — selisih {gap:.0f}pt, pertimbangkan review WIN_RATE_TABLE."
+        f"ekspektasi {expected:.0f}% — selisih {gap:.0f}pt, pertimbangkan review desain exit."
     ]
 
 

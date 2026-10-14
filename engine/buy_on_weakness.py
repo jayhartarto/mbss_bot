@@ -298,6 +298,68 @@ def should_hide_from_rank(tier: int, zone_key: str) -> bool:
     return tier == 3 and zone_key == "NAIK_KUAT" and TIER3_NAIK_KUAT_HIDE
 
 
+# Aging-DISKON x IHSG-regime hide, validated 2026-10-14 (see memory
+# project_swing_menu_trimming_2026_10_14.md for the full research trail).
+# Reconstructed historical BOW trades (20/40d design) and checked the
+# EVENTUAL outcome of every trade that reached a given unrealized-drawdown
+# depth, conditioned on engine/ihsg_regime.py's regime_phase at the moment
+# it reached that depth:
+#   - CRASH_FAST and PULLBACK_IN_BOUNCE are reliably bad at EVERY depth
+#     tested (win 13-38%, consistently negative mean_ret) -- even a
+#     shallow 8-10% drawdown in PULLBACK_IN_BOUNCE is already the worst
+#     cell at that depth (win 13.0%). Deeper (10-14%, 14-18%) is worse
+#     still (win as low as 15-21%). The CURRENT ongoing bear episode (14)
+#     is uniquely catastrophic for the 14-18% band specifically (n=42,
+#     win=2.4%, mean=-15.87%) -- only 1/42 ever recovered.
+#   - BOUNCE_OFF_LOW is reliably GOOD at every depth (win 58-86%) -- these
+#     are real recoveries in progress, NEVER hide regardless of depth.
+#   - BEARISH_GRIND/NEUTRAL_BULLISH are depth-dependent: fine-to-good
+#     through 10-14% (win 44-82%), only turn bad at 14-18%+ (win 25-30%).
+#   - Shallow drawdown (-1% to -8%) was separately checked for all 5
+#     regimes. Win% alone looked survivable through -8% for CRASH_FAST/
+#     PULLBACK_IN_BOUNCE specifically (42-58%, non-monotonic, thin n=14-24
+#     per band) -- but mean_ret for BOTH dangerous regimes turns negative
+#     as soon as depth passes -4% and STAYS negative at every band after
+#     (PULLBACK_IN_BOUNCE: +0.27 -> -2.47 -> -0.94 -> -9.1 -> -9.6 -> -11.1;
+#     CRASH_FAST: +0.05 -> -4.70 -> -6.56 -> -8.9 -> -13.2 -> -13.8, across
+#     1-4/4-6/6-8/8-10/10-14/14-18% bands). User's call 2026-10-14: treat
+#     -4% as the real breakpoint for these two regimes specifically (mean
+#     sign, not win%, is the deciding signal) rather than waiting for the
+#     -8% win%-cliff -- this is MORE conservative than the win%-only read,
+#     and the 4-8% bands it newly covers are thinner/noisier (n=14-24,
+#     non-monotonic win%) than the originally-validated -8%+ bands (n=22-37,
+#     monotonic), so treat this extension as a deliberate conservative
+#     choice, not an equally-strong finding.
+#   - BEARISH_GRIND/NEUTRAL_BULLISH's shallow bands were NOT re-examined
+#     with the same scrutiny -- their -14% floor (below) is unchanged,
+#     still based on the original win%-cliff read (fine through 10-14%,
+#     win 44-82%).
+#   - Duration-in-DISKON (consecutive days) was also checked: not an
+#     independent hide signal on its own (mild pooled drift, no cliff),
+#     but it sharpens the SAME two dangerous regimes above (e.g.
+#     PULLBACK_IN_BOUNCE win drops 37%->15%->24% across 1/2/3+ days) --
+#     confirmatory, not a separate dimension, so it's not modeled here.
+AGING_DISKON_HIDE_DANGEROUS_REGIMES = {"CRASH_FAST", "PULLBACK_IN_BOUNCE"}
+AGING_DISKON_HIDE_NEVER_REGIMES = {"BOUNCE_OFF_LOW"}
+AGING_DISKON_HIDE_DEPTH_DANGEROUS_REGIME = -4.0   # % drift, CRASH_FAST/PULLBACK_IN_BOUNCE
+AGING_DISKON_HIDE_DEPTH_OTHER_REGIME = -14.0      # % drift, BEARISH_GRIND/NEUTRAL_BULLISH
+
+
+def should_hide_aging_diskon(drift_pct: float, regime_phase: str | None) -> bool:
+    """True if this pick's current drift + the IHSG regime right now match
+    a validated bad combination (see constants above) and should be hidden
+    from /bow and /swing display. Fail-open (never hide) when regime_phase
+    is None/unknown or is BOUNCE_OFF_LOW -- missing data or a confirmed
+    recovery regime should never suppress a pick, same "missing=neutral"
+    convention used everywhere else in this codebase. Display-only, same
+    as should_hide_from_rank -- does not touch persistence/engine state."""
+    if regime_phase is None or regime_phase in AGING_DISKON_HIDE_NEVER_REGIMES:
+        return False
+    if regime_phase in AGING_DISKON_HIDE_DANGEROUS_REGIMES:
+        return drift_pct <= AGING_DISKON_HIDE_DEPTH_DANGEROUS_REGIME
+    return drift_pct <= AGING_DISKON_HIDE_DEPTH_OTHER_REGIME
+
+
 def classify_path_condition(pick: dict) -> dict | None:
     """Path-dependence override (2026-10-13, see constants above) --
     checks whether this pick's PEAK/TROUGH drift since entry (not just

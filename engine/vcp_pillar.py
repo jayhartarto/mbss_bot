@@ -86,7 +86,28 @@ TP1_PCT, TP1_TOUCH_RATE = 2.5, 72.4
 TP2_PCT, TP2_TOUCH_RATE = 5.0, 56.7
 TP3_PCT, TP3_TOUCH_RATE = 7.0, 47.7
 SL_PCT = 10.0
-ALERT_MAX_AGE_DAYS = 12
+# Max-hold cap, SHORTENED 12 -> 2 trading days (2026-10-14, user's call --
+# see memory project_swing_menu_trimming_2026_10_14.md). A maxhold sweep on
+# the clean (never-DISKON) population, TP1/SL unchanged, found ret/day
+# climbing MONOTONICALLY as the cap shortens (12d:0.595 -> 5d:0.692 ->
+# 4d:0.719 -> 3d:0.751 -> 2d:0.789, no reversal found down to 2d) --
+# shorter cap means less capital tied up per trade, and the TIMEOUT tail at
+# each cap is consistently mild (-0.28% to -0.34%, nowhere near SL's -10%)
+# so cutting it short isn't cutting into a worse loss, just a smaller gain
+# or an already-small loss. At maxhold=2, SL-hit-rate also shrinks (10/955
+# at 12d -> 4/955 at 2d, 0.42%) since there's barely time to decay that far.
+# NOT pushed to 1 day -- that would barely leave room for TP1 to resolve at
+# all (median time-to-TP1 is ~2 days) and starts looking like day-trading
+# rather than swing. This ALSO shortens the /swing "AGING" display window
+# to match (age_label reads this constant directly in commands/scan.py) --
+# a pick is now only ever shown as NEW (Day 1/2) or AGING (Day 2/2), never
+# tracked for days after that, consistent with the position itself now
+# resolving (TP/SL/TIMEOUT) within that same 2-day window.
+# CAVEAT: TP2_TOUCH_RATE/TP3_TOUCH_RATE above were validated over the
+# ORIGINAL longer horizon and are now likely overstated as informational
+# display numbers (TP2/TP3 have far less time to be reached in a 2-day
+# window) -- not re-validated this session, flagged not fixed.
+ALERT_MAX_AGE_DAYS = 2
 
 # Price-drift-since-trigger tracking, added 2026-10-11 (research/
 # vcp_drift_since_entry_2026_10_11.py + the TP2/TP3-extension follow-up,
@@ -116,9 +137,27 @@ VCP_NAIK_TP_TARGET_PCT = 5.5
 VCP_NAIK_TP1_RATE_BY_OBS_DAY = {2: 82.1, 3: 82.8, 4: 81.7, 5: 85.7, 7: 69.7, 10: 57.1}
 
 # DISKON-zone survivors: TP1-rate by obs_day, monotonically degrading --
-# used as a day-scaled PENALTY (not a hide -- no cell is thin/
-# catastrophic enough to warrant that, per the research verdict).
+# originally used ONLY as a day-scaled PENALTY in capital_rank.py (kept,
+# unchanged -- that scoring usage is separate from the display hide below).
 VCP_DISKON_TP1_RATE_BY_OBS_DAY = {2: 37.3, 3: 36.1, 4: 29.5, 5: 25.0, 7: 11.4, 10: 5.3}
+
+# SUPERSEDES the "no hide" read above for DISPLAY purposes (2026-10-14,
+# user's call, see memory project_swing_menu_trimming_2026_10_14.md): a
+# fresh full-outcome backtest (win%/mean_ret through SL/TIMEOUT, not just
+# TP1-touch-rate by a fixed obs_day) found a much starker picture --
+# reconstructed 1385 VCP episodes, trades that EVER closed <=DRIFT_DISKON_MAX
+# before resolving: n=430, win=30.5%, mean=-4.38%; trades that never did
+# ("clean"): n=955, win=93.5%, mean=+2.11%. The TP1-rate-by-day table above
+# only measured whether TP1 specifically got touched by a given day, not
+# the trade's eventual fate through SL/TIMEOUT -- this fuller measure is
+# what justifies a HIDE, not just a penalty. Also re-swept SL/TP on the
+# clean population (tighter SL toward -5%, higher TP) looking for an
+# improvement: every combination tested underperformed the current
+# TP1=+2.5%/SL=-10% design on both win% and ret/day -- do NOT change
+# TP1_PCT/SL_PCT, they're already optimal for the clean population.
+# Regime-robust (win 89.5-94.4% across all 5 IHSG regime_phases, CRASH_FAST
+# thin at n=19 but directionally consistent).
+VCP_DISKON_HIDE = True
 
 
 def classify_drift_zone(drift_pct: float) -> tuple[str, str]:
@@ -136,6 +175,16 @@ def classify_drift_zone(drift_pct: float) -> tuple[str, str]:
     if drift_pct < DRIFT_NAIK_KUAT_MIN:
         return "NAIK", "📈 Konfirmasi lanjut (booster)"
     return "NAIK_KUAT", "🚀 Naik jauh (jarang terjadi di VCP)"
+
+
+def should_hide_vcp_diskon(pick: dict) -> bool:
+    """True if this pick has EVER closed <=DRIFT_DISKON_MAX since entry
+    (sticky `ever_diskon` flag, not just today's zone) and should be hidden
+    from /swing display -- see VCP_DISKON_HIDE docstring above for the
+    validated win%/mean_ret split. Defaults to False for picks created
+    before this field existed (defensive .get, same convention as other
+    missing-field handling in this module)."""
+    return bool(pick.get("ever_diskon", False)) and VCP_DISKON_HIDE
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +318,7 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame, rs20_ihsg: float | Non
         "price_drift_pct": 0.0,
         "drift_zone": "NETRAL",
         "drift_label": "😌 Baru alert",
+        "ever_diskon": False,
         "resolved_date": None,
         "resolved_ret_pct": None,
     }
@@ -366,6 +416,14 @@ def _resolve_active_pick(pick: dict) -> dict:
         pick["price_drift_pct"] = round(drift_pct, 2)
         pick["drift_zone"] = zone_key
         pick["drift_label"] = zone_label
+        # Sticky "ever reached DISKON" flag (2026-10-14, see
+        # should_hide_vcp_diskon docstring) -- once true, stays true even if
+        # price later recovers above the DISKON threshold, same "first-reach"
+        # convention as the BOW aging-DISKON research. Deliberately NOT reset
+        # on recovery: the validated finding is about trades that EVER
+        # cracked DISKON, not just today's snapshot.
+        if zone_key == "DISKON":
+            pick["ever_diskon"] = True
         pick["age_days"] = pick.get("age_days", 1) + 1
         if pick["age_days"] > ALERT_MAX_AGE_DAYS:
             pick["status"] = "EXPIRED"

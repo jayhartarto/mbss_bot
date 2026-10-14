@@ -1,153 +1,118 @@
 """
-engine/macd_confirm_pillar.py — MBSS v2 (2026-09-22, 3rd swing-trade lane)
+engine/macd_confirm_pillar.py — MBSS v2 (2026-09-22, 3rd swing-trade lane;
+MECHANICALLY REDESIGNED 2026-10-14, see memory
+project_swing_menu_trimming_2026_10_14.md for the full research trail --
+this replaces the original D1-D5 tag/close-only-D12 design below).
 
-"Buy the grinding trend, confirmed by its own follow-through." Third swing
-pillar alongside engine/buy_on_weakness.py and engine/vcp_pillar.py. Full
-research trail (10d MACD-centerline consistency baseline, ATR%/liquidity-
-band/std_ret_10d Stage-1 derivation, 3-lane split, D1-D5 magnitude-
-confirmation tiering, SL/TP correction, dozens of rejected candidate
-filters) lives in memory `project_macd_n10_stage1_locked_final_2026_09_22.md`
-and `project_macd_confirm_pillar_shipped_2026_09_22.md` (the sibling files
-they link; grind/deep-drawdown threads are a DIFFERENT, PARKED pillar —
-do not confuse). Do not re-derive the thresholds below without re-reading
-that trail first.
-
-IMPORTANT framing, user-corrected 2026-09-22: the D1-D5 tag is an ENTRY-
-TIMING / watchlist signal, NOT a live-position exit-management tool. The
-candidate has NOT been bought yet during D1-D5 -- the trader watches the
-tag develop and only enters (at whatever the market price is when they
-act) if/once conviction looks good; if it shows FADING, they simply don't
-enter, they don't "exit" anything. `entry_ref_price` is the D0/D1 anchor
-price the whole tag ladder and TP/SL math is scaled from, not a claim
-that capital is already deployed.
-
-Entry gate (Stage-1, all features causal, from bars up to and including
-the trigger day):
+Entry gate (Stage-1, UNCHANGED, all features causal, from bars up to and
+including the trigger day):
   - macd_line (SMA12-SMA26, Brights convention) > 0 for >=90% of the
     trailing 10 trading days
   - macd_slope_5d (macd_line - macd_line 5d ago) >= 0 (not diving)
   - no 3-consecutive-down-day streak anywhere in the trailing 10d window
-  - atr14_pct (Wilder) <= 5.78 -- tightened from an initial 90th-percentile
-    guess after a direct head-to-head check showed the tighter cap
-    dominates on every axis (win/mean/SL) OOS, not a tradeoff
+  - atr14_pct (Wilder) <= 5.78
   - value_20d_avg (liquidity) in [19,586,155 ; 1,259,645,238] IDR -- a
-    HUMP-shaped band, not a ceiling: both illiquid (<19.6M) and mega-cap
-    (>1.26B) names underperform. Do not simplify to a single-sided filter.
-  - std_ret_10d (10d daily-return stdev) <= 4.29% -- picked over the
-    equally-predictive but redundant bb_bandwidth_pct/cum_ret_10d (65-83%
-    pairwise overlap, combining all three barely helps beyond picking one)
+    HUMP-shaped band, not a ceiling
+  - std_ret_10d (10d daily-return stdev) <= 4.29%
+  - FF exclusion: net_value_z20<=-1.0 vs this ticker's own trailing
+    20d baseline (see _ff_net_value_z20_excluded)
 
-Lane assignment (evaluated once, at Stage-1 trigger time):
-  - Quality(D2): value_20d_avg in [19,586,155 ; 59,722,504) -- the single
-    BEST-performing liquidity decile within Stage-1, not just "low end"
-  - HighRisk/Reward: rsi14>=81.01 OR that day's own return>=+4.17% OR
-    that day's own gap>=+1.82% OR that day's own H-L range<=0.51% -- any
-    ONE of these signal-day extremes flags it (union, not AND). This is a
-    genuine high-risk/high-reward tier (SL-rate ~3x baseline OOS), not a
-    safety exclusion -- surfaced as a tag, kept in the funnel.
-  - Core/Neutral: everything else (the majority, ~72% of Stage-1 volume)
+Lane assignment (Quality(D2)/HighRisk/Reward/Core-Neutral, UNCHANGED
+formula) is kept for INFORMATIONAL display only as of 2026-10-14 -- see
+"2026-10-14 REDESIGN" below for why it no longer gates or scores anything.
+
+2026-10-14 REDESIGN (supersedes everything below this point in spirit;
+old text kept further down for research-trail continuity, read the new
+findings first):
+
+  A full re-investigation this session found the ENTIRE D1-D5 tag system
+  (FADING/VALID/STRONG/VERY STRONG) does NOT predict anything useful once
+  honestly measured with a FRESH-ENTRY-ANCHORED (not D1-anchored) method:
+  tag only distinguishes eventual PAYOUT SIZE, not win-rate (all tags sit
+  near 45-47% win pooled) -- the original 70-90%-by-tag numbers in this
+  docstring's older sections were a D1-entry-anchoring lookahead artifact,
+  not real. No D1-knowable entry-gate feature (consistency magnitude,
+  MACD-slope, ATR, liquidity, RSI, signal-day candle strength, FF
+  z-score, lane) predicts win-rate OR loser/FADING status either (all
+  spreads under ~7pp, same noise signature as a rejected OSB-v2 lead that
+  session). The ONE real, large, actionable lever found: **regime_phase
+  at the entry/trigger day**. BOUNCE_OFF_LOW is consistently and by far
+  the best regime across BOW, VCP, OSB-v2 AND this lane (pooled baseline
+  win=56.4% vs 36.8-44.0% for the other 4 phases, n=3166 of 14268) --
+  PULLBACK_IN_BOUNCE is consistently the worst everywhere this session
+  (third independent confirmation of that specific pattern, see
+  buy_on_weakness.py / vcp_pillar.py for the other two).
+
+  Exit redesign: also tested whether real SL/TP-touch mechanics (vs the
+  old close-only-D12) and various maxhold caps improve ret/day, same
+  methodology as buy_on_weakness.py/vcp_pillar.py's own maxhold sweeps
+  this session. Tried: conditional continuation keyed off the D2-D5 tag
+  (both "ride to day5 then exit" and "exit immediately on a FADING day"
+  variants) -- BOTH underperform a plain fixed exit on ret/day (cutting
+  early on a stalled/fading signal forfeits more comebacks than it saves,
+  same lesson as a rejected BOW idea this session). Tried a shrinking-
+  threshold "early-TP" idea (bank a small profit on day 1-4 if floating
+  gain is still modest) -- works well with a near-zero floor but the gain
+  from that comes almost entirely from banking sub-1% floating profits,
+  which a real broker fee would eat; once floored at a fee-realistic 1%,
+  the benefit evaporates back to baseline. User's final call: skip all
+  the conditional machinery, use the plain fixed exit.
+
+  **LOCKED DESIGN**: entry gated additionally to regime_phase==
+  BOUNCE_OFF_LOW (checked ONCE per nightly run, same pattern as
+  engine/oversold_bounce_v2.py's dd_100 gate -- produces zero candidates
+  on nights it doesn't match, that's expected, not a bug). Exit: SL=-6%
+  and TP=+8% as REAL intraday touch triggers (checked against the day's
+  own Low/High, SL checked first same "conservative same-day-ambiguity"
+  convention as every other lane here), maxhold=5 trading days (EXPIRED
+  at close if neither touched by then). Backtested (BOUNCE_OFF_LOW
+  population, n=3166): win=62.2%, mean=+1.23%/trade, ret/day=0.296 --
+  this specific combo was chosen over several ret/day-superior but either
+  thinner or practically-awkward alternatives (e.g. maxhold=1 TP20/SL10
+  reached ret/day=0.508 but collapses the "swing" hold into an overnight
+  flip, blurring into this bot's day-trade lanes -- user's explicit call
+  to keep this pillar's swing character over maximizing ret/day).
+
+  The D1-D5 tag/lane-keyed TP tables, win-rate tables, chase-cutoff, and
+  deep-fade-from-peak logic below are RETIRED from decision-making --
+  `is_chasing_too_high()` and `needs_hard_sl_warning()` now always return
+  False (their premises no longer apply: there's no more lane-specific
+  fade-risk once a REAL mechanical -6% SL caps every trade uniformly, and
+  no D1-knowable chase signal survived re-testing). `win_rate_of()` now
+  returns the single flat backtested rate (see WIN_RATE_FLAT) for any
+  active pick rather than a per-(day,lane,tag) lookup -- kept as a
+  function (not deleted) because engine/nightly.py's momentum-pillar
+  adjustment calls it directly; this is the one deliberate blast-radius
+  consideration from this redesign, see that call site before changing
+  the function signature further.
+
+  Alerts now show ONCE at entry (Day 1) and go silent until resolution
+  (SL_HIT/TP_HIT/EXPIRED) -- there is no decision point in days 2-5
+  anymore (confirmed by every conditional-exit test above), so repeating
+  "AGING Day N/5" served no purpose. commands/scan.py's swing_command
+  filters display to age_days<=1 for this lane; the persisted pick still
+  tracks/resolves normally in the background regardless of what's shown
+  (house convention: never filter in the engine/persistence layer).
+
+--- ORIGINAL 2026-09-22/23 RESEARCH TRAIL (tag system, retired 2026-10-14
+but kept for history -- do not revive without re-reading the redesign
+section above first) ---
+
+IMPORTANT framing, user-corrected 2026-09-22: the D1-D5 tag is an ENTRY-
+TIMING / watchlist signal, NOT a live-position exit-management tool.
 
 Stage-2 conviction tiering (checked DAILY from age_day 1 through 5, then
-LOCKED -- no further checks past day 5, position just holds to the D12
-horizon regardless of tag from then on): the single strongest confirmation
-signal found in the whole research thread is simply the MAGNITUDE of the
-candidate's own return so far vs its entry price (not a technical
-snapshot -- combining with up_days/smoothness was tried and DILUTED the
-signal, don't re-add them). Tertile cut of the historical confirmed-
-positive (ret>0) distribution, thresholds re-derived per age_day (the
-tertile edges widen as more days pass):
+LOCKED): tertile cut of the historical confirmed-positive (ret>0)
+distribution, thresholds re-derived per age_day:
   FADING:      ret_so_far <= 0
   VALID:       0 < ret_so_far <= t1(age_day)
   STRONG:      t1(age_day) < ret_so_far <= t2(age_day)
   VERY STRONG: ret_so_far > t2(age_day)
-Historical OOS win-rate by final (day-5) tag: FADING ~27%, VALID ~64%,
-STRONG ~79%, VERY STRONG ~87% -- monotonic and clean in all 3 lanes.
-CAVEAT (user-flagged 2026-09-23, confirmed by the rework below): this
-70-90% figure is an ILLUSION for anyone entering TODAY -- it's anchored
-to entry_ref (Day 1) and mostly reflects gains a Day-1 entrant already
-banked by the time the tag reaches VERY STRONG, not the odds of a FRESH
-entry from here. The number that actually matters for a fresh entrant is
-WIN_RATE_TABLE below (21-61% depending on day/lane/tag, current-price
-basis) -- always read that dynamically, never quote this paragraph's
-70-90% as if it applies to someone buying now.
-
-SL / TP1 / TP2 (revised 2026-09-22, then TP1/TP2+win-rate fully
-reworked 2026-09-23 -- read this before touching any of the three):
-
-  MISTAKE #1 (caught by user, verified with data, RETRACTED): SL was
-  first set to entry_ref_price itself ("the FADING trigger level").
-  Directly tested what happens if that's enforced as a REAL every-day
-  stop (exit the moment low<=entry on ANY day 1-12): **100% of trades
-  get stopped at exactly 0% return** -- virtually every position dips to
-  its own entry price at some point during a 12-day window from normal
-  volatility, so a breakeven stop ALWAYS fires. Also tested "exit at the
-  Day-5 checkpoint if still fading" (matching the tag decomposition) --
-  that ALSO makes the aggregate population WORSE than doing nothing
-  (win 50.6%->33.8%, median flips negative), because ~19-29% of Day-5-
-  fading trades still recover to a winner by D12 if left alone, and an
-  early cut throws that away. **Conclusion: do not use any tag-derived
-  price as a real stop-execution level. The tag is for the ENTRY
-  decision (enter or don't), never for deciding to exit something
-  already held.**
-
-  FIX: SL = entry_ref_price x (1 - SL_PCT/100), SL_PCT=10.0 -- this is
-  NOT a new number, it's exactly SL_SWING=-10% that every single win/
-  mean/SL-rate statistic in the whole research thread was already
-  computed with. Going back to it is undoing an unvalidated detour, not
-  adding a new untested rule.
-
-  MISTAKE #2 (corrected 2026-09-22): TP was framed as "price needed to
-  reach VERY STRONG today" (a tier-upgrade milestone). Kept as a
-  secondary `next_tier_price()` helper, but the PRIMARY TP1/TP2 became
-  real historical HIGH-touch-rate targets during the D1-D12 hold, same
-  informational style as vcp_pillar.py's TP1/TP2/TP3.
-
-  2026-09-23 REWORK (user request: "sisa ceiling gain berapa untuk TP
-  dinamis, dan dasar riset untuk jangan chasing"): the 2026-09-22 TP1/
-  TP2 were a SINGLE FLAT number per tag, blended across all entry days
-  1-5 and computed from the ORIGINAL entry_ref (not the price a fresh
-  entrant would actually pay). Re-ran the backtest keyed by
-  (age_day, lane, tag) with the REMAINING window only (from that day's
-  own close forward to D12, not from entry_ref) --
-  research/macd_confirm_d1d5_remaining_ceiling_2026_09_23.py then
-  research/macd_confirm_d1d5_tp_formula_2026_09_23.py (full matrix, all
-  36 (day x lane x tag) cells n>=19, no thin-cell fallback needed).
-  TP1 = ~65%-touch quantile, TP2 = ~40%-touch quantile of the remaining
-  max-high return; win-rate = P(remaining_close_ret>0) from that day's
-  price, i.e. "if I buy fresh TODAY at this tag, not at the original
-  signal day." `TP_TABLE_BY_DAY_LANE_TAG[age_day][lane][tag]` and
-  `WIN_RATE_TABLE[age_day][lane][tag]` (age_day 1 still reuses day-2's
-  numbers, day 1 has no real tag). VALIDATED actual exit remains
-  CLOSE-ONLY at the D12 horizon -- TP1/TP2 stay reference-only, never
-  wired as an actual sell trigger.
-
-  KEY FINDING from the rework: in Quality(D2) lane specifically, VERY
-  STRONG is the WORST forward-looking bucket (win_remain 21%/27%/36%/
-  43% for day 2/3/4/5 -- below that lane's own VALID/STRONG), the
-  opposite of Core/Neutral and HighRisk/Reward where VERY STRONG stays
-  the BEST bucket every day (HighRisk/Reward VERY STRONG: win_remain
-  53-61%, huge remaining ceiling e.g. Day2 TP2 +31%). This does NOT
-  contradict the original "monotonic by day-5 tag" finding (that stat
-  is anchored to entry_ref, this one is anchored to today's price) --
-  it means a FRESH entry into an already-VERY-STRONG Quality(D2) name
-  is chasing, while the same tag in the other two lanes is not. See
-  `CHASE_CUTOFF_BY_DAY_QUALITY_D2` below -- `is_chasing_too_high()` is
-  now lane+day-aware: gates ONLY Quality(D2) (day-specific ret_so_far
-  cutoff, empirically the top quintile's lower bound where win clearly
-  degrades), leaves Core/Neutral ungated, and leaves HighRisk/Reward
-  ungated (running up there is a genuine continuation signal, not
-  exhaustion -- flagging it would be a false warning).
-
-Win-rate display: shown per candidate using the SMALLEST backtest bucket
-that actually matches its current (lane, tag, age_day) combination --
-NOT a single blended number. `WIN_RATE_TABLE[age_day][lane][tag]`, all
-cells sourced from the 2026-09-23 rework (remaining-window, current-
-price basis) at each of age_day 2/3/4/5 (age_day 1 reuses day-2's
-numbers as the closest available granularity -- day 1 itself has no
-real tag yet).
-
-Horizon: EXPIRED after 12 trading days (matches the backtest's HOLD=12),
-close-based resolution, no laddered TP exit.
+CAVEAT (confirmed and GENERALIZED by the 2026-10-14 redesign above): the
+70-90%-by-tag figure was ALWAYS a D1-entry-anchoring illusion, not just
+"needs the remaining-window table instead" as first thought in 2026-09-23
+-- the remaining-window table itself turned out to carry no real win-rate
+signal either once checked this session.
 """
 from __future__ import annotations
 
@@ -161,6 +126,7 @@ import pandas as pd
 from engine import legacy_core as core
 from engine import scanalert as scanalert_engine  # IDX tick-size rounding (_idx_round_tick*)
 import engine.buy_on_weakness as bow_engine  # reuse _load_ff_lookup, same FF archive
+import engine.ihsg_regime as ihsg_regime_engine  # BOUNCE_OFF_LOW entry gate, 2026-10-14 redesign
 
 # ---------------------------------------------------------------------------
 # Constants (all validated in the research trail referenced above)
@@ -185,106 +151,14 @@ HIGHRISK_SIGNAL_RANGE_MAX = 0.51
 
 LANE_ICONS = {"Quality(D2)": "⭐⭐", "Core/Neutral": "⚪⭐", "HighRisk/Reward": "⚠️⭐"}
 
-# tertile (t1, t2) thresholds per age_day, TRAIN-derived from the confirmed-
-# positive (ret_so_far>0) return distribution -- see docstring, don't
-# re-derive without reading the research trail first
-TAG_THRESHOLDS = {
-    1: (0.009, 0.022),
-    2: (0.014, 0.036),
-    3: (0.017, 0.045),
-    4: (0.018, 0.052),
-    5: (0.020, 0.057),
-}
-MAX_TAG_DAY = 5          # tag stops updating after this age
-ALERT_MAX_AGE_DAYS = 12  # matches the backtest's HOLD -- expire at D12 regardless of tag
 
-# --- SL: back to the validated SL_SWING=-10% (see docstring MISTAKE #1) ---
-SL_PCT = 10.0
-
-# --- TP1/TP2: real historical HIGH-touch-rate targets, informational
-# only, keyed by (age_day, lane, tag) -- see docstring 2026-09-23 REWORK.
-# TP1 = ~65%-touch quantile, TP2 = ~40%-touch quantile of the REMAINING
-# max-high return computed from that day's own close forward to D12 (not
-# from entry_ref -- a fresh entrant pays today's price, not the original
-# signal-day price). Source:
-# research/macd_confirm_d1d5_tp_formula_2026_09_23.py, all 36 cells
-# n>=19 (no thin-cell fallback needed). No TP shown for FADING (no
-# position exists yet -- nothing to target). ---
-TP_TABLE_BY_DAY_LANE_TAG = {
-    2: {
-        "Quality(D2)": {"VALID": (2.0, 6.5), "STRONG": (3.5, 7.5), "VERY STRONG": (2.5, 9.0)},
-        "Core/Neutral": {"VALID": (2.5, 7.0), "STRONG": (3.5, 9.0), "VERY STRONG": (5.0, 12.5)},
-        "HighRisk/Reward": {"VALID": (3.5, 6.5), "STRONG": (5.0, 10.5), "VERY STRONG": (16.5, 31.0)},
-    },
-    3: {
-        "Quality(D2)": {"VALID": (2.5, 6.0), "STRONG": (1.5, 4.5), "VERY STRONG": (3.5, 9.5)},
-        "Core/Neutral": {"VALID": (2.5, 6.5), "STRONG": (3.5, 7.5), "VERY STRONG": (5.5, 13.5)},
-        "HighRisk/Reward": {"VALID": (2.0, 5.5), "STRONG": (3.5, 8.0), "VERY STRONG": (10.0, 24.5)},
-    },
-    4: {
-        "Quality(D2)": {"VALID": (1.5, 4.0), "STRONG": (3.5, 8.0), "VERY STRONG": (3.5, 15.5)},
-        "Core/Neutral": {"VALID": (2.5, 6.0), "STRONG": (3.0, 7.0), "VERY STRONG": (5.5, 12.5)},
-        "HighRisk/Reward": {"VALID": (3.0, 6.0), "STRONG": (4.0, 7.0), "VERY STRONG": (8.0, 19.5)},
-    },
-    5: {
-        "Quality(D2)": {"VALID": (2.0, 4.5), "STRONG": (3.5, 6.0), "VERY STRONG": (5.0, 19.0)},
-        "Core/Neutral": {"VALID": (2.5, 6.0), "STRONG": (3.0, 6.5), "VERY STRONG": (5.0, 10.0)},
-        "HighRisk/Reward": {"VALID": (2.0, 5.5), "STRONG": (2.5, 7.0), "VERY STRONG": (9.0, 20.5)},
-    },
-}
-TP_TABLE_BY_DAY_LANE_TAG[1] = TP_TABLE_BY_DAY_LANE_TAG[2]  # day 1 has no real tag yet, reuse day 2 as closest granularity
-
-# --- Chase-risk cutoff: Quality(D2) ONLY (see docstring KEY FINDING --
-# the other two lanes show no exhaustion, gating them would be a false
-# warning). ret_so_far_pct >= this day's cutoff -> chasing. Empirically
-# the top-quintile lower bound where win_remain clearly degrades, from
-# the same research script. ---
-CHASE_CUTOFF_BY_DAY_QUALITY_D2 = {1: 3.6, 2: 3.6, 3: 4.9, 4: 7.3, 5: 8.8}
-
-# --- Win-rate lookup: WIN_RATE_TABLE[age_day][lane][tag] -> win% (float).
-# 2026-09-23 REWORK: now P(remaining_close_ret>0) computed from that
-# day's own price forward to D12 (current-price basis, matches the TP
-# table above), NOT from entry_ref like the original 2026-09-22 table.
-# Day 1 reuses day 2's numbers (day 1 itself has no real tag yet).
-#
-# REFRESHED 2026-10-11 (re-ran research/macd_confirm_d1d5_sl_tp_touch_
-# winrate_2026_09_23.py as-is against the now-extended OHLCV CSV, no
-# methodology change -- just more data through 2026-10-07 instead of
-# 2026-09-23). Real, systematic drift found, not noise:
-#   - Core/Neutral (the largest lane): down 2-7pt almost everywhere.
-#   - HighRisk/Reward VERY STRONG (the cell with the hard-SL warning,
-#     see needs_hard_sl_warning): down 7.5-12.2pt at EVERY day (was
-#     52.4-60.9%, now 43.6-48.7%) -- the single worst drift, and it
-#     compounds with that cell's already-known fat loss tail.
-#   - Quality(D2) is mixed/thin (VALID down ~4-7pt, STRONG/VERY STRONG
-#     UP at some days but n<15-29, too thin to fully trust).
-# FADING values and Quality(D2) Day2 VERY STRONG kept at their OLD
-# (2026-09-23) numbers -- the refresh script skips FADING entirely (not
-# shown/used for entry anyway) and Quality(D2) Day2 VERY STRONG had
-# n<15 fresh (too thin to overwrite with a guess). Everything else
-# below is the fresh number. See memory project_bow_rank_scoring_
-# redesign_2026_10_10.md for the full before/after comparison.
-_WIN_RATE_DAY2 = {
-    "Quality(D2)": {"FADING": 57.4, "VALID": 46.0, "STRONG": 54.5, "VERY STRONG": 21.1},
-    "Core/Neutral": {"FADING": 51.8, "VALID": 45.2, "STRONG": 44.0, "VERY STRONG": 46.6},
-    "HighRisk/Reward": {"FADING": 46.7, "VALID": 47.0, "STRONG": 53.7, "VERY STRONG": 48.7},
-}
-_WIN_RATE_DAY3 = {
-    "Quality(D2)": {"FADING": 55.2, "VALID": 50.7, "STRONG": 25.0, "VERY STRONG": 36.4},
-    "Core/Neutral": {"FADING": 51.9, "VALID": 43.0, "STRONG": 43.0, "VERY STRONG": 45.0},
-    "HighRisk/Reward": {"FADING": 46.0, "VALID": 43.0, "STRONG": 33.3, "VERY STRONG": 45.9},
-}
-_WIN_RATE_DAY4 = {
-    "Quality(D2)": {"FADING": 53.9, "VALID": 45.2, "STRONG": 52.6, "VERY STRONG": 45.8},
-    "Core/Neutral": {"FADING": 51.4, "VALID": 46.7, "STRONG": 42.0, "VERY STRONG": 44.3},
-    "HighRisk/Reward": {"FADING": 44.4, "VALID": 41.5, "STRONG": 35.7, "VERY STRONG": 43.6},
-}
-_WIN_RATE_DAY5 = {
-    "Quality(D2)": {"FADING": 48.7, "VALID": 43.1, "STRONG": 47.4, "VERY STRONG": 48.3},
-    "Core/Neutral": {"FADING": 48.7, "VALID": 48.2, "STRONG": 43.2, "VERY STRONG": 42.0},
-    "HighRisk/Reward": {"FADING": 40.4, "VALID": 44.5, "STRONG": 35.5, "VERY STRONG": 45.7},
-}
-WIN_RATE_TABLE = {1: _WIN_RATE_DAY2, 2: _WIN_RATE_DAY2, 3: _WIN_RATE_DAY3, 4: _WIN_RATE_DAY4, 5: _WIN_RATE_DAY5}
+# --- 2026-10-14 REDESIGN: fixed mechanical exit, replaces the retired
+# D1-D5 tag/TP-table/close-only-D12 system above (see module docstring).
+REQUIRED_REGIME_PHASE = "BOUNCE_OFF_LOW"  # entry gate, checked once per nightly run
+SL_PCT = 6.0
+TP_PCT = 8.0
+ALERT_MAX_AGE_DAYS = 5  # real intraday SL/TP touch checked daily; EXPIRED at close if neither hit by day 5
+WIN_RATE_FLAT = 62.2    # backtested win% for this exact combo (BOUNCE_OFF_LOW, n=3166) -- used by win_rate_of()
 
 
 # ---------------------------------------------------------------------------
@@ -398,27 +272,19 @@ def _ff_net_value_z20_excluded(ticker: str, df: pd.DataFrame, ff_lookup: pd.Data
     return z <= -1.0
 
 
-def _tag_of(ret_so_far: float | None, age_day: int) -> str:
-    if ret_so_far is None or ret_so_far <= 0:
-        return "FADING"
-    day = min(age_day, MAX_TAG_DAY)
-    t1, t2 = TAG_THRESHOLDS[day]
-    if ret_so_far <= t1:
-        return "VALID"
-    if ret_so_far <= t2:
-        return "STRONG"
-    return "VERY STRONG"
-
-
 def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame | None = None) -> dict | None:
     """Returns a candidate dict if `ticker` qualifies for Stage-1 TODAY,
-    else None. entry_ref_price = today's close (same simplification as
-    buy_on_weakness.py / vcp_pillar.py -- age_days/tag tracking starts
-    from the NEXT nightly re-evaluation onward).
+    else None. entry_ref_price = today's close; SL/TP are now FIXED at
+    entry (2026-10-14 redesign, see module docstring) -- both anchored to
+    this entry_ref_price and never recomputed on later days, matching the
+    validated backtest exactly (SL_PCT/TP_PCT checked against real daily
+    Low/High in _resolve_active_pick, not close-only).
 
     `ff_lookup` optional (defaults to None -> exclusion check simply
     skipped, never crashes) so existing callers/tests that don't pass it
-    keep working unchanged."""
+    keep working unchanged. Does NOT check the regime_phase gate itself --
+    see compute_macd_confirm_candidates, which checks it ONCE for the
+    whole nightly run rather than per-ticker."""
     df = core.get_ohlcv_daily_from_db(ticker, limit=150)
     feats = _compute_latest_features(df)
     if feats is None or not _passes_stage1(feats):
@@ -429,7 +295,7 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame | None = None) -> dict 
     if ff_lookup is not None and _ff_net_value_z20_excluded(ticker, df, ff_lookup):
         return None
 
-    lane = _assign_lane(feats)
+    lane = _assign_lane(feats)  # informational only since 2026-10-14, see docstring
     entry_ref = feats["close"]
 
     return {
@@ -439,11 +305,10 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame | None = None) -> dict 
         "lane": lane,
         "age_days": 1,
         "entry_ref_price": entry_ref,
-        "current_price": entry_ref,  # updated nightly in _resolve_active_pick
+        "current_price": entry_ref,  # informational "price now" display, updated nightly
         "sl_price": scanalert_engine._idx_round_tick_floor(entry_ref * (1 - SL_PCT / 100)),
-        "tag": "VALID" if 1 in TAG_THRESHOLDS else "FADING",  # placeholder, resolved tomorrow onward
+        "tp_price": scanalert_engine._idx_round_tick_ceil(entry_ref * (1 + TP_PCT / 100)),
         "ret_so_far_pct": None,
-        "max_ret_so_far_pct": 0.0,
         "resolved_date": None,
         "resolved_ret_pct": None,
     }
@@ -452,7 +317,19 @@ def evaluate_ticker(ticker: str, ff_lookup: pd.DataFrame | None = None) -> dict 
 def compute_macd_confirm_candidates(tickers: list[str]) -> list[dict]:
     """Nightly entry point: evaluate every ticker in `tickers`, return the
     list that qualifies today (does NOT touch the picks-history file --
-    call update_and_save_picks() with the result to persist/merge)."""
+    call update_and_save_picks() with the result to persist/merge).
+
+    REGIME GATE (2026-10-14 redesign, see module docstring): checked ONCE
+    here, not per-ticker -- produces an empty list on any night regime_phase
+    isn't BOUNCE_OFF_LOW, same "zero candidates is expected, not a bug"
+    convention as engine/oversold_bounce_v2.py's dd_100 gate. Fails CLOSED
+    (no candidates) on a regime-fetch failure, since the gate can't be
+    confirmed -- different from the "missing=neutral" convention used for
+    boosters/scoring adjustments elsewhere, this is a hard entry condition."""
+    regime = ihsg_regime_engine.get_ihsg_regime_today()
+    if regime is None or regime.get("regime_phase") != REQUIRED_REGIME_PHASE:
+        return []
+
     ff_lookup = bow_engine._load_ff_lookup()
     candidates = []
     for t in tickers:
@@ -497,36 +374,15 @@ def save_macd_confirm_picks(picks: list):
             pass
 
 
-def _reconstruct_historical_peak_ret(trigger_date, entry_ref: float, df: pd.DataFrame) -> float:
-    """Self-heal helper for _resolve_active_pick (2026-10-11 audit fix,
-    see call site) -- recomputes the true peak ret_so_far_pct over the
-    pick's whole life so far (from trigger_date through today's bar in
-    `df`), for a pick that predates the max_ret_so_far_pct field."""
-    try:
-        trigger = pd.Timestamp(trigger_date).date()
-    except Exception:
-        return 0.0
-    idx_dates = pd.to_datetime(df.index).date
-    window = df.loc[idx_dates >= trigger, "Close"]
-    if window.empty:
-        return 0.0
-    rets = (window - entry_ref) / entry_ref * 100
-    return float(rets.max())
-
-
 def _resolve_active_pick(pick: dict) -> dict:
-    """Re-check one still-ALIVE pick against fresh OHLCV: bump age, compute
-    ret_so_far vs entry_ref_price, re-derive tag (locked after age_day 5),
-    expire at ALERT_MAX_AGE_DAYS regardless of tag (matches the backtest's
-    close-only-at-D12 exit -- no TP is ever wired as an actual trigger).
-
-    Also refreshes `current_price` and `sl_price` off TODAY's close (user
-    correction 2026-09-23: don't assume the trader already entered at
-    entry_ref_price -- SL/TP shown to the user must be computed from the
-    price they'd actually pay if they entered NOW, not the stale D0/D1
-    anchor. `entry_ref_price` and `ret_so_far_pct`/`tag` stay anchored to
-    the original signal day -- that's the research-validated basis for the
-    conviction tag itself, only the execution levels (SL/TP1/TP2) move."""
+    """Re-check one still-ALIVE pick against fresh OHLCV (2026-10-14
+    redesign, see module docstring): real intraday SL/TP touch against
+    TODAY's Low/High, SL checked first (conservative same-day-ambiguity
+    convention used throughout this codebase), then TP; else bump age and
+    expire at ALERT_MAX_AGE_DAYS if neither has fired. sl_price/tp_price
+    are FIXED at entry_ref_price (set once in evaluate_ticker, never
+    recomputed here) -- this matches the validated backtest exactly,
+    unlike the old design which recomputed SL off a moving current price."""
     df = core.get_ohlcv_daily_from_db(pick["ticker"], limit=150)
     feats = _compute_latest_features(df)
     if feats is None:
@@ -536,29 +392,26 @@ def _resolve_active_pick(pick: dict) -> dict:
     if today_date == pick.get("_last_checked_date"):
         return pick  # already resolved for today, avoid double-incrementing age
 
-    pick["age_days"] = pick.get("age_days", 1) + 1
+    today_low = float(df["Low"].iloc[-1])
+    today_high = float(df["High"].iloc[-1])
     entry_ref = pick["entry_ref_price"]
-    ret_so_far = (feats["close"] - entry_ref) / entry_ref
-    pick["ret_so_far_pct"] = round(ret_so_far * 100, 2)
-    pick["tag"] = _tag_of(ret_so_far, pick["age_days"])
-    # Path-dependence tracking (2026-10-13) -- running peak of
-    # ret_so_far_pct, so classify_fade_from_peak() can tell "already
-    # giving back a chunk of its own gain" apart from "still at/near its
-    # own high," which the current tag alone can't see (user's own
-    # observation: some picks near the upper %B had already pulled back
-    # hard from an even bigger earlier gain).
-    # Self-heal (2026-10-11 audit fix): a pick that was already ALIVE
-    # before this field existed has no "max_ret_so_far_pct" key at all --
-    # seeding it at *today's* ret_so_far would hide any fade that already
-    # happened earlier in its life (the exact already-round-tripped case
-    # this field exists to catch). Reconstruct the true peak once from
-    # entry_ref_price, then it accumulates normally from here on.
-    if "max_ret_so_far_pct" not in pick:
-        pick["max_ret_so_far_pct"] = _reconstruct_historical_peak_ret(pick.get("trigger_date"), entry_ref, df)
-    pick["max_ret_so_far_pct"] = max(pick.get("max_ret_so_far_pct", 0.0), pick["ret_so_far_pct"])
 
+    if today_low <= pick["sl_price"]:
+        pick["status"] = "SL_HIT"
+        pick["resolved_date"] = today_date
+        pick["resolved_ret_pct"] = round((pick["sl_price"] - entry_ref) / entry_ref * 100, 2)
+        pick["_last_checked_date"] = today_date
+        return pick
+    if today_high >= pick["tp_price"]:
+        pick["status"] = "TP_HIT"
+        pick["resolved_date"] = today_date
+        pick["resolved_ret_pct"] = round((pick["tp_price"] - entry_ref) / entry_ref * 100, 2)
+        pick["_last_checked_date"] = today_date
+        return pick
+
+    pick["age_days"] = pick.get("age_days", 1) + 1
+    pick["ret_so_far_pct"] = round((feats["close"] - entry_ref) / entry_ref * 100, 2)
     pick["current_price"] = feats["close"]
-    pick["sl_price"] = scanalert_engine._idx_round_tick_floor(feats["close"] * (1 - SL_PCT / 100))
 
     if pick["age_days"] > ALERT_MAX_AGE_DAYS:
         pick["status"] = "EXPIRED"
@@ -599,146 +452,43 @@ def update_and_save_picks(new_candidates: list[dict]) -> list:
 # Display helpers
 # ---------------------------------------------------------------------------
 def format_age_label(pick: dict) -> str:
-    """BOW/VCP-style age label: 'NEW (Day 1/5)' or 'AGING (Day N/5) — ALIVE'."""
+    """'NEW (Day 1/5)' or 'AGING (Day N/5) -- ALIVE'. Display-layer only
+    (commands/scan.py's swing_command filters to age_days<=1 for this lane
+    as of 2026-10-14, so AGING never actually shows there -- kept generic
+    in case another caller wants the fuller label.)"""
     age = pick.get("age_days", 1)
-    capped = min(age, MAX_TAG_DAY)
-    return f"NEW (Day {age}/5)" if age <= 1 else f"AGING (Day {capped}/5) — ALIVE"
-
-
-TAG_ICONS = {"FADING": "🔴", "VALID": "🟡", "STRONG": "🟠", "VERY STRONG": "🟢"}
-_NEXT_TAG = {"FADING": "VALID", "VALID": "STRONG", "STRONG": "VERY STRONG"}  # VERY STRONG has no next
-
-
-def next_tier_price(pick: dict) -> tuple[str, float] | None:
-    """NOT a sell target -- see module docstring MISTAKE #2. Returns
-    (next_tag_name, price) needed to upgrade to the NEXT tag TODAY (e.g.
-    VALID->STRONG uses t1, STRONG->VERY STRONG uses t2), or None if
-    already VERY STRONG (nothing further to show) or tag not yet
-    resolved. Rounded UP to the nearest valid IDX tick (matches
-    engine/bsjp2.py's TP rounding) so it doesn't undershoot."""
-    tag = pick.get("tag")
-    if tag is None or tag == "VERY STRONG":
-        return None
-    day = min(pick.get("age_days", 1), MAX_TAG_DAY)
-    t1, t2 = TAG_THRESHOLDS[day]
-    threshold = t1 if tag in ("FADING", "VALID") else t2
-    raw = pick["entry_ref_price"] * (1 + threshold)
-    return _NEXT_TAG[tag], scanalert_engine._idx_round_tick_ceil(raw)
-
-
-def tp_prices(pick: dict) -> tuple[float, float] | None:
-    """TP1/TP2 = real historical HIGH-touch-rate targets, keyed by
-    (age_day, lane, tag) and computed from CURRENT price (see module
-    docstring 2026-09-23 REWORK -- the REMAINING window from today's
-    price forward to D12, not entry_ref_price; nothing has been bought
-    yet, so both the % AND the day/lane context must match where the
-    trader would actually enter today). Informational reference, NOT an
-    exit trigger; validated exit is close-only at D12. None for FADING
-    (no position exists yet)."""
-    tag = pick.get("tag")
-    if tag is None or tag == "FADING":
-        return None
-    day = min(pick.get("age_days", 1), MAX_TAG_DAY)
-    cell = TP_TABLE_BY_DAY_LANE_TAG.get(day, {}).get(pick["lane"], {}).get(tag)
-    if cell is None:
-        return None
-    tp1_pct, tp2_pct = cell
-    current = pick.get("current_price", pick["entry_ref_price"])
-    tp1 = scanalert_engine._idx_round_tick_ceil(current * (1 + tp1_pct / 100))
-    tp2 = scanalert_engine._idx_round_tick_ceil(current * (1 + tp2_pct / 100))
-    return tp1, tp2
+    return f"NEW (Day {age}/5)" if age <= 1 else f"AGING (Day {age}/5) -- ALIVE"
 
 
 def is_chasing_too_high(pick: dict) -> bool:
-    """No-chasing guardrail, made lane+day-aware 2026-09-23 (see module
-    docstring KEY FINDING): gates ONLY Quality(D2) lane -- that's the
-    ONE lane where a fresh entry into an already-run-up name showed
-    real forward degradation (win_remain drops sharply past the day-
-    specific cutoff in CHASE_CUTOFF_BY_DAY_QUALITY_D2). Core/Neutral and
-    HighRisk/Reward showed NO exhaustion pattern (HighRisk/Reward's
-    biggest-run-up bucket is actually its BEST bucket) -- gating those
-    would be a false warning, so they always return False. FADING/None
-    tag -> False (irrelevant, already hidden from display elsewhere)."""
-    tag = pick.get("tag")
-    if tag is None or tag == "FADING":
-        return False
-    if pick.get("lane") != "Quality(D2)":
-        return False
-    ret_so_far = pick.get("ret_so_far_pct")
-    if ret_so_far is None:
-        return False
-    day = min(pick.get("age_days", 1), MAX_TAG_DAY)
-    cutoff = CHASE_CUTOFF_BY_DAY_QUALITY_D2.get(day)
-    if cutoff is None:
-        return False
-    return ret_so_far >= cutoff
+    """RETIRED 2026-10-14 (see module docstring) -- always False now.
+    The Quality(D2)-only chase-cutoff this guarded was keyed to the D1-D5
+    tag system, which this session's fresh-entry-anchored re-test showed
+    carries no real predictive signal; kept as a function (not deleted)
+    because engine/nightly.py's momentum-pillar adjustment calls it
+    directly."""
+    return False
 
 
 def needs_hard_sl_warning(pick: dict) -> bool:
-    """Hard-SL emphasis flag (user request 2026-09-23), HighRisk/Reward
-    VERY STRONG ONLY. Rationale: research/macd_confirm_clean_population_
-    sl_mae_loss_2026_09_23.py found this exact (lane, tag) cell has by far
-    the fattest loss tail in the whole clean population -- mean loss
-    among D12-close losers is -16.9% (close-only, no real stop), vs -3%
-    to -6% for every other lane/tag cell. Directly tested applying
-    SL_PCT=-10% as a REAL intraday exit for this cell specifically
-    (research/macd_confirm_d1d5_sl_tp_touch_winrate_2026_09_23.py +
-    follow-up): mean loss among losers contracts to -9.2% (close to the
-    SL floor itself) at the cost of win-rate dropping ~9pt (55.5%->46.4%)
-    -- a real, data-backed trade-off, unlike VALID/STRONG in the same
-    lane where SL barely moves the numbers (SL rarely touched there).
-    Does NOT change the module's close-only default exit for the pillar
-    as a whole -- this is a candidate-level warning only, telling the
-    trader that THIS specific cell's downside is uniquely severe if left
-    unmanaged, not a change to the validated backtest exit rule."""
-    return pick.get("lane") == "HighRisk/Reward" and pick.get("tag") == "VERY STRONG"
+    """RETIRED 2026-10-14 (see module docstring) -- always False now.
+    The HighRisk/Reward+VERY STRONG fat-tail risk this flagged was a
+    consequence of the OLD close-only-D12 exit (no real stop at all); the
+    new design's REAL mechanical SL=-6% already caps every trade's
+    downside uniformly, so no lane/tag needs a separate warning anymore.
+    Kept as a function (not deleted) for engine/nightly.py compatibility."""
+    return False
 
 
 def win_rate_of(pick: dict) -> float | None:
-    """Smallest matching backtest bucket for this candidate's CURRENT
-    (age_day, lane, tag) -- not a blended average. See WIN_RATE_TABLE."""
-    tag = pick.get("tag")
-    if tag is None:
+    """Returns the single flat backtested win% for this lane's current
+    design (WIN_RATE_FLAT) for any ALIVE/resolved pick, or None if pick is
+    falsy/malformed. Replaces the old per-(age_day,lane,tag) lookup table
+    (2026-10-14 redesign, see module docstring) -- every active pick now
+    passed the SAME regime+entry gate, so there is no more per-pick
+    granularity to look up. Kept as a function, not a bare constant,
+    because engine/nightly.py's momentum-pillar adjustment calls it
+    directly as win_rate_of(pick)."""
+    if not pick:
         return None
-    day = min(pick.get("age_days", 1), MAX_TAG_DAY)
-    return WIN_RATE_TABLE.get(day, {}).get(pick["lane"], {}).get(tag)
-
-
-# DEEP FADE FROM PEAK (2026-10-13) -- user's own observation: some picks
-# sitting near the upper %B (so they LOOK strong on a chart) had already
-# given back a big chunk of an even larger earlier gain within D1-D5.
-# Validated with research/macd_confirm_peak_fade_2026_10_13.py (reusing
-# this module's own Stage-1 gate): within the positive-tag population at
-# day 5, win-rate degrades mildly through small/medium pullbacks from the
-# day's-own peak (44.7% at-peak -> 46.8% at 2-5pp giveback, basically flat)
-# but drops clearly once the giveback is >=10pp (40.5% win, mean_ret
-# -0.45% -- the ONLY cell in this whole sweep with a negative mean) --
-# n=37, thinner than ideal but directionally consistent with the wider
-# >=5pp cut (n=84, same 40.5% win). Separately, this session also
-# reconfirmed the module's existing "chasing is fine" finding: the
-# biggest day-5 movers (ret_day5>=8%, the ones that visually look most
-# like chasing) had the BEST win-rate (47.2%) and by far the best mean
-# return (+7.66%) of any ret_day5 bucket tested -- so a high CURRENT
-# ret_so_far is not itself a warning sign; giving back >=10pp from a
-# PRIOR peak is the specific, narrower thing that is.
-DEEP_FADE_MIN_GIVEBACK = 10.0
-DEEP_FADE_WIN, DEEP_FADE_WLB = 40.5, 26.3
-
-
-def classify_fade_from_peak(pick: dict) -> dict | None:
-    """Returns {"win", "wlb", "label"} if this pick has given back
-    >=DEEP_FADE_MIN_GIVEBACK points from its own peak ret_so_far_pct
-    (and still has a real, non-FADING tag -- a pick that's gone back to
-    FADING is already flagged by the existing tag system, this is for
-    "still technically positive/strong-looking, but has pulled back
-    hard from where it was"). None if not applicable (the common case)."""
-    tag = pick.get("tag")
-    ret_now = pick.get("ret_so_far_pct")
-    max_ret = pick.get("max_ret_so_far_pct")
-    if tag is None or tag == "FADING" or ret_now is None or max_ret is None:
-        return None
-    giveback = max_ret - ret_now
-    if giveback >= DEEP_FADE_MIN_GIVEBACK:
-        return {"win": DEEP_FADE_WIN, "wlb": DEEP_FADE_WLB,
-                "label": f"⚠️ Sudah turun {giveback:.1f}pp dari puncak +{max_ret:.1f}% -- momentum melemah meski tag masih {tag}"}
-    return None
+    return WIN_RATE_FLAT

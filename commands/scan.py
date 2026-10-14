@@ -62,6 +62,7 @@ import engine.oversold_bounce_v2 as oversold_bounce_v2_engine
 import engine.vcp_pillar as vcp_pillar_engine
 import engine.macd_confirm_pillar as macd_confirm_pillar_engine
 import engine.buy_on_strength as buy_on_strength_engine
+import engine.ihsg_regime as ihsg_regime_engine
 import engine.bsjp2 as bsjp2_engine
 import engine.capital_rank as capital_rank_engine
 
@@ -4270,6 +4271,15 @@ async def swing_command(update, context):
     # engine/buy_on_weakness.py's should_hide_from_rank docstring).
     bow_active = [p for p in bow_active
                   if not buy_on_weakness_engine.should_hide_from_rank(p["tier"], p.get("drift_zone", "NETRAL"))]
+    # Aging-DISKON x regime hide, validated 2026-10-14 (see
+    # engine/buy_on_weakness.py's should_hide_aging_diskon docstring) --
+    # one live regime fetch per command call, fail-open (None) on error so
+    # a regime-fetch failure never suppresses a pick.
+    _swing_regime = ihsg_regime_engine.get_ihsg_regime_today()
+    _swing_regime_phase = _swing_regime.get("regime_phase") if _swing_regime else None
+    bow_active = [p for p in bow_active
+                  if not buy_on_weakness_engine.should_hide_aging_diskon(
+                      p.get("price_drift_pct", 0.0), _swing_regime_phase)]
     bow_active.sort(key=lambda p: (p["tier"], not p.get("ff_priority", False), -p["age_days"]))
 
     osb_picks = oversold_bounce_v2_engine.load_oversold_bounce_v2_picks()
@@ -4282,41 +4292,29 @@ async def swing_command(update, context):
 
     vcp_picks = vcp_pillar_engine.load_vcp_picks()
     vcp_active = [p for p in vcp_picks if p.get("status") == "ALIVE"]
+    # Ever-DISKON hide, validated 2026-10-14 (see
+    # engine/vcp_pillar.py's VCP_DISKON_HIDE docstring) -- a VCP breakout
+    # that has ever closed into DISKON since entry resolves badly far more
+    # often than not (win30.5% vs clean picks' 93.5%), unlike BOW/OSB-v2
+    # where this needed a regime cross-reference -- here the drift signal
+    # alone is strong enough on its own.
+    vcp_active = [p for p in vcp_active if not vcp_pillar_engine.should_hide_vcp_diskon(p)]
     vcp_active.sort(key=lambda p: -p["age_days"])
 
     macd_confirm_picks = macd_confirm_pillar_engine.load_macd_confirm_picks()
-    # FADING picks stay tracked/persisted (nightly resolve keeps re-checking
-    # them) but are hidden from the bot output per user request 2026-09-23 --
-    # a FADING tag means "don't enter today", not "gone forever": if price
-    # recovers on a later day, _tag_of() re-derives the tag fresh from
-    # ret_so_far vs entry_ref_price each night, so it naturally re-appears
-    # here the moment it's no longer FADING. Don't filter in the engine/
-    # persistence layer -- only at display time.
-    #
-    # Quality(D2) VERY STRONG also fully hidden, same session -- the D1-D5
-    # TP-formula rework found this exact bucket's win_remain (a fresh entry
-    # TODAY) sits at 21-43% across every day and the chase-risk cutoff
-    # already flags 79-100% of it anyway (see
-    # research/macd_confirm_d1d5_tp_formula_2026_09_23.py /
-    # macd_confirm_d1d5_sl_tp_touch_winrate_2026_09_23.py) -- showing it
-    # with just a warning still surfaced a mostly-bad candidate as "active".
-    # Same re-appear-when-conditions-change treatment as FADING: not
-    # filtered in the persistence layer, tag/lane re-derived fresh nightly.
+    # 2026-10-14 REDESIGN (see engine/macd_confirm_pillar.py module
+    # docstring): the old D1-D5 tag system is retired -- entries are now
+    # gated to regime_phase==BOUNCE_OFF_LOW at entry and exit mechanically
+    # (real SL=-6%/TP=+8% touch, maxhold=5d), with no decision point left
+    # in days 2-5. Display filters to age_days<=1 ("show once, go silent
+    # until resolved") -- the persisted pick still tracks/resolves in the
+    # background regardless of what's shown (house convention: never
+    # filter in the engine/persistence layer, only at display time).
     macd_confirm_active = [
         p for p in macd_confirm_picks
-        if p.get("status") == "ALIVE" and p.get("tag") != "FADING"
-        and not (p.get("lane") == "Quality(D2)" and p.get("tag") == "VERY STRONG")
+        if p.get("status") == "ALIVE" and p.get("age_days", 1) <= 1
     ]
-    # Sorted by the DYNAMIC win-rate (win_rate_of -- current-price/remaining
-    # basis, keyed by age_day x lane x tag, see engine/macd_confirm_pillar.py
-    # 2026-09-23 REWORK) descending, per user request -- replaces the old
-    # tag-rank-then-age sort now that a real per-candidate win-rate number
-    # exists to sort on directly. None (shouldn't happen for a resolved
-    # ALIVE pick, but defensive) sorts last.
-    macd_confirm_active.sort(
-        key=lambda p: (macd_confirm_pillar_engine.win_rate_of(p) is None,
-                        -(macd_confirm_pillar_engine.win_rate_of(p) or 0))
-    )
+    macd_confirm_active.sort(key=lambda p: p["ticker"])
 
     bos_picks = buy_on_strength_engine.load_buy_on_strength_picks()
     bos_active = [p for p in bos_picks if p.get("status") == "ALIVE"]
@@ -4436,73 +4434,27 @@ async def swing_command(update, context):
         lines.append("— tidak ada sinyal aktif.")
     for p in macd_confirm_active:
         lane_icon = macd_confirm_pillar_engine.LANE_ICONS.get(p["lane"], "")
-        tag = p.get("tag") or "VALID"
-        tag_icon = macd_confirm_pillar_engine.TAG_ICONS.get(tag, "")
-        age_label = macd_confirm_pillar_engine.format_age_label(p)
-        ret_note = f" ({p['ret_so_far_pct']:+.2f}% vs entry ref)" if p.get("ret_so_far_pct") is not None else ""
-        fade_cond = macd_confirm_pillar_engine.classify_fade_from_peak(p)
-        win_rate = fade_cond["win"] if fade_cond else macd_confirm_pillar_engine.win_rate_of(p)
-        win_rate_line = f"Win Rate: ~{win_rate:.0f}%\n" if win_rate is not None else ""
-        fade_note = f"\n{fade_cond['label']}" if fade_cond else ""
-        upgrade = macd_confirm_pillar_engine.next_tier_price(p)
-        upgrade_line = f"Upgrade to {upgrade[0]}: {upgrade[1]:,.0f}\n" if upgrade else ""
         entry_ref = p["entry_ref_price"]
-        current_price = p.get("current_price", entry_ref)
-        # SL/TP are computed off CURRENT price, not entry_ref -- nothing has
-        # actually been bought yet, so % must be reachable from where the
-        # trader would enter today (user correction 2026-09-23).
-        if macd_confirm_pillar_engine.is_chasing_too_high(p):
-            chase_note = (
-                f"\n⛔ JANGAN DIKEJAR — harga sudah naik "
-                f"{p['ret_so_far_pct']:+.1f}% dari entry ref, sudah lewat TP2 "
-                f"historis untuk tag {tag} ini. Tunggu pullback/konfirmasi "
-                f"baru, bukan entry di harga sekarang."
-            )
-            tp_lines = ""
-        else:
-            chase_note = ""
-            tps = macd_confirm_pillar_engine.tp_prices(p)
-            if tps:
-                tp1, tp2 = tps
-                tp_lines = (f"TP 1: {tp1:,.0f} ({(tp1/current_price-1)*100:+.0f}% dari harga sekarang)\n"
-                            f"TP 2: {tp2:,.0f} ({(tp2/current_price-1)*100:+.0f}% dari harga sekarang)\n")
-            else:
-                tp_lines = ""
-        sl_pct = (p["sl_price"] / current_price - 1) * 100
-        # Hard-SL emphasis for HighRisk/Reward VERY STRONG only (user
-        # request 2026-09-23) -- this exact cell has by far the fattest
-        # loss tail in the whole pillar (mean loss among D12-close losers
-        # -16.9% if left unmanaged, vs -3% to -6% everywhere else); a real
-        # -10% stop contains it to ~-9.2% at the cost of ~9pt win-rate --
-        # see engine/macd_confirm_pillar.py's needs_hard_sl_warning().
-        hard_sl_note = (
-            "\n🛑 SL WAJIB DIPATUHI KETAT -10% — tag ini historisnya "
-            "punya rata-rata kerugian jauh lebih dalam (~-17%) kalau SL "
-            "tidak dieksekusi disiplin. Jangan tahan posisi lewat level SL "
-            "berharap recover."
-            if macd_confirm_pillar_engine.needs_hard_sl_warning(p) else ""
-        )
+        win_rate = macd_confirm_pillar_engine.win_rate_of(p)
+        win_rate_line = f"Win Rate: ~{win_rate:.0f}% (regime BOUNCE_OFF_LOW)\n" if win_rate is not None else ""
+        sl_pct = (p["sl_price"] / entry_ref - 1) * 100
+        tp_pct = (p["tp_price"] / entry_ref - 1) * 100
         lines.append(
             f"{lane_icon} {p['ticker']}\n"
-            f"{tag_icon} {tag}{ret_note}\n"
             f"{win_rate_line}"
-            f"{age_label}\n"
-            f"Entry ref: {entry_ref:,.0f} | Harga sekarang: {current_price:,.0f}\n"
-            f"{upgrade_line}"
-            f"{tp_lines}"
-            f"SL: {p['sl_price']:,.0f} ({sl_pct:+.0f}% dari harga sekarang)\n"
-            f"Horizon: {macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS} hari"
-            f"{chase_note}"
-            f"{hard_sl_note}"
-            f"{fade_note}"
+            f"NEW (Day 1/{macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS})\n"
+            f"Entry ref: {entry_ref:,.0f}\n"
+            f"TP: {p['tp_price']:,.0f} ({tp_pct:+.0f}%)\n"
+            f"SL: {p['sl_price']:,.0f} ({sl_pct:+.0f}%)\n"
+            f"Horizon: maksimal {macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS} hari bursa"
         )
 
     lines.append(
-        "\n⚠️ MACD-CONFIRM: sinyal D1-D5 untuk PERTIMBANGAN ENTRY (kalau fading, "
-        "jangan entry -- bukan alasan exit posisi yang sudah dibeli). TP1/TP2 "
-        "referensi historical touch-rate, BUKAN sinyal jual -- exit yang "
-        "tervalidasi tetap hold close-only s/d D12. SL -10% WAJIB dipakai "
-        "(sudah divalidasi di semua statistik di atas)."
+        "\n⚠️ MACD-CONFIRM: regime-gated (hanya aktif saat IHSG BOUNCE_OFF_LOW) "
+        "+ exit mekanis tetap (SL/TP dicek dari High/Low harian, bukan close) "
+        "-- SL wajib dipatuhi, bukan opsional. Sinyal muncul SEKALI saat entry "
+        "(Day 1), lalu diam sampai resolve (kena TP/SL/atau habis horizon) -- "
+        "tidak ada keputusan susulan yang perlu diambil di hari 2-5."
     )
 
     lines.append(f"\n💪 BOS — BUY ON STRENGTH ({len(bos_active)})")
@@ -4557,9 +4509,9 @@ async def swing_command(update, context):
         "uptrend intak. OSB-v2: kebalikan BOW (butuh trend RUSAK + IHSG "
         "bearish dd_100<=-10%), watchlist-only belum ada auto-entry. VCP: TP1 "
         "cepat & reliable, TP2/TP3 upside tapi tail-driven (persentase "
-        "touch-rate BUKAN jaminan). MACD-CONFIRM: BARU, langsung produksi "
-        "tanpa live-track 2 minggu (keputusan eksplisit user, lihat memory) "
-        "— tag VALID/STRONG/VERY STRONG dikunci di Day 5. BOS: BARU "
+        "touch-rate BUKAN jaminan). MACD-CONFIRM: regime-gated (hanya "
+        "BOUNCE_OFF_LOW) + exit mekanis SL-6%/TP+8%/maks 5 hari — diredesain "
+        "2026-10-14 setelah tag D1-D5 lama terbukti tidak prediktif. BOS: BARU "
         "(2026-10-13), hanya nyala saat BOUNCE_OFF_LOW, komplementer dengan "
         "OSB-v2 bukan tumpang-tindih (OSB-v2 nyala di CRASH_FAST). SL wajib "
         "dipakai di semua pilar, bukan opsional."

@@ -31,12 +31,13 @@ found to hide two real, validated effects for BOW:
      TIER2_NAIK_KUAT_WIN_BY_OBS_DAY / TIER1_NAIK_KUAT_FLAT_PENALTY_WIN /
      NAIK_ZONE_SCORE_BONUS / should_hide_from_rank).
 
-MACD-confirm ALREADY had a properly-validated per-pick, current-price-
-basis win-rate (`win_rate_of`) and TP target (`tp_prices`) from its own
-2026-09-23 research -- this module was simply never wired to USE them,
-falling back to one flat 49.2% average for every candidate regardless of
-its actual (age_day, lane, tag). Fixed here: per-pick win/wlb pulled from
-win_rate_of() when available, TP-gain dimension from tp_prices().
+MACD-confirm (2026-10-14 REDESIGN -- see engine/macd_confirm_pillar.py
+module docstring): the old per-(age_day, lane, tag) D1-D5 tag system was
+retired (proven non-predictive after a fresh-entry-anchored re-test).
+MACD-confirm is now regime-gated (BOUNCE_OFF_LOW only) with a single
+flat win-rate (`win_rate_of`, 62.2%) and a FIXED TP price set at entry
+(`pick["tp_price"]`) -- TP-gain is computed directly from that field,
+no more `tp_prices()`/`classify_fade_from_peak()` (both removed).
 
 VCP is LEFT UNCHANGED for now (flat LANE_STATS bucket) -- unlike MACD it
 has no existing tier/day-conditional structure to wire in, and unlike BOW
@@ -73,8 +74,10 @@ LANE_STATS = {
     ("OSB", False): {"win": 68.9, "wlb": 62.3, "ret_per_day": 0.208, "label": "OSB-v2 baseline"},
     ("VCP", None): {"win": 73.2, "wlb": 70.9, "ret_per_day": 0.009, "label": "VCP (no FF filter)"},
     # MACD's flat bucket is now only a FALLBACK for when win_rate_of()
-    # can't resolve a cell (e.g. tag missing) -- see _macd_stats().
-    ("MACD", None): {"win": 49.2, "wlb": 48.1, "ret_per_day": 0.396, "label": "MACD-confirm (fallback avg)"},
+    # returns None (pick missing) -- see _macd_stats_and_tp_gain().
+    # 2026-10-14: updated to match the regime-gated fixed-exit redesign
+    # (BOUNCE_OFF_LOW, SL-6%/TP8%/maxhold5, backtested win=62.2%).
+    ("MACD", None): {"win": 62.2, "wlb": 56.2, "ret_per_day": 0.296, "label": "MACD-confirm (BOUNCE_OFF_LOW, fixed exit)"},
 }
 # NOTE on OSB-v2: deliberately LEFT UNCHANGED 2026-10-10. A feasibility
 # check (research/osb_dynamic_conditional_stats_2026_10_10.py) found
@@ -202,10 +205,9 @@ def _vcp_tp_gain_pct(pick: dict) -> float | None:
 
 
 def _macd_stats_and_tp_gain(pick: dict) -> tuple[dict, float | None]:
-    """Per-pick (age_day, lane, tag)-specific win-rate + TP-gain, from
-    MACD-confirm's OWN already-validated functions (2026-09-23 research --
-    see engine/macd_confirm_pillar.py module docstring) -- NOT new
-    research, just wiring work this module never did before 2026-10-10."""
+    """Flat win-rate (2026-10-14 regime-gated fixed-exit redesign -- see
+    engine/macd_confirm_pillar.py module docstring) + TP-gain computed
+    from the pick's own FIXED tp_price set at entry."""
     import engine.macd_confirm_pillar as macd_engine
 
     fallback = LANE_STATS[("MACD", None)]
@@ -213,25 +215,14 @@ def _macd_stats_and_tp_gain(pick: dict) -> tuple[dict, float | None]:
     stats = dict(fallback)
     if win is not None:
         stats["win"] = win
-        stats["wlb"] = max(0.0, win - 6.0)  # WIN_RATE_TABLE has no precomputed Wilson-LB either
-        stats["label"] = f"MACD-confirm {pick.get('lane', '?')}/{pick.get('tag', '?')} D{min(pick.get('age_days', 1), 5)}"
-
-    # Deep-fade-from-peak override (2026-10-13) takes PRIORITY over the
-    # plain (day,lane,tag) win_rate_of() above -- it's based on a more
-    # specific validated population (has this pick given back a big
-    # chunk of an earlier, bigger gain, not just what its tag says
-    # today). See engine/macd_confirm_pillar.py's classify_fade_from_peak.
-    fade_cond = macd_engine.classify_fade_from_peak(pick)
-    if fade_cond is not None:
-        stats["win"], stats["wlb"] = fade_cond["win"], fade_cond["wlb"]
-        stats["label"] = fade_cond["label"]  # audit fix 2026-10-11: label must match the win/wlb actually shown
+        stats["wlb"] = max(0.0, win - 6.0)
+        stats["label"] = f"MACD-confirm D{pick.get('age_days', 1)}"
 
     tp_gain = None
-    tp = macd_engine.tp_prices(pick)
+    tp_price = pick.get("tp_price")
     current = pick.get("current_price")
-    if tp is not None and current:
-        _, tp2 = tp
-        tp_gain = (tp2 - current) / current * 100
+    if tp_price and current:
+        tp_gain = (tp_price - current) / current * 100
     return stats, tp_gain
 
 
@@ -270,13 +261,10 @@ def _gather_candidates():
                      "stats": _vcp_stats_and_adjustment(p), "score_bonus": 0.0,
                      "tp_gain_pct": _vcp_tp_gain_pct(p)})
 
-    # Same filter as swing_command: FADING hidden (not an entry today), and
-    # Quality(D2) VERY STRONG hidden (confirmed-bad forward bucket, see
-    # engine/macd_confirm_pillar.py module docstring).
+    # Same filter as swing_command: show-once rule (age_days<=1), see
+    # engine/macd_confirm_pillar.py module docstring (2026-10-14 redesign).
     for p in macd_engine.load_macd_confirm_picks():
-        if p.get("status") != "ALIVE" or p.get("tag") == "FADING":
-            continue
-        if p.get("lane") == "Quality(D2)" and p.get("tag") == "VERY STRONG":
+        if p.get("status") != "ALIVE" or p.get("age_days", 1) > 1:
             continue
         stats, tp_gain = _macd_stats_and_tp_gain(p)
         out.append({"lane_key": "MACD", "ff_priority": None, "pick": p,
