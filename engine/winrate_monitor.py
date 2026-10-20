@@ -123,7 +123,9 @@ def check_macd() -> list[str]:
     docstring). No more per-(day,lane,tag) cells to average."""
     import engine.macd_confirm_pillar as macd_engine
 
-    resolved = _resolved_recent(macd_engine.load_macd_confirm_picks())
+    # Only picks from the redesigned fixed-exit lane (have tp_price); pre-2026-10-14 tag-system
+    # picks resolved under different exit rules and would read as a false 7% win-rate alarm.
+    resolved = _resolved_recent([p for p in macd_engine.load_macd_confirm_picks() if "tp_price" in p])
     if len(resolved) < MIN_N:
         return []
     realized = _realized_win_pct(resolved)

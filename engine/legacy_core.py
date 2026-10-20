@@ -3059,6 +3059,32 @@ def itick_get_kline_batch(tickers, limit=10):
         return {t: None for t in tickers}
 
 
+HSC_LIST_FILE = os.path.join(PROJECT_ROOT, "hsc_list.json")
+
+
+def load_hsc_tickers() -> set:
+    """Saham High Shareholding Concentration (BEI/KSEI) -- DIKECUALIKAN dari whitelist
+    (user decision 2026-10-20: konsentrasi kepemilikan tinggi, lebih sulit diprediksi).
+    Daftar di hsc_list.json di-update manual ~per kuartal (BEI evaluasi 3 bulanan);
+    file hilang/rusak -> set kosong (tidak ada exclusion, bukan crash)."""
+    try:
+        with open(HSC_LIST_FILE, encoding="utf-8") as f:
+            return set(json.load(f).get("tickers", []))
+    except Exception as e:
+        print(f"⚠️ Gagal baca {HSC_LIST_FILE}: {e} -- HSC exclusion NONAKTIF")
+        return set()
+
+
+HSC_TAG = "⚠️ HSC (kepemilikan terkonsentrasi, sengaja dihindari bot -- sulit diprediksi)"
+
+
+def hsc_tag(ticker: str) -> str:
+    """Tag tampilan untuk saham HSC di view on-demand (/check, /myportfolio, /swing).
+    Sinyal baru tetap di-HIDE lewat whitelist; tag ini cuma supaya pencarian manual/
+    posisi yang sudah dipegang tidak terlihat 'normal'. Kosong kalau bukan HSC."""
+    return HSC_TAG if ticker and ticker.upper() in load_hsc_tickers() else ""
+
+
 def load_or_build_whitelist(all_tickers, force_rebuild=False):
     """
     Returns the eligible ticker list for this month — from cache if still fresh,
@@ -3068,7 +3094,8 @@ def load_or_build_whitelist(all_tickers, force_rebuild=False):
     Yahoo/SQLite path as the main scoring pipeline so the log and data source are
     consistent with the rest of the bot.
     """
-    all_tickers = list(all_tickers)
+    hsc = load_hsc_tickers()
+    all_tickers = [t for t in all_tickers if t not in hsc]
     current_month = datetime.datetime.now(WIB).strftime("%Y-%m")
 
     if not force_rebuild and os.path.exists(WHITELIST_CACHE_FILE):

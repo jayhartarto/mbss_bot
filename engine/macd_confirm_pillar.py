@@ -383,6 +383,16 @@ def _resolve_active_pick(pick: dict) -> dict:
     are FIXED at entry_ref_price (set once in evaluate_ticker, never
     recomputed here) -- this matches the validated backtest exactly,
     unlike the old design which recomputed SL off a moving current price."""
+    if "tp_price" not in pick:
+        # Pre-2026-10-14 pick (old D1-D5 tag system: no tp_price, SL off a moving
+        # price). Its exit rules no longer exist, so it can't be resolved under the
+        # fixed TP8/SL6/maxhold5 mechanic -- close it WITHOUT a resolved_ret_pct so
+        # winrate_monitor (which only counts picks with a resolved_ret_pct) and
+        # capital_rank never mix legacy outcomes into the redesigned lane's stats.
+        pick["status"] = "LEGACY_CLOSED"
+        pick["resolved_date"] = datetime.datetime.now(core.WIB).strftime("%Y-%m-%d")
+        return pick
+
     df = core.get_ohlcv_daily_from_db(pick["ticker"], limit=150)
     feats = _compute_latest_features(df)
     if feats is None:

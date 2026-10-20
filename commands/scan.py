@@ -4516,6 +4516,13 @@ async def swing_command(update, context):
         "OSB-v2 bukan tumpang-tindih (OSB-v2 nyala di CRASH_FAST). SL wajib "
         "dipakai di semua pilar, bukan opsional."
     )
+    # HSC: sinyal BARU sudah di-hide di whitelist, tapi pick ALIVE lama tetap
+    # ditampilkan/di-track sampai selesai -- kasih tanda supaya jelas (2026-10-20).
+    _hsc_in_view = sorted({p["ticker"] for grp in (bow_active, osb_active, vcp_active, macd_confirm_active, bos_active)
+                           for p in grp if core.hsc_tag(p["ticker"])})
+    if _hsc_in_view:
+        lines.append(f"\n⚠️ HSC (kepemilikan terkonsentrasi) di antara pick aktif: {', '.join(_hsc_in_view)} "
+                     f"-- pick lama yang masih di-track sampai selesai, bukan sinyal baru.")
     await core.safe_reply(update.message, "\n\n".join(lines))
 
 

@@ -222,6 +222,9 @@ async def check_stock(update, context):
     # Second message: deterministic, short, and focused on the live signal at /check time.
     # This replaces the earlier long Gemini paragraph that often repeated dashboard fields.
     analysis_text = core.build_check_signal_summary(result)
+    _hsc_note = core.hsc_tag(ticker)
+    if _hsc_note:
+        analysis_text = f"{_hsc_note}\n\n{analysis_text}"
 
     # Raw deterministic data — plain Python formatting, NOT AI-generated — so every
     # number Gemini referenced above can be independently cross-checked directly.

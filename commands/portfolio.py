@@ -748,6 +748,9 @@ async def my_portfolio(update, context):
             unrealized_pnl_pct=scoring["unrealized_pnl_pct"], days_held=scoring.get("_days_held"),
             reasoning_text=per_stock_reasoning.get(scoring["ticker"], ""),
         )
+        _hsc_note = core.hsc_tag(scoring["ticker"])
+        if _hsc_note:
+            block = f"{_hsc_note}\n{block}"
         blocks.append(block)
 
     if watchlist_data:
@@ -756,7 +759,9 @@ async def my_portfolio(update, context):
             reasoning = per_stock_reasoning.get(scoring["ticker"], "")
             th = scoring.get("_tp_horizon", {})
             horizon_str = f" ({th['horizon_days_low']}-{th['horizon_days_high']} hari, Confidence: {th['confidence']})" if th.get("horizon_days_low") else ""
-            blocks.append(f"{scoring['ticker']} — {scoring.get('action_label_id', '?')}{horizon_str}\n{reasoning}")
+            _hsc_note = core.hsc_tag(scoring["ticker"])
+            _hsc_prefix = f"{_hsc_note}\n" if _hsc_note else ""
+            blocks.append(f"{_hsc_prefix}{scoring['ticker']} — {scoring.get('action_label_id', '?')}{horizon_str}\n{reasoning}")
 
     blocks.append(f"─────────────────────────────────────\nSINTESIS MINGGUAN:\n{weekly_synthesis}")
 
