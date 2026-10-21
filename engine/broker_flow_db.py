@@ -255,3 +255,37 @@ def save_screen_capture(conn, ticker: str, captured_at: str, tabs: dict, assessm
 def save_inner(conn, broker: str, ws: str, we: str, inner: dict, limit_req: int, board: str = "ALL") -> int:
     """For callers that already unwrapped response['data']['data'] (engine.broker.fetch_rapidapi_broker_activity)."""
     return save_call(conn, broker, ws, we, {"success": True, "data": {"data": inner}}, 200, limit_req, None, board)
+
+
+def recent_flow_summary(conn, tickers: list, ohlcv_value_by_ticker: dict | None = None, since_days: int = 14) -> dict:
+    """Per ticker: net IDR per broker over the most recent stored windows (daily sweep rows and/or weekly backfill rows),
+    XL net as a share of traded value when `ohlcv_value_by_ticker` {ticker: traded value over the covered span} is given,
+    and the XL flag (>= +1% crowded buy, <= -1% net sell). `as_of` = latest window_end found; stale data is flagged, not hidden."""
+    out = {}
+    cutoff = (datetime.date.today() - datetime.timedelta(days=since_days)).isoformat()
+    for t in tickers:
+        rows = conn.execute(
+            "SELECT broker_code, window_start, window_end, net_value FROM broker_flow WHERE ticker=? AND window_end>=? ORDER BY window_end",
+            (t, cutoff)).fetchall()
+        stale = False
+        if not rows:
+            last = conn.execute("SELECT MAX(window_end) FROM broker_flow WHERE ticker=?", (t,)).fetchone()[0]
+            if not last:
+                continue
+            rows = conn.execute(
+                "SELECT broker_code, window_start, window_end, net_value FROM broker_flow WHERE ticker=? AND window_end=?",
+                (t, last)).fetchall()
+            stale = True
+        net: dict = {}
+        for b, ws, we, v in rows:
+            net[b] = net.get(b, 0.0) + v
+        rec = {"as_of": max(r[2] for r in rows), "from": min(r[1] for r in rows), "stale": stale,
+               "net_idr_by_broker": {b: round(v) for b, v in sorted(net.items(), key=lambda kv: -abs(kv[1]))}}
+        val = (ohlcv_value_by_ticker or {}).get(t)
+        if val and "XL" in net:
+            pct = net["XL"] / val
+            rec["xl_net_pct_of_value"] = round(pct * 100, 2)
+            rec["xl_flag"] = ("XL_CROWDED_BUY_STRONG" if pct >= 0.05 else "XL_CROWDED_BUY" if pct >= 0.01
+                              else "XL_NET_SELL" if pct <= -0.01 else "XL_NEUTRAL")
+        out[t] = rec
+    return out

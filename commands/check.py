@@ -1058,7 +1058,7 @@ async def _handle_bandar_photo(update, context, pending):
     try:
         df = await asyncio.to_thread(core.get_ohlcv_daily_from_db, ticker, 12)
         if df is not None and len(df) >= 6:
-            ret5 = float(df["close"].iloc[-1] / df["close"].iloc[-6] - 1) * 100
+            ret5 = float(df["Close"].iloc[-1] / df["Close"].iloc[-6] - 1) * 100
     except Exception:  # noqa: BLE001
         ret5 = None
     a = broksum_read.assess(pending["tabs"], ticker, ret5=ret5)

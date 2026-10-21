@@ -29,8 +29,11 @@ never `from module import name`, and never touch `core.xxx` /
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
+import os
 import re
+import sqlite3
 
 import engine.legacy_core as core
 import engine.nightly as nightly_engine
@@ -89,7 +92,123 @@ async def _fetch_live_ticker_context(ticker: str) -> dict | None:
     return result
 
 
-def _build_context_bundle(scored: dict, staleness_note, portfolio: dict, live_data: dict) -> dict:
+WEB_TRIGGERS = (
+    "berita", "news", "katalis", "kenapa", "mengapa", "kabar", "isu", "rumor", "dividen", "rups", "right issue", "rights", "ipo",
+    "akuisisi", "merger", "buyback", "msci", "bi rate", "suku bunga", "fed ", "kebijakan", "ojk", "bei ", "regulasi",
+    "laporan keuangan", "kuartal", "laba", "rugi", "ihsg", "rupiah", "batubara", "nikel", "emas", "minyak", "komoditas", "sektor",
+    "outlook", "prospek", "analis", "target harga", "tarif", "pemerintah", "danantara", "asing jual", "net sell",
+)
+
+
+def _wants_web(question: str) -> tuple[bool, str]:
+    """Explicit prefixes win: '!web ...' forces search, '!noweb ...' disables it. Otherwise search when the question looks
+    news/macro/corporate-action shaped (Google Search grounding costs latency, so it is not on for pure data questions)."""
+    q = question.strip()
+    low = q.lower()
+    if low.startswith("!noweb"):
+        return False, q[6:].strip()
+    if low.startswith("!web"):
+        return True, q[4:].strip()
+    return any(k in low for k in WEB_TRIGGERS), q
+
+
+def _span_value(ticker: str, d_from: str, d_to: str):
+    df = core.get_ohlcv_daily_from_db(ticker, 40)  # DatetimeIndex, columns Open/High/Low/Close/Volume
+    if df is None or df.empty:
+        return None
+    idx = df.index.strftime("%Y-%m-%d")
+    m = df[(idx >= d_from) & (idx <= d_to)]
+    return float((m["Close"] * m["Volume"]).sum()) if not m.empty else None
+
+
+def _build_extra_context(mentioned: list) -> dict:
+    """Context added 2026-10-21: IHSG regime, active swing picks + /rank, BSJP picks, and for the tickers named in the question:
+    which lanes hold them, recent broker flow (XL flag), foreign flow. Every block is independent and best-effort - a failure only
+    drops that block (named in `unavailable`), never the chat."""
+    out: dict = {"today_wib": datetime.datetime.now(core.WIB).strftime("%Y-%m-%d %H:%M WIB"), "unavailable": []}
+
+    try:
+        import engine.ihsg_regime as ihsg_regime
+        r = ihsg_regime.get_ihsg_regime_today()
+        out["ihsg_regime"] = r or "tidak tersedia"
+        if not r:
+            out["unavailable"].append("ihsg_regime")
+    except Exception as e:  # noqa: BLE001
+        out["unavailable"].append(f"ihsg_regime ({str(e)[:60]})")
+
+    ranked = []
+    try:
+        import engine.capital_rank as capital_rank
+        ranked = capital_rank.compute_rank()
+        keep = ("tier", "age_days", "status", "trigger_date", "entry_ref_price", "entry_low", "entry_high", "sl_price", "tp1_price", "tp2_price")
+        out["swing_rank_top10"] = [{
+            "ticker": c["pick"].get("ticker"), "lane": c["lane_key"], "ff_priority": c["ff_priority"],
+            "rank_score": round(c["score"], 1), "win_rate_pct": c["stats"].get("wlb"),
+            "ret_per_day_pct": c["stats"].get("ret_per_day"), "tp_gain_pct": c["tp_gain_pct"],
+            **{k: c["pick"].get(k) for k in keep if c["pick"].get(k) is not None},
+        } for c in ranked[:10]]
+        out["swing_active_pick_count"] = len(ranked)
+    except Exception as e:  # noqa: BLE001
+        out["unavailable"].append(f"swing_rank ({str(e)[:60]})")
+
+    try:
+        import engine.bsjp2 as bsjp2
+        st = bsjp2._load_json_state("bsjp2_confirmed_picks.json")
+        picks = [p for p in (st.get("picks") or []) if p.get("tier") in bsjp2.LADDER_TIERS or p.get("rocket")]
+        out["bsjp_confirmed"] = {"as_of": st.get("trading_day_marker"), "picks": [
+            {k: p.get(k) for k in ("ticker", "tier", "rocket", "rung", "gap_pct", "ret_2d_cum", "tp1", "sl") if p.get(k) is not None}
+            for p in picks[:8]]}
+    except Exception as e:  # noqa: BLE001
+        out["unavailable"].append(f"bsjp ({str(e)[:60]})")
+
+    if not mentioned:
+        return out
+
+    out["mentioned_ticker_context"] = {}
+    for t in mentioned:
+        out["mentioned_ticker_context"][t] = {"in_swing_lanes": [
+            {"lane": c["lane_key"], "age_days": c["pick"].get("age_days"), "status": c["pick"].get("status"), "ff_priority": c["ff_priority"],
+             "sl_price": c["pick"].get("sl_price"), "tp1_price": c["pick"].get("tp1_price")}
+            for c in ranked if c["pick"].get("ticker") == t] or "tidak ada di lane swing aktif"}
+
+    try:
+        import engine.broker_flow_db as flow_db
+        import engine.nightly as nightly
+        conn = flow_db.connect(nightly.BROKER_FLOW_DB)
+        try:
+            first = flow_db.recent_flow_summary(conn, mentioned)
+            values = {}
+            for t, rec in first.items():
+                v = _span_value(t, rec["from"], rec["as_of"])
+                if v:
+                    values[t] = v
+            flows = flow_db.recent_flow_summary(conn, mentioned, values)
+        finally:
+            conn.close()
+        for t, rec in flows.items():
+            out["mentioned_ticker_context"][t]["broker_flow"] = rec
+    except Exception as e:  # noqa: BLE001
+        out["unavailable"].append(f"broker_flow ({str(e)[:60]})")
+
+    try:
+        import engine.buy_on_weakness as bow
+        conn = sqlite3.connect(bow.FF_DB_PATH, timeout=30)
+        try:
+            for t in mentioned:
+                rows = conn.execute(
+                    "SELECT date, foreign_net FROM foreign_flow_daily WHERE ticker=? ORDER BY date DESC LIMIT 10", (t,)).fetchall()
+                if rows:
+                    out["mentioned_ticker_context"][t]["foreign_flow_last10d_shares_net"] = {
+                        "net_last5": sum(r[1] or 0 for r in rows[:5]), "net_last10": sum(r[1] or 0 for r in rows),
+                        "days_net_buy_of_last10": sum(1 for r in rows if (r[1] or 0) > 0), "latest_date": rows[0][0]}
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        out["unavailable"].append(f"foreign_flow ({str(e)[:60]})")
+    return out
+
+
+def _build_context_bundle(scored: dict, staleness_note, portfolio: dict, live_data: dict, extra: dict | None = None) -> dict:
     """Ringkasan konteks pasar buat Gemini — bukan seluruh field mentah scoring, biar fokus & hemat token."""
     broksum_data = nightly_engine.load_broksum_250()
     backbone_result, _ = nightly_engine.load_backbone_daily_allow_stale()
@@ -131,6 +250,7 @@ def _build_context_bundle(scored: dict, staleness_note, portfolio: dict, live_da
         "multi_broker_accumulation": [line for _, line in multi_broker_lines[:5]],
         "user_portfolio": portfolio_summary,
         "live_data_for_tickers_mentioned_in_question": live_data,
+        **({"bot_context_2026_10": extra} if extra else {}),
     }
 
 
@@ -144,11 +264,17 @@ async def tanya_command(update, context):
             "/tanya saham apa yang lebih bagus buat entry sekarang?\n"
             "/tanya bandingkan BBCA sama BBRI\n"
             "/tanya TLKM entry 3200 volume gede, masih bagus atau telat?\n\n"
-            "Obrolannya nyambung antar pesan — pakai /tanyareset buat mulai obrolan baru."
+            "Obrolannya nyambung antar pesan — pakai /tanyareset buat mulai obrolan baru.\n\n"
+            "Tahu regime IHSG, pick /swing + /rank, BSJP, arus asing & broker (XL). Pertanyaan soal berita/makro/aksi korporasi "
+            "otomatis dibantu pencarian web. Paksa: awali dengan !web, matikan: !noweb."
         )
         return
 
-    await core.safe_reply(update.message, "🤔 Mikir dulu...")
+    use_search, question = _wants_web(question)
+    if not question:
+        await core.safe_reply(update.message, "Pertanyaannya kosong setelah !web/!noweb. Contoh: /tanya !web kenapa IHSG turun?")
+        return
+    await core.safe_reply(update.message, "🌐 Mikir + cari di web dulu..." if use_search else "🤔 Mikir dulu...")
 
     scored, staleness_note = nightly_engine.load_daily_scan_cache_allow_stale()
     scored = scored or {}
@@ -167,12 +293,17 @@ async def tanya_command(update, context):
         if live:
             live_data[ticker] = live
 
-    context_bundle = _build_context_bundle(scored, staleness_note, portfolio, live_data)
+    try:
+        extra = await asyncio.wait_for(asyncio.to_thread(_build_extra_context, mentioned), timeout=90)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ /tanya: konteks tambahan gagal: {e}")
+        extra = {"unavailable": ["seluruh konteks tambahan"]}
+    context_bundle = _build_context_bundle(scored, staleness_note, portfolio, live_data, extra)
     history = core.load_tanya_history(update.effective_chat.id)
 
     try:
         answer = await asyncio.to_thread(
-            core.ask_gemini_chat, history, question, json.dumps(context_bundle, default=str)
+            core.ask_gemini_chat, history, question, json.dumps(context_bundle, default=str), core.TANYA_INSTRUCTION, 3, use_search
         )
     except Exception as e:
         await core.safe_reply(update.message, f"⚠️ Gagal minta jawaban ke Gemini: {str(e)[:200]}")

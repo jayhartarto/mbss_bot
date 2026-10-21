@@ -476,18 +476,35 @@ import base64
 GEMINI_REST_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_MODEL    = "gemini-3.1-flash-lite"
 
-def _gemini_rest(contents: list, system_instruction: str = None, model: str = None, timeout: int = 60) -> str:
+def _gemini_rest(contents: list, system_instruction: str = None, model: str = None, timeout: int = 60, use_search: bool = False) -> str:
     url  = GEMINI_REST_URL.format(model=model or GEMINI_MODEL)
     body = {"contents": contents}
     if system_instruction:
         body["system_instruction"] = {"parts": [{"text": system_instruction}]}
+    if use_search:
+        body["tools"] = [{"google_search": {}}]  # Google Search grounding (web knowledge for /tanya)
+        timeout = max(timeout, 90)
     resp = requests.post(url, params={"key": GEMINI_API_KEY}, json=body, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
     try:
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        cand = data["candidates"][0]
+        if not use_search:
+            return cand["content"]["parts"][0]["text"]
+        text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
     except (KeyError, IndexError) as e:
         raise ValueError(f"Unexpected Gemini response structure: {data}") from e
+    # grounded answers: append up to 4 distinct web sources so the user can check them
+    chunks = ((cand.get("groundingMetadata") or {}).get("groundingChunks")) or []
+    seen, lines = set(), []
+    for c in chunks:
+        w = c.get("web") or {}
+        t, u = (w.get("title") or "").strip(), (w.get("uri") or "").strip()
+        if (t or u) and (t, u) not in seen:
+            seen.add((t, u)); lines.append(f"- {t} ({u})" if t and u else f"- {t or u}")
+        if len(lines) >= 4:
+            break
+    return text + ("\n\nSumber web:\n" + "\n".join(lines) if lines else "")
 
 def _gemini_text(prompt: str, system_instruction: str = None, **kwargs) -> str:
     return _gemini_rest([{"role": "user", "parts": [{"text": prompt}]}], system_instruction=system_instruction, **kwargs)
@@ -5049,43 +5066,8 @@ OUTPUT STYLE:
 - If outside market hours, say the signal is EOD-only and avoid pretending it is live.
 """
 
-TANYA_INSTRUCTION = BASE_SYSTEM_INSTRUCTION + """
-Context: This is /tanya, a freeform conversational Q&A command (MBSS v2, user
-request) — the user asks natural questions like "saham apa yang lebih baik
-sekarang?", "bandingkan TICKER_A vs TICKER_B", or "entry sekarang di harga X
-volume Y, masih bagus atau sudah telat?". Unlike the other briefs, there is
-NO fixed output template here — answer the actual question asked, directly
-and conversationally, in Indonesian.
-
-You are given:
-- CURRENT MARKET DATA: a JSON bundle built fresh for THIS turn — cross-tool
-  consensus picks (which independent screening lenses agree on which
-  tickers, and why), HIGH CONVICTION top picks, the user's portfolio
-  (positions/watchlist/cash), and — if the user's question named specific
-  tickers — live intraday data fetched just now for those tickers.
-- Prior turns in this same conversation (if any), for continuity — the user
-  may refer back to something asked earlier ("yang tadi", "saham itu").
-
-Rules specific to this command:
-- Always answer the CURRENT question using the CURRENT MARKET DATA block —
-  never rely on numbers from earlier turns in the conversation, since prices
-  and scores can change between messages.
-- If the user names a ticker that is NOT present anywhere in the provided
-  data (not in consensus/HC picks, not in portfolio, not in live-fetched
-  data), say plainly that you don't have data for it right now — don't
-  guess or fabricate figures for it.
-- If comparing two or more tickers, structure the comparison around what the
-  DATA actually shows for each (score, action, RR, consensus tools, risk
-  flags) — don't just give a vibes-based preference.
-- If the question is about entry timing at a specific price/volume the user
-  supplied, weigh that against the live/cached technicals provided (VWAP,
-  trigger, invalidation, volume pace, RSI/ADX/CMF) rather than ignoring the
-  user's numbers.
-- Keep answers conversational and reasonably short — this is chat, not a
-  formal brief. A few sentences is usually enough; only go longer if the
-  question genuinely needs a multi-point comparison.
-- No Markdown, no rigid headers — plain conversational Indonesian text.
-"""
+import engine.tanya_knowledge as tanya_knowledge  # no imports of its own -> no cycle
+TANYA_INSTRUCTION = tanya_knowledge.build_instruction()
 
 
 def get_portfolio_reasoning_and_synthesis(combined_data: list, portfolio_context: str) -> dict:
@@ -5181,7 +5163,7 @@ def ask_gemini_to_analyze(processed_stocks, system_instruction=MORNING_BRIEF_INS
     raise RuntimeError(f"Gemini API failed after {max_retries} attempts: {last_error}")
 
 
-def ask_gemini_chat(history_turns: list, question: str, context_json, system_instruction: str = TANYA_INSTRUCTION, max_retries: int = 3) -> str:
+def ask_gemini_chat(history_turns: list, question: str, context_json, system_instruction: str = TANYA_INSTRUCTION, max_retries: int = 3, use_search: bool = False) -> str:
     """
     Multi-turn Gemini call behind /tanya. `history_turns` is prior
     [{"role": "user"|"model", "text": ...}, ...] turns from THIS conversation
@@ -5201,12 +5183,15 @@ def ask_gemini_chat(history_turns: list, question: str, context_json, system_ins
     contents.append({"role": "user", "parts": [{"text": current_prompt}]})
 
     last_error = None
+    search_on = use_search
     for attempt in range(1, max_retries + 1):
         try:
-            return _gemini_rest(contents, system_instruction=system_instruction)
+            return _gemini_rest(contents, system_instruction=system_instruction, use_search=search_on)
         except Exception as e:
             last_error = e
-            print(f"⚠️ Gemini chat call failed (attempt {attempt}/{max_retries}): {e}")
+            print(f"⚠️ Gemini chat call failed (attempt {attempt}/{max_retries}, search={search_on}): {e}")
+            if search_on:
+                search_on = False  # search tool unsupported/failed -> answer from bot data alone rather than fail the chat
             if attempt < max_retries:
                 time.sleep(3 * attempt)  # 3s, 6s backoff
 
