@@ -4523,6 +4523,15 @@ async def swing_command(update, context):
     if _hsc_in_view:
         lines.append(f"\n⚠️ HSC (kepemilikan terkonsentrasi) di antara pick aktif: {', '.join(_hsc_in_view)} "
                      f"-- pick lama yang masih di-track sampai selesai, bukan sinyal baru.")
+    # XL net-buy warning (2026-10-21): display-only, never hides a pick or changes a score -- see engine/broker_flags.py.
+    try:
+        import engine.broker_flags as broker_flags
+        _xl = await asyncio.to_thread(broker_flags.xl_flags, sorted({p["ticker"] for grp in (bow_active, osb_active, vcp_active, macd_confirm_active, bos_active) for p in grp}))
+        _xl_line = broker_flags.summary_line(_xl)
+        if _xl_line:
+            lines.append(_xl_line)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ /swing XL flag gagal (diabaikan): {e}")
     await core.safe_reply(update.message, "\n\n".join(lines))
 
 
@@ -4565,5 +4574,10 @@ async def rank_command(update, context):
             return
 
     ranked = capital_rank_engine.compute_rank(w_return, w_win, w_tpgain)
-    message = capital_rank_engine.format_rank_message(ranked, w_return, w_win, w_tpgain)
+    import engine.broker_flags as broker_flags
+    _flags = await asyncio.to_thread(broker_flags.xl_flags, [c["pick"].get("ticker") for c in ranked[:20]])
+    message = capital_rank_engine.format_rank_message(ranked, w_return, w_win, w_tpgain, broker_flags=_flags)
+    if _flags:
+        message += ("\n⚠️ Tag XL = XL (Stockbit) net beli >= +1% nilai transaksi (⚠️⚠️ >= +5%): peringatan kontrarian, bukti LEMAH, "
+                    "hanya info -- tidak mengubah skor atau urutan. Cek: /bandar TICKER.")
     await core.safe_reply(update.message, message)

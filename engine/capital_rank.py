@@ -314,7 +314,7 @@ def compute_rank(w_return: float = DEFAULT_W_RETURN, w_win: float = DEFAULT_W_WI
 
 
 def format_rank_message(ranked: list[dict], w_return: float = DEFAULT_W_RETURN, w_win: float = DEFAULT_W_WIN,
-                         w_tpgain: float = DEFAULT_W_TPGAIN, top_n: int = 20) -> str:
+                         w_tpgain: float = DEFAULT_W_TPGAIN, top_n: int = 20, broker_flags: dict | None = None) -> str:
     total_w = w_return + w_win + w_tpgain
     if total_w <= 0:
         w_return, w_win, w_tpgain = DEFAULT_W_RETURN, DEFAULT_W_WIN, DEFAULT_W_TPGAIN
@@ -342,6 +342,10 @@ def format_rank_message(ranked: list[dict], w_return: float = DEFAULT_W_RETURN, 
         entry = p.get("entry_ref_price") or p.get("entry_low")
         sl = p.get("sl_price")
         priority_tag = " ⭐FF" if c["ff_priority"] else ""
+        _bf = (broker_flags or {}).get(ticker)
+        if _bf:
+            import engine.broker_flags as _broker_flags
+            priority_tag += _broker_flags.short_tag(_bf)
         block = (
             f"{i}. {ticker} [{s['label']}{priority_tag}] — Score {c['score']:.1f}\n"
             f"   ret/hari≈{s['ret_per_day']:+.2f}% (ann. simple {s['ret_per_day']*252:+.0f}%) | "
