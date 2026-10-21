@@ -1319,14 +1319,46 @@ def build_rapidapi_broker_whitelist_sweep() -> dict:
     from_str, to_str = from_date.isoformat(), to_date.isoformat()
 
     merged: dict = {}
+    per_broker: dict = {}  # code -> number of ticker rows returned (None = call failed, 0 = answered but empty)
     for code in broker_engine.SMART_MONEY_BROKER_WHITELIST:
         activity = broker_engine.fetch_rapidapi_broker_activity(code, from_str, to_str)
         if not activity:
+            per_broker[code] = None
             continue
-        for ticker, rows in broker_engine.rapidapi_broker_activity_to_broksum_rows(activity).items():
+        by_ticker = broker_engine.rapidapi_broker_activity_to_broksum_rows(activity)
+        per_broker[code] = len(by_ticker)
+        for ticker, rows in by_ticker.items():
             merged.setdefault(ticker, []).extend(rows)
-    print(f"🏦 RapidAPI whitelist sweep: {len(merged)} ticker tercakup dari {len(broker_engine.SMART_MONEY_BROKER_WHITELIST)} broker whitelist.")
+    n_all = len(broker_engine.SMART_MONEY_BROKER_WHITELIST)
+    n_failed = sum(1 for v in per_broker.values() if v is None)
+    n_empty = sum(1 for v in per_broker.values() if v == 0)
+    print(f"🏦 RapidAPI whitelist sweep: {len(merged)} ticker tercakup dari {n_all} broker whitelist "
+          f"({n_failed} gagal, {n_empty} kosong).")
+    _log_sweep_quality(to_str, from_str, len(merged), per_broker)
     return merged
+
+
+SWEEP_QUALITY_LOG = os.path.join(core.PROJECT_ROOT, "research", "broksum_sweep_quality.jsonl")
+
+
+def _log_sweep_quality(to_str: str, from_str: str, n_tickers: int, per_broker: dict):
+    """Append one line per nightly sweep so empty/failed RapidAPI answers (HTTP 200 + success but no rows, seen on
+    broker-summary 2026-10-21) are visible over time instead of silently shrinking the history. Never raises."""
+    try:
+        n_all = len(per_broker)
+        rec = {
+            "run_date": core.datetime.datetime.now(core.WIB).strftime("%Y-%m-%d"),
+            "window": [from_str, to_str],
+            "brokers_called": n_all,
+            "brokers_failed": sum(1 for v in per_broker.values() if v is None),
+            "brokers_empty": sum(1 for v in per_broker.values() if v == 0),
+            "tickers": n_tickers,
+            "per_broker": per_broker,
+        }
+        with open(SWEEP_QUALITY_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception as e:  # logging must never break the nightly job
+        print(f"⚠️ Gagal menulis sweep quality log: {e}")
 
 
 def _merge_broksum_sources(index_alpha_data: dict, rapidapi_data: dict) -> dict:
