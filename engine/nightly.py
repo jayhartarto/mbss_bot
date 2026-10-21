@@ -687,7 +687,10 @@ async def run_nightly_full_scan(context):
         # (RapidAPI) sebenarnya tersedia dan belum dicoba.
         index_alpha_failed = not broksum_250_data
         rapidapi_whitelist_data = {}
-        if trading_night_index % 2 == 0 or index_alpha_failed:
+        # 2026-10-21: the sweep is now the daily DATA COLLECTION for research/broker_flow_history.sqlite (single-day rows), so it
+        # must run EVERY night. The old every-2nd-night cadence would resume as soon as Index Alpha's quota resets (index_alpha_failed
+        # False) and leave a gap every other day.
+        if SWEEP_EVERY_NIGHT or trading_night_index % 2 == 0 or index_alpha_failed:
             # MBSS v2 (user request, quota conservation): kalau sweep ini
             # SUDAH sukses jalan hari ini (mis. /eodscan dipanggil ulang
             # buat testing), jangan fetch 13 broker lagi buat data yang
@@ -1340,6 +1343,7 @@ def build_rapidapi_broker_whitelist_sweep() -> dict:
     return merged
 
 
+SWEEP_EVERY_NIGHT = True  # see the gate in the nightly job; False restores the old every-2nd-night cadence
 SWEEP_LIST_LIMIT = 100  # rows per side per broker; 100 reaches ~Rp0.1-0.7bn names on a single day (50 only reached the big ones)
 BROKER_FLOW_DB = os.path.join(core.PROJECT_ROOT, "research", "broker_flow_history.sqlite")
 
