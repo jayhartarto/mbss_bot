@@ -1305,7 +1305,7 @@ def _mark_rapidapi_whitelist_sweep_done_today():
 
 def build_rapidapi_broker_whitelist_sweep() -> dict:
     """
-    Sweep engine.broker.SMART_MONEY_BROKER_WHITELIST (10 codes) via
+    Sweep engine.broker.SMART_MONEY_BROKER_WHITELIST (10 codes: SWEEP_BROKERS) via
     fetch_rapidapi_broker_activity, one call per broker over the
     RAPIDAPI_WHITELIST_SWEEP_WINDOW_DAYS window (0 = single day), reshape each response with
     rapidapi_broker_activity_to_broksum_rows, and merge into one
@@ -1320,7 +1320,7 @@ def build_rapidapi_broker_whitelist_sweep() -> dict:
 
     merged: dict = {}
     per_broker: dict = {}  # code -> number of ticker rows returned (None = call failed, 0 = answered but empty)
-    for code in broker_engine.SMART_MONEY_BROKER_WHITELIST:
+    for code in broker_engine.SWEEP_BROKERS:
         activity = broker_engine.fetch_rapidapi_broker_activity(code, from_str, to_str, limit=SWEEP_LIST_LIMIT)
         if not activity:
             per_broker[code] = None
@@ -1330,7 +1330,7 @@ def build_rapidapi_broker_whitelist_sweep() -> dict:
         per_broker[code] = len(by_ticker)
         for ticker, rows in by_ticker.items():
             merged.setdefault(ticker, []).extend(rows)
-    n_all = len(broker_engine.SMART_MONEY_BROKER_WHITELIST)
+    n_all = len(broker_engine.SWEEP_BROKERS)
     n_failed = sum(1 for v in per_broker.values() if v is None)
     n_empty = sum(1 for v in per_broker.values() if v == 0)
     print(f"🏦 RapidAPI whitelist sweep: {len(merged)} ticker tercakup dari {n_all} broker whitelist "

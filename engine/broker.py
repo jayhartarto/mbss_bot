@@ -25,7 +25,7 @@ three sources:
     (separate budget from Index Alpha's own). `fetch_rapidapi_broker_activity`
     is broker-scoped, not ticker-scoped — one call returns that broker's
     activity across every ticker on the exchange for a date range, which is
-    what makes sweeping `SMART_MONEY_BROKER_WHITELIST` (15 calls) cheaper
+    what makes sweeping `SWEEP_BROKERS` (10 calls) cheaper
     than a per-ticker approach; `rapidapi_broker_activity_to_broksum_rows`
     reshapes its response into this file's existing per-ticker row shape so
     it can merge straight into the `broksum_250` pipeline in
@@ -1495,7 +1495,10 @@ def find_broker_activity_across_tickers(broker_code: str, tickers_data: dict) ->
 # 2026-10-21 (later): reduced 15 -> 10 by market share (RapidAPI top-broker, 1 month): CC 13%, ZP 11%, XL 9.5%, AK 9.4%, YU 6%,
 # YP 4%, MG 3.6%, PD 3% + OD (government net buyer) + XC (retail pair of XL). ~65% of traded value; 10 calls/night + 1 top-broker call.
 # Dropped: BK, KZ, RX, BB, DX, NI (each <= 3.7% and no measured effect). XL is the only broker with a validated (contrarian) effect.
-SMART_MONEY_BROKER_WHITELIST = ["CC", "ZP", "XL", "AK", "YU", "YP", "MG", "PD", "XC", "OD"]
+SWEEP_BROKERS = ["CC", "ZP", "XL", "AK", "YU", "YP", "MG", "PD", "XC", "OD"]  # what the nightly sweep COLLECTS (data), roles in engine/broker_roles.py
+# What the "smart money" TAGS count (/swing, scanalert, whitelist accumulation): institutional/foreign desks only. Retail apps
+# (XL/PD/XC) and scalpers (MG) are collected but must NOT be read as smart money; XL is used as a CONTRARIAN flag in engine/broksum_read.py.
+SMART_MONEY_BROKER_WHITELIST = ["CC", "OD", "AK", "ZP", "YU"]
 
 
 def get_smart_money_accumulation(ticker: str, tickers_data: dict) -> list:
@@ -1757,7 +1760,7 @@ def fetch_rapidapi_broker_activity(broker_code: str, from_date: str, to_date: st
     testing): a single call returns ONE broker's net buy/sell activity across
     EVERY ticker on the exchange for the given date range (transactionType=
     TRANSACTION_TYPE_NET — each row is single-sided, buy OR sell, not both).
-    This is what makes sweeping SMART_MONEY_BROKER_WHITELIST (15 calls) cover
+    This is what makes sweeping SWEEP_BROKERS (10 calls) cover
     the whole market for those brokers, far cheaper than a per-ticker
     approach. Returns the {"bandar_detector": {...}, "broker_summary":
     {"brokers_buy": [...], "brokers_sell": [...]}} payload, or None on any
