@@ -1305,9 +1305,9 @@ def _mark_rapidapi_whitelist_sweep_done_today():
 
 def build_rapidapi_broker_whitelist_sweep() -> dict:
     """
-    Sweep engine.broker.SMART_MONEY_BROKER_WHITELIST (13 codes) via
-    fetch_rapidapi_broker_activity, one call per broker over a rolling
-    RAPIDAPI_WHITELIST_SWEEP_LOOKBACK_DAYS window, reshape each response with
+    Sweep engine.broker.SMART_MONEY_BROKER_WHITELIST (15 codes) via
+    fetch_rapidapi_broker_activity, one call per broker over the
+    RAPIDAPI_WHITELIST_SWEEP_WINDOW_DAYS window (0 = single day), reshape each response with
     rapidapi_broker_activity_to_broksum_rows, and merge into one
     {ticker: [rows, ...]} dict covering every ticker any whitelisted broker
     touched — broader than BROKSUM 250's top-N-by-score scope, since it's
@@ -1315,7 +1315,7 @@ def build_rapidapi_broker_whitelist_sweep() -> dict:
     Unlike Index Alpha's 250-ticker cap, this has NO ticker cap at all.
     """
     to_date = core.datetime.datetime.now(core.WIB).date()
-    from_date = to_date - core.datetime.timedelta(days=broker_engine.RAPIDAPI_WHITELIST_SWEEP_LOOKBACK_DAYS)
+    from_date = to_date - core.datetime.timedelta(days=broker_engine.RAPIDAPI_WHITELIST_SWEEP_WINDOW_DAYS)
     from_str, to_str = from_date.isoformat(), to_date.isoformat()
 
     merged: dict = {}

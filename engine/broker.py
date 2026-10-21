@@ -25,7 +25,7 @@ three sources:
     (separate budget from Index Alpha's own). `fetch_rapidapi_broker_activity`
     is broker-scoped, not ticker-scoped — one call returns that broker's
     activity across every ticker on the exchange for a date range, which is
-    what makes sweeping `SMART_MONEY_BROKER_WHITELIST` (13 calls) cheaper
+    what makes sweeping `SMART_MONEY_BROKER_WHITELIST` (15 calls) cheaper
     than a per-ticker approach; `rapidapi_broker_activity_to_broksum_rows`
     reshapes its response into this file's existing per-ticker row shape so
     it can merge straight into the `broksum_250` pipeline in
@@ -1477,7 +1477,12 @@ def find_broker_activity_across_tickers(broker_code: str, tickers_data: dict) ->
 # konsisten dengan kebijaksanaan komunitas informal soal broker
 # institusi/asing besar, tapi validasi paling kuat tetap dari data winrate
 # kita sendiri seiring waktu).
-SMART_MONEY_BROKER_WHITELIST = ["ZP", "AK", "BK", "YU", "AI", "SQ", "BB", "KZ", "RX", "RF", "DX", "HP", "KI"]
+# 2026-10-21 (user-approved, bandarmology framework): re-curated for the retail-vs-institution reading, not
+# "smart money by reputation". Dropped AI/KI/HP/RF/SQ (negative on both buy and sell sides in
+# research/broker_accumulation_backtest_2026_10_20.py = selection artifact). Added domestic institutions
+# CC/OD/NI, retail gauges XL/PD/XC, and MG (scalper; "follow MG" is an untested hypothesis, tracked via the
+# single-day sweep, not assumed smart money). 15 calls/night ~ 315/month of RAPIDAPI_IDX_MONTHLY_BUDGET 400.
+SMART_MONEY_BROKER_WHITELIST = ["AK", "BK", "KZ", "RX", "ZP", "YU", "BB", "DX", "CC", "OD", "NI", "XL", "PD", "XC", "MG"]
 
 
 def get_smart_money_accumulation(ticker: str, tickers_data: dict) -> list:
@@ -1666,6 +1671,11 @@ RAPIDAPI_IDX_MONTHLY_LIMIT = 500
 RAPIDAPI_IDX_MONTHLY_BUDGET = 400  # soft cap, leaves headroom for overage safety
 RAPIDAPI_ONDEMAND_CACHE_FILE = os.path.join(core.PROJECT_ROOT, "rapidapi_idx_ondemand_cache.json")
 RAPIDAPI_WHITELIST_SWEEP_LOOKBACK_DAYS = 10  # matches BROKSUM_250_LOOKBACK_DAYS in engine/nightly.py
+# Nightly whitelist sweep ONLY (not /check's on-demand lookback, which still uses the constant above): 0 = single-day
+# window (from == to == today) so research/broksum_daily_history.sqlite accumulates true per-day net flow instead of
+# overlapping rolling-10-day positions (see project_broker_accumulation_backtest_2026_10_20 memory). Side effect:
+# smart-money tags fed by the sweep now reflect one day's flow, not ~10 days. Set back to 10 to revert.
+RAPIDAPI_WHITELIST_SWEEP_WINDOW_DAYS = 0
 
 
 def _load_rapidapi_idx_quota() -> dict:
@@ -1734,7 +1744,7 @@ def fetch_rapidapi_broker_activity(broker_code: str, from_date: str, to_date: st
     testing): a single call returns ONE broker's net buy/sell activity across
     EVERY ticker on the exchange for the given date range (transactionType=
     TRANSACTION_TYPE_NET — each row is single-sided, buy OR sell, not both).
-    This is what makes sweeping SMART_MONEY_BROKER_WHITELIST (13 calls) cover
+    This is what makes sweeping SMART_MONEY_BROKER_WHITELIST (15 calls) cover
     the whole market for those brokers, far cheaper than a per-ticker
     approach. Returns the {"bandar_detector": {...}, "broker_summary":
     {"brokers_buy": [...], "brokers_sell": [...]}} payload, or None on any
