@@ -1305,7 +1305,7 @@ def _mark_rapidapi_whitelist_sweep_done_today():
 
 def build_rapidapi_broker_whitelist_sweep() -> dict:
     """
-    Sweep engine.broker.SMART_MONEY_BROKER_WHITELIST (15 codes) via
+    Sweep engine.broker.SMART_MONEY_BROKER_WHITELIST (10 codes) via
     fetch_rapidapi_broker_activity, one call per broker over the
     RAPIDAPI_WHITELIST_SWEEP_WINDOW_DAYS window (0 = single day), reshape each response with
     rapidapi_broker_activity_to_broksum_rows, and merge into one
@@ -1321,10 +1321,11 @@ def build_rapidapi_broker_whitelist_sweep() -> dict:
     merged: dict = {}
     per_broker: dict = {}  # code -> number of ticker rows returned (None = call failed, 0 = answered but empty)
     for code in broker_engine.SMART_MONEY_BROKER_WHITELIST:
-        activity = broker_engine.fetch_rapidapi_broker_activity(code, from_str, to_str)
+        activity = broker_engine.fetch_rapidapi_broker_activity(code, from_str, to_str, limit=SWEEP_LIST_LIMIT)
         if not activity:
             per_broker[code] = None
             continue
+        _store_sweep_flow(code, from_str, to_str, activity)
         by_ticker = broker_engine.rapidapi_broker_activity_to_broksum_rows(activity)
         per_broker[code] = len(by_ticker)
         for ticker, rows in by_ticker.items():
@@ -1335,7 +1336,47 @@ def build_rapidapi_broker_whitelist_sweep() -> dict:
     print(f"🏦 RapidAPI whitelist sweep: {len(merged)} ticker tercakup dari {n_all} broker whitelist "
           f"({n_failed} gagal, {n_empty} kosong).")
     _log_sweep_quality(to_str, from_str, len(merged), per_broker)
+    _store_top_broker_snapshot()
     return merged
+
+
+SWEEP_LIST_LIMIT = 100  # rows per side per broker; 100 reaches ~Rp0.1-0.7bn names on a single day (50 only reached the big ones)
+BROKER_FLOW_DB = os.path.join(core.PROJECT_ROOT, "research", "broker_flow_history.sqlite")
+
+
+def _store_sweep_flow(code: str, from_str: str, to_str: str, activity: dict):
+    """Persist one broker's answer into the long-lived broker_flow history (single-day windows). Never raises."""
+    try:
+        import engine.broker_flow_db as flow_db
+        conn = flow_db.connect(BROKER_FLOW_DB)
+        try:
+            flow_db.save_inner(conn, code, from_str, to_str, activity, SWEEP_LIST_LIMIT)
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — history logging must never break the nightly job
+        print(f"⚠️ Gagal menyimpan broker_flow {code}: {e}")
+
+
+def _store_top_broker_snapshot():
+    """One call/night: every broker's value/net for the last trading day -> broker_market_flow. Never raises."""
+    try:
+        import engine.broker_flow_db as flow_db
+        body = broker_engine.fetch_rapidapi_top_broker("TB_PERIOD_LAST_1_DAY")
+        if not body:
+            return
+        d = (body.get("data") or {}).get("data") or {}
+        win = d.get("date") or {}
+        ws, we = win.get("from"), win.get("to")
+        if not ws or not we:
+            return
+        conn = flow_db.connect(BROKER_FLOW_DB)
+        try:
+            n = flow_db.save_top_brokers(conn, ws, we, body, 200, None)
+        finally:
+            conn.close()
+        print(f"🏦 top-broker snapshot {we}: {n} broker tersimpan.")
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ Gagal menyimpan top-broker snapshot: {e}")
 
 
 SWEEP_QUALITY_LOG = os.path.join(core.PROJECT_ROOT, "research", "broksum_sweep_quality.jsonl")

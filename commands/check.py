@@ -1007,8 +1007,85 @@ async def quick_check_callback(update, context):
     await query.message.reply_text(text)
 
 
+async def bandar_command(update, context):
+    """/bandar TICKER — user then sends Brights Broker Sum screenshots (Net mode, tab Domestic and, ideally, Foreign);
+    the bot says whether broker flow STRENGTHENS or WEAKENS the pick (flag only, never a score). See engine/broksum_read.py."""
+    if not context.args:
+        await core.safe_reply(update.message,
+            "Cara pakai: /bandar TICKER, lalu kirim screenshot Broker Sum.\n"
+            "Syarat: toggle Net AKTIF, window 5 hari bursa, kirim tab Domestic (wajib, XL hanya terbaca di sini) "
+            "dan tab Foreign (disarankan) sebagai dua foto.")
+        return
+    ticker = context.args[0].upper().strip()
+    core.PENDING_BANDAR_CHECKS[update.effective_chat.id] = {
+        "ticker": ticker, "tabs": {},
+        "expires_at": datetime.datetime.now(core.WIB) + datetime.timedelta(minutes=core.PENDING_BANDAR_TIMEOUT_MINUTES),
+    }
+    await core.safe_reply(update.message,
+        f"📸 Siap membaca {ticker}. Kirim screenshot Broker Sum (Net ON, 5 hari bursa): tab Domestic dulu, lalu Foreign. "
+        f"Batas waktu {core.PENDING_BANDAR_TIMEOUT_MINUTES} menit.")
+
+
+async def _handle_bandar_photo(update, context, pending):
+    """One screenshot of an active /bandar session. Returns True (consumed)."""
+    import engine.broksum_read as broksum_read
+    import engine.broker_flow_db as flow_db
+    ticker = pending["ticker"]
+    chat_id = update.effective_chat.id
+    try:
+        photo = update.message.photo[-1]
+        photo_file = await context.bot.get_file(photo.file_id)
+        image_bytes = bytes(await photo_file.download_as_bytearray())
+        tab = await asyncio.to_thread(broksum_read.extract_tab, image_bytes, "image/jpeg", ticker)
+    except Exception as e:  # noqa: BLE001
+        await core.safe_reply(update.message, f"⚠️ Gagal memproses gambar: {e}")
+        return True
+    if not tab.get("success"):
+        await core.safe_reply(update.message, f"⚠️ Gambar tidak terbaca ({tab.get('reason_if_failed') or 'tidak jelas'}). Coba screenshot lain.")
+        return True
+    name = tab.get("tab")
+    if name not in ("Domestic", "Foreign"):
+        await core.safe_reply(update.message, "⚠️ Tab yang aktif harus Domestic atau Foreign (bukan All). Pilih salah satunya lalu kirim lagi.")
+        return True
+    if tab.get("net_mode") is False:
+        await core.safe_reply(update.message, "⚠️ Toggle Net tampak mati. Aktifkan Net lalu kirim ulang.")
+        return True
+    pending["tabs"][name] = tab
+    if "Domestic" not in pending["tabs"]:
+        await core.safe_reply(update.message, f"✅ Tab {name} diterima. Kirim juga tab Domestic (wajib untuk membaca XL).")
+        return True
+    ret5 = None
+    try:
+        df = await asyncio.to_thread(core.get_ohlcv_daily_from_db, ticker, 12)
+        if df is not None and len(df) >= 6:
+            ret5 = float(df["close"].iloc[-1] / df["close"].iloc[-6] - 1) * 100
+    except Exception:  # noqa: BLE001
+        ret5 = None
+    a = broksum_read.assess(pending["tabs"], ticker, ret5=ret5)
+    await core.safe_reply(update.message, broksum_read.format_message(a))
+    try:
+        conn = flow_db.connect(nightly_engine.BROKER_FLOW_DB)
+        try:
+            flow_db.save_screen_capture(conn, ticker, datetime.datetime.now(core.WIB).isoformat(timespec="seconds"), pending["tabs"], a)
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ Gagal menyimpan hasil screenshot ke broker_flow_screen: {e}")
+    if "Foreign" in pending["tabs"]:
+        core.PENDING_BANDAR_CHECKS.pop(chat_id, None)  # complete; otherwise stay open so a Foreign tab can still refine it
+    return True
+
+
 async def handle_brokersum_photo(update, context):
     chat_id = update.effective_chat.id
+    bandar = core.PENDING_BANDAR_CHECKS.get(chat_id)
+    if bandar:
+        if datetime.datetime.now(core.WIB) > bandar["expires_at"]:
+            core.PENDING_BANDAR_CHECKS.pop(chat_id, None)
+            await core.safe_reply(update.message, "⏱️ Sesi /bandar sudah berakhir. Jalankan /bandar TICKER lagi.")
+            return
+        await _handle_bandar_photo(update, context, bandar)
+        return
     pending = core.PENDING_BROKERSUM_CHECKS.get(chat_id)
 
     if not pending:

@@ -123,24 +123,34 @@ BROKER_CODE_TYPE = {
 BROKER_TYPE_LABEL_ID = {
     "asing_institusional": "🏦 Asing (institusional)",
     "asing_basis_ritel": "🌐 Asing (basis ritel besar)",
-    "domestik_institusional": "🏛️ Domestik (institusional)",
-    "domestik_ritel": "🛒 Domestik (ritel)",
+    "domestik_institusional": "🏛️ Domestik (institusi pemerintah)",
+    "domestik_ritel": "🛒 Domestik (aplikasi ritel)",
+    "scalper": "⚡ Scalper/trader cepat",
+    "domestik_swasta": "🏢 Domestik (swasta)",
     "tidak_diketahui": "❔ Tidak diketahui",
+}
+
+# 2026-10-21: the code -> type mapping now comes from engine/broker_roles.py (built from RapidAPI's top-broker groups:
+# GOVERNMENT CC/OD/NI/DX, GR is LOCAL not institutional, CP/MG are scalpers, ZP/YU/YP/XA/KK foreign-owned with a retail base).
+_ROLE_TO_TYPE = {
+    "gov_inst": "domestik_institusional", "foreign_inst": "asing_institusional", "foreign_retail_base": "asing_basis_ritel",
+    "retail_app": "domestik_ritel", "scalper": "scalper", "local_other": "domestik_swasta",
 }
 
 
 def classify_broker_type(code: str) -> dict:
     """
-    Kembalikan {"name": ..., "type": ..., "label": ...} untuk satu kode
-    broker. Kalau tidak ada di tabel (ada 90+ broker resmi, tabel ini cuma
-    yang paling sering muncul), kembalikan "tidak_diketahui" — JANGAN
-    menebak, lebih baik jujur tidak tahu daripada salah klasifikasi di
-    konteks finansial.
+    Kembalikan {"name": ..., "type": ..., "label": ...} untuk satu kode broker. Tipe dari engine.broker_roles
+    (referensi tunggal untuk pembaca screenshot dan sweep); nama dari BROKER_CODE_TYPE kalau ada. Kode yang tidak
+    ada di kedua tabel -> "tidak_diketahui" — JANGAN menebak.
     """
-    entry = BROKER_CODE_TYPE.get(code)
-    if not entry:
-        return {"name": None, "type": "tidak_diketahui", "label": BROKER_TYPE_LABEL_ID["tidak_diketahui"]}
-    name, btype = entry
+    import engine.broker_roles as _roles
+    role = _roles.role_of(code)
+    entry = BROKER_CODE_TYPE.get((code or "").upper())
+    name = entry[0] if entry else None
+    if role == "unknown":
+        return {"name": name, "type": "tidak_diketahui", "label": BROKER_TYPE_LABEL_ID["tidak_diketahui"]}
+    btype = _ROLE_TO_TYPE[role]
     return {"name": name, "type": btype, "label": BROKER_TYPE_LABEL_ID[btype]}
 BROKERSUM_HISTORY_FILE = os.path.join(core.PROJECT_ROOT, "brokersum_history.json")
 BROKERSUM_HISTORY_MAX_ENTRIES_PER_TICKER = 60  # ~3 bulan pemakaian rutin, cukup untuk analisis tren tanpa file membengkak
@@ -1309,7 +1319,7 @@ def assess_smart_accumulation(scoring: dict, brokersum: dict) -> dict:
     buyer_types = [b.get("broker", {}).get("type") for b in buyers if b.get("broker")]
     seller_types = [s.get("broker", {}).get("type") for s in sellers if s.get("broker")]
     institutional_buyers = sum(1 for t in buyer_types if t in ("asing_institusional", "domestik_institusional"))
-    retail_sellers = sum(1 for t in seller_types if t in ("asing_basis_ritel", "domestik_ritel"))
+    retail_sellers = sum(1 for t in seller_types if t in ("asing_basis_ritel", "domestik_ritel", "scalper"))
     if buyers or sellers:
         checklist.append({
             "kriteria": "Pembeli institusional vs penjual ritel (⚠️ konteks, bukan kepastian)",
@@ -1482,7 +1492,10 @@ def find_broker_activity_across_tickers(broker_code: str, tickers_data: dict) ->
 # research/broker_accumulation_backtest_2026_10_20.py = selection artifact). Added domestic institutions
 # CC/OD/NI, retail gauges XL/PD/XC, and MG (scalper; "follow MG" is an untested hypothesis, tracked via the
 # single-day sweep, not assumed smart money). 15 calls/night ~ 315/month of RAPIDAPI_IDX_MONTHLY_BUDGET 400.
-SMART_MONEY_BROKER_WHITELIST = ["AK", "BK", "KZ", "RX", "ZP", "YU", "BB", "DX", "CC", "OD", "NI", "XL", "PD", "XC", "MG"]
+# 2026-10-21 (later): reduced 15 -> 10 by market share (RapidAPI top-broker, 1 month): CC 13%, ZP 11%, XL 9.5%, AK 9.4%, YU 6%,
+# YP 4%, MG 3.6%, PD 3% + OD (government net buyer) + XC (retail pair of XL). ~65% of traded value; 10 calls/night + 1 top-broker call.
+# Dropped: BK, KZ, RX, BB, DX, NI (each <= 3.7% and no measured effect). XL is the only broker with a validated (contrarian) effect.
+SMART_MONEY_BROKER_WHITELIST = ["CC", "ZP", "XL", "AK", "YU", "YP", "MG", "PD", "XC", "OD"]
 
 
 def get_smart_money_accumulation(ticker: str, tickers_data: dict) -> list:
@@ -2730,3 +2743,28 @@ def fetch_idx_foreign_flow_net_ratio(date: datetime.date | None = None, timeout:
             continue  # missing/zero-volume ticker -- excluded, not penalized
         out[ticker] = (fbuy - fsell) / vol
     return out
+
+
+def fetch_rapidapi_top_broker(period: str = "TB_PERIOD_LAST_1_DAY") -> dict | None:
+    """
+    GET /api/market-detector/top-broker — ONE call ranks every broker (~89) by traded value for a rolling period ending
+    today. Only TB_PERIOD_LAST_1_DAY and TB_PERIOD_LAST_1_MONTH were found valid (no from/to, no 3M/1Y), so history can only
+    be built forward, one call per night. Returns the raw response dict (success body) or None; never raises.
+    """
+    if not _rapidapi_idx_quota_check_and_increment("top_broker"):
+        return None
+    try:
+        resp = requests.get(
+            f"{core.RAPIDAPI_IDX_BASE_URL}/api/market-detector/top-broker",
+            params={"order": "ORDER_BY_DESC", "marketType": "MARKET_TYPE_ALL", "period": period, "sort": "TB_SORT_BY_TOTAL_VALUE"},
+            headers=core.RAPIDAPI_IDX_HEADERS, timeout=30)
+        if resp.status_code != 200:
+            print(f"⚠️ RapidAPI top-broker HTTP {resp.status_code}")
+            return None
+        body = resp.json()
+        return body if body.get("success") else None
+    except Exception as e:
+        print(f"⚠️ RapidAPI top-broker fetch failed: {e}")
+        return None
+    finally:
+        core.time.sleep(1.1)

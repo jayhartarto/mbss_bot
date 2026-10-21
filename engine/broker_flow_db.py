@@ -82,6 +82,41 @@ CREATE TABLE IF NOT EXISTS broker_market_flow (
     PRIMARY KEY (broker_code, window_start, window_end)
 ) WITHOUT ROWID;
 
+-- Broker rows read from a user's Brights/Stockbit SCREENSHOT. Kept apart from broker_flow on purpose: only the visible top
+-- rows per side, investor-type tabs (Domestic/Foreign) instead of broker totals, and values RESCALED from lots to match the
+-- header net (the app's lot column is ~3x too large). Not comparable with API rows; good for forward evaluation of the
+-- exact information the user had when deciding, and for filling gaps the API sweep never covered.
+CREATE TABLE IF NOT EXISTS broker_flow_screen (
+    ticker       TEXT NOT NULL,
+    captured_at  TEXT NOT NULL,      -- ISO timestamp the bot received the image
+    tab          TEXT NOT NULL,      -- Domestic / Foreign / All
+    window_text  TEXT,               -- date range as printed in the app, e.g. '02 Jun, 2026 - 08 Jun, 2026'
+    broker_code  TEXT NOT NULL,
+    signed_lot   REAL,               -- as read, sign-corrected (+ net buy / - net sell), app units
+    avg_price    REAL,
+    value_scaled REAL,               -- signed IDR after rescaling so visible rows sum to the header net
+    scale        REAL,
+    scale_source TEXT,               -- header | fallback
+    header_buy   REAL,
+    header_sell  REAL,
+    header_net   REAL,
+    image_sha1   TEXT,
+    PRIMARY KEY (ticker, captured_at, tab, broker_code)
+) WITHOUT ROWID;
+
+-- What the bot told the user about a pick, so the verdict can be scored against what happened next.
+CREATE TABLE IF NOT EXISTS pick_assessment (
+    ticker       TEXT NOT NULL,
+    captured_at  TEXT NOT NULL,
+    verdict      TEXT,
+    n_xl         REAL,               -- XL net / window traded value
+    ret5_pct     REAL,
+    window_text  TEXT,
+    has_foreign  INTEGER,
+    detail_json  TEXT,
+    PRIMARY KEY (ticker, captured_at)
+);
+
 CREATE TABLE IF NOT EXISTS flow_raw (
     broker_code  TEXT NOT NULL,
     window_start TEXT NOT NULL,
@@ -158,7 +193,7 @@ def merge_into(dest_path: str, src_path: str) -> dict:
     conn = connect(dest_path)
     conn.execute("ATTACH DATABASE ? AS src", (src_path,))
     before = conn.execute("SELECT COUNT(*) FROM broker_flow").fetchone()[0]
-    for tbl in ("broker_flow", "broker_market_flow", "flow_fetch_log", "flow_raw"):
+    for tbl in ("broker_flow", "broker_market_flow", "broker_flow_screen", "pick_assessment", "flow_fetch_log", "flow_raw"):
         conn.execute(f"INSERT OR IGNORE INTO main.{tbl} SELECT * FROM src.{tbl}")
     conn.commit()
     after = conn.execute("SELECT COUNT(*) FROM broker_flow").fetchone()[0]
@@ -191,3 +226,32 @@ def save_top_brokers(conn, ws: str, we: str, payload: dict, http_status: int, qu
                  (TOP_KEY, ws, we, "ALL", gzip.compress(json.dumps(payload).encode("utf-8"))))
     conn.commit()
     return len(rows)
+
+
+def save_screen_capture(conn, ticker: str, captured_at: str, tabs: dict, assessment: dict | None = None) -> int:
+    """tabs = {"Domestic": extracted, "Foreign": extracted}; rows rescaled with engine.broksum_read.scale_tab."""
+    import engine.broksum_read as br
+    n = 0
+    for tab_name, tab in tabs.items():
+        sc = br.scale_tab(tab)
+        h = tab.get("header") or {}
+        for r in sc["rows"]:
+            conn.execute(
+                "INSERT OR REPLACE INTO broker_flow_screen VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ticker, captured_at, tab_name, tab.get("date_range_text"), r["code"], r["signed_lot"], r["avg"], r["value"],
+                 sc["scale"], sc["scale_source"], h.get("buy_value_idr"), h.get("sell_value_idr"), h.get("net_value_idr"),
+                 tab.get("image_sha1")))
+            n += 1
+    if assessment and assessment.get("ok"):
+        conn.execute(
+            "INSERT OR REPLACE INTO pick_assessment VALUES (?,?,?,?,?,?,?,?)",
+            (ticker, captured_at, assessment["verdict"], assessment["n_xl"], assessment.get("ret5"), assessment.get("window"),
+             int(assessment.get("has_foreign_tab", False)),
+             json.dumps({k: assessment[k] for k in ("role_pct", "retail_app_net_pct", "notes", "chasing")}, default=str)))
+    conn.commit()
+    return n
+
+
+def save_inner(conn, broker: str, ws: str, we: str, inner: dict, limit_req: int, board: str = "ALL") -> int:
+    """For callers that already unwrapped response['data']['data'] (engine.broker.fetch_rapidapi_broker_activity)."""
+    return save_call(conn, broker, ws, we, {"success": True, "data": {"data": inner}}, 200, limit_req, None, board)

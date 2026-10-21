@@ -1660,6 +1660,11 @@ RAPIDAPI_IDX_HEADERS = {"x-rapidapi-key": RAPIDAPI_IDX_KEY, "x-rapidapi-host": R
 PENDING_BROKERSUM_CHECKS = {}
 PENDING_BROKERSUM_TIMEOUT_MINUTES = 5
 
+# /bandar TICKER session (2026-10-21): waiting for Domestic (+ Foreign) Broker Sum screenshots to read broker flow for a pick.
+# {chat_id: {"ticker": str, "tabs": {"Domestic": dict, "Foreign": dict}, "expires_at": datetime}}
+PENDING_BANDAR_CHECKS = {}
+PENDING_BANDAR_TIMEOUT_MINUTES = 10
+
 
 # ===========================================================================
 # 📦 SQLITE OHLCV LAYER
@@ -7947,6 +7952,7 @@ def build_app():
     app.add_handler(CommandHandler("rebuildwhitelist", commands_misc.rebuild_whitelist_command))
     app.add_handler(CommandHandler("scanalert", commands_misc.scanalert_toggle_command))
     app.add_handler(CommandHandler(["check", "cek"], commands_check.check_stock))
+    app.add_handler(CommandHandler("bandar", commands_check.bandar_command))
     app.add_handler(CommandHandler("tanya", commands_chat.tanya_command))
     app.add_handler(CommandHandler("tanyareset", commands_chat.tanya_reset_command))
     app.add_handler(CallbackQueryHandler(commands_check.skip_brokersum_callback, pattern="^skip_brokersum$"))
