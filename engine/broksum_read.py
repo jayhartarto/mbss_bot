@@ -177,6 +177,10 @@ def format_message(a: dict) -> str:
     L.append("• XL net beli ≥ +1% nilai → −1,0%/pekan vs sisanya (t −3,9, negatif di 13/18 pekan)")
     L.append("• XL net jual ≤ −1% → +0,6%/pekan (t +1,5, BELUM signifikan)")
     L.append("Ini peringatan, bukan skor: tidak mengubah ranking pick.")
+    fam = a["retail_app_net_pct"]
+    if fam >= 0.02 and not a["verdict"].startswith("MELEMAHKAN"):
+        L.append(f"ℹ️ Ritel gabungan XL+XC+PD net beli {fam*100:+.1f}% nilai. Gabungan ini BELUM teruji (XC dan PD tidak ada di data backtest), "
+                 "jadi tidak dipakai dalam putusan; dicatat untuk diuji setelah data harian terkumpul.")
     L.append("")
     L.append("Konteks (belum terbukti punya efek, hanya info):")
     order = ["gov_inst", "foreign_inst", "foreign_retail_base", "retail_app", "scalper", "local_other"]
