@@ -1,13 +1,12 @@
 """
 engine/check_status.py — MBSS v2 (2026-10-22).
 
-Lane / regime / risk-tag block for /check. Replaces the retired daytrade-era blocks (MACD lane labels, backbone Entry Rank,
-tactical rank) with what the current build actually trades on:
-  * is this ticker an ACTIVE pick in a swing lane (BOW, OSB-v2, VCP, MACD-confirm, BOS)? -> the lane's own entry/SL/TP,
-    read from the same pick files /swing reads (cache only, no live scan);
-  * which IHSG regime phase are we in, and which regime-gated lanes are therefore on;
-  * display-only warnings: XL net-buy crowding, weird-stock OHLCV flags (zero-volume / gap / ARA-ARB days, tag-only per the
-    2026-10-20 backtest), thin liquidity.
+Lane / regime / risk-tag block for /check, deliberately terse (one line per fact). Replaces the retired daytrade-era blocks
+(MACD lane labels, backbone Entry Rank, tactical rank) with what the current build actually trades on:
+  * is this ticker an ACTIVE pick in a swing lane (BOW, OSB-v2, VCP, MACD-confirm, BOS)? -> that lane's entry/SL/TP, read from
+    the same pick files /swing reads (cache only, no live scan);
+  * IHSG regime phase and whether the regime-gated lanes are armed;
+  * display-only warnings: XL net-buy crowding, weird-stock OHLCV flags (tag-only per the 2026-10-20 backtest), thin liquidity.
 Every function is best-effort: a failure returns "" / [] and never breaks /check (missing = neutral).
 """
 from __future__ import annotations
@@ -30,7 +29,7 @@ def _picks(loader_module, loader_name: str) -> list:
 
 
 def lane_status(ticker: str) -> list[str]:
-    """One line (or small block) per swing lane where `ticker` has an ALIVE pick. Empty list when none."""
+    """One line per swing lane where `ticker` has an ALIVE pick. Empty list when none."""
     import engine.buy_on_weakness as bow
     import engine.oversold_bounce_v2 as osb
     import engine.vcp_pillar as vcp
@@ -41,51 +40,34 @@ def lane_status(ticker: str) -> list[str]:
     out: list[str] = []
 
     for p in (x for x in _picks(bow, "load_buy_on_weakness_picks") if x.get("ticker") == t and x.get("status") == "ALIVE"):
-        hidden = bow.should_hide_from_rank(p["tier"], p.get("drift_zone", "NETRAL"))
-        note = " (disembunyikan di /swing: Tier3+NAIK_KUAT)" if hidden else ""
-        out.append(
-            f"🪶 BOW Tier {p['tier']} — Day {p['age_days']}/5{note}\n"
-            f"   Entry {p['entry_low']:,.0f}-{p['entry_high']:,.0f} | SL {p['sl_price']:,.0f} | "
-            f"TP1 {p['tp1_price']:,.0f} (+{p['tp1_pct']:.1f}%) | gerak sejak entry {p.get('price_drift_pct', 0.0):+.1f}%"
-        )
+        hidden = " (hidden di /swing)" if bow.should_hide_from_rank(p["tier"], p.get("drift_zone", "NETRAL")) else ""
+        out.append(f"🪶 BOW T{p['tier']} Day {p['age_days']}/5{hidden} | Entry {p['entry_low']:,.0f}-{p['entry_high']:,.0f} | "
+                   f"SL {p['sl_price']:,.0f} | TP {p['tp1_price']:,.0f}")
 
     for p in (x for x in _picks(osb, "load_oversold_bounce_v2_picks") if x.get("ticker") == t and x.get("status") == "ALIVE"):
-        tier1 = " 🏆 TIER1" if p.get("tier") == "TIER1" else ""
-        out.append(
-            f"🔄 OSB-v2{tier1} — Day {p['age_days']}/{osb.ALERT_MAX_AGE_DAYS}\n"
-            f"   Entry ref {p['entry_ref_price']:,.0f} | SL {p['sl_price']:,.0f} (-20%, wajib) | "
-            f"TP1 {p['tp1_price']:,.0f} (+5%) | TP2 {p['tp2_price']:,.0f} (+10%)"
-        )
+        tier1 = " 🏆" if p.get("tier") == "TIER1" else ""
+        out.append(f"🔄 OSB-v2{tier1} Day {p['age_days']}/{osb.ALERT_MAX_AGE_DAYS} | Entry {p['entry_ref_price']:,.0f} | "
+                   f"SL {p['sl_price']:,.0f} | TP {p['tp1_price']:,.0f} / {p['tp2_price']:,.0f}")
 
     for p in (x for x in _picks(vcp, "load_vcp_picks") if x.get("ticker") == t and x.get("status") == "ALIVE"):
-        hidden = vcp.should_hide_vcp_diskon(p)
-        note = " (disembunyikan di /swing: pernah DISKON, win historis 30,5%)" if hidden else ""
-        out.append(
-            f"📐 VCP — Day {p['age_days']}/{vcp.ALERT_MAX_AGE_DAYS}{note}\n"
-            f"   Entry ref {p['entry_ref_price']:,.0f} | SL {p['sl_price']:,.0f} | TP1 {p['tp1_price']:,.0f} | "
-            f"TP2 {p['tp2_price']:,.0f}"
-        )
+        hidden = " (hidden di /swing)" if vcp.should_hide_vcp_diskon(p) else ""
+        out.append(f"📐 VCP Day {p['age_days']}/{vcp.ALERT_MAX_AGE_DAYS}{hidden} | Entry {p['entry_ref_price']:,.0f} | "
+                   f"SL {p['sl_price']:,.0f} | TP {p['tp1_price']:,.0f} / {p['tp2_price']:,.0f}")
 
     for p in (x for x in _picks(mc, "load_macd_confirm_picks") if x.get("ticker") == t and x.get("status") == "ALIVE"):
-        out.append(
-            f"🌀 MACD-confirm — Day {p.get('age_days', 1)}/{mc.ALERT_MAX_AGE_DAYS}\n"
-            f"   Entry ref {p['entry_ref_price']:,.0f} | SL {p['sl_price']:,.0f} | TP {p['tp_price']:,.0f} | "
-            f"exit mekanis, maksimal {mc.ALERT_MAX_AGE_DAYS} hari"
-        )
+        out.append(f"🌀 MACD-confirm Day {p.get('age_days', 1)}/{mc.ALERT_MAX_AGE_DAYS} | Entry {p['entry_ref_price']:,.0f} | "
+                   f"SL {p['sl_price']:,.0f} | TP {p['tp_price']:,.0f}")
 
     for p in (x for x in _picks(bos, "load_buy_on_strength_picks") if x.get("ticker") == t and x.get("status") == "ALIVE"):
         sl_pct = p.get("sl_pct", bos.SL_PCT_NORMAL)
         sl_price = p.get("sl_price") or round(p["entry_ref_price"] * (1 + sl_pct / 100))
-        out.append(
-            f"💪 BOS — Day {p['age_days']} (ret_10d {p['ret_10d_at_trigger']:+.1f}% saat trigger)\n"
-            f"   Entry ref {p['entry_ref_price']:,.0f} | SL {sl_price:,.0f} ({sl_pct:.0f}%) | "
-            f"TP {round(p['entry_ref_price'] * (1 + bos.TP_PCT / 100)):,.0f} (+{bos.TP_PCT:.0f}%)"
-        )
+        out.append(f"💪 BOS Day {p['age_days']} | Entry {p['entry_ref_price']:,.0f} | SL {sl_price:,.0f} | "
+                   f"TP {round(p['entry_ref_price'] * (1 + bos.TP_PCT / 100)):,.0f}")
     return out
 
 
 def regime_line() -> str:
-    """IHSG regime phase + which regime-gated swing lanes are currently armed. '' when the regime can't be computed."""
+    """One line: IHSG regime phase + which regime-gated swing lanes are armed. '' when the regime can't be computed."""
     try:
         import engine.ihsg_regime as ihsg_regime
         r = ihsg_regime.get_ihsg_regime_today()
@@ -93,21 +75,17 @@ def regime_line() -> str:
             return ""
         phase = r["regime_phase"]
         dd = r.get("dd_100")
-        dd_txt = f", IHSG {dd * 100:+.1f}% dari puncak 100 hari" if dd is not None else ""
-        osb_on = dd is not None and dd <= -0.10
-        bounce = r["bear_episode_id"] > 0 and phase == "BOUNCE_OFF_LOW"
-        armed = [
-            f"OSB-v2 {'NYALA' if osb_on else 'mati'} (butuh dd_100 ≤ -10%)",
-            f"MACD-confirm/BOS {'NYALA' if bounce else 'mati'} (butuh BOUNCE_OFF_LOW)",
-        ]
-        return f"🌐 Regime IHSG: {phase}{dd_txt}\n   Lane bergerbang: " + " | ".join(armed)
+        dd_txt = f" ({dd * 100:+.1f}%)" if dd is not None else ""
+        osb_on = dd is not None and dd <= -0.10                        # OSB-v2 gate: dd_100 <= -10%
+        bounce = r["bear_episode_id"] > 0 and phase == "BOUNCE_OFF_LOW"  # MACD-confirm / BOS gate
+        return f"🌐 IHSG {phase}{dd_txt} | OSB-v2 {'ON' if osb_on else 'OFF'} | MACD-confirm/BOS {'ON' if bounce else 'OFF'}"
     except Exception as e:  # noqa: BLE001
         print(f"⚠️ check_status: regime gagal (diabaikan): {e}")
         return ""
 
 
 def risk_tags(ticker: str) -> list[str]:
-    """Display-only warnings. Never hides anything, never changes a score."""
+    """Display-only warnings, one short line each. Never hides anything, never changes a score."""
     tags: list[str] = []
     t = ticker.upper()
 
@@ -115,7 +93,7 @@ def risk_tags(ticker: str) -> list[str]:
         import engine.broker_flags as broker_flags
         flag = broker_flags.xl_flags([t]).get(t)
         if flag:
-            tags.append(broker_flags.short_tag(flag).strip() + " — kontrarian (bukti lemah), cek /bandar " + t)
+            tags.append(f"⚠️ XL ramai beli {flag['pct'] * 100:+.1f}% ({flag['as_of'][5:]}), sinyal kontrarian")
     except Exception as e:  # noqa: BLE001
         print(f"⚠️ check_status: xl flag gagal (diabaikan): {e}")
 
@@ -137,30 +115,25 @@ def risk_tags(ticker: str) -> list[str]:
             val_bn = float((c.iloc[1:] * v.iloc[1:]).mean() / 1e9)
             parts = []
             if zv >= ZERO_VOL_DAYS:
-                parts.append(f"{zv} hari volume nol")
+                parts.append(f"{zv}x volume nol")
             if gp >= GAP_DAYS:
-                parts.append(f"{gp} hari gap buka ≥5%")
+                parts.append(f"{gp}x gap buka ≥5%")
             if ara >= ARA_ARB_DAYS:
-                parts.append(f"{ara} hari ARA/ARB")
+                parts.append(f"{ara}x ARA/ARB")
             if parts:
-                tags.append("⚠️ Saham tidak biasa (20 hari): " + ", ".join(parts)
-                            + " — risiko gap lebih besar, SL bisa tembus (hanya tag, bukan terbukti merugikan)")
-            thin = " ⚠️ tipis, sulit keluar" if val_bn < THIN_VALUE_BN else ""
-            tags.append(f"💧 Likuiditas 20 hari: Rp{val_bn:,.2f} M/hari{thin}")
+                tags.append("⚠️ 20 hari: " + ", ".join(parts) + " (risiko gap)")
+            thin = " ⚠️ tipis" if val_bn < THIN_VALUE_BN else ""
+            tags.append(f"💧 Likuiditas Rp{val_bn:,.1f} M/hari{thin}")
     except Exception as e:  # noqa: BLE001
         print(f"⚠️ check_status: flag OHLCV gagal (diabaikan): {e}")
     return tags
 
 
 def build_status_block(ticker: str) -> str:
-    """The block shown at the top of /check message 1. Always returns something useful, even when no lane holds the ticker."""
-    lanes = lane_status(ticker)
-    lines = ["🧭 STATUS LANE (swing)"]
-    lines += lanes if lanes else ["— bukan pick aktif di lane mana pun (BOW/OSB-v2/VCP/MACD-confirm/BOS)."]
+    """The block shown at the top of /check message 1: lane lines, one regime line, one line per tag."""
+    lines = lane_status(ticker) or ["🧭 Bukan pick aktif"]
     reg = regime_line()
     if reg:
-        lines += ["", reg]
-    tags = risk_tags(ticker)
-    if tags:
-        lines += [""] + tags
+        lines.append(reg)
+    lines += risk_tags(ticker)
     return "\n".join(lines)
