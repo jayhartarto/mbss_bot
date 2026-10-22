@@ -766,6 +766,15 @@ async def run_nightly_full_scan(context):
         except Exception as e:
             print(f"⚠️ Gagal membangun RapidAPI market intelligence sweep: {e}")
 
+        # IPOT per-ticker broker summary (gross buy/sell by broker, fd x board variants) -> research/ipot_broker_daily.sqlite.
+        # Data collection only (2026-10-22): nothing reads it for scoring yet. Last 3 weekdays so a missed night heals itself.
+        try:
+            from engine import ipot_broker
+            ipot_counts = await asyncio.to_thread(ipot_broker.collect_nightly)
+            print(f"🏦 IPOT broker summary: {ipot_counts}")
+        except Exception as e:
+            print(f"⚠️ Gagal mengumpulkan IPOT broker summary: {e}")
+
         try:
             await asyncio.to_thread(dividend_calendar_engine.refresh_if_stale)
         except Exception as e:
