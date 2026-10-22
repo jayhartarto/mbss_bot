@@ -154,3 +154,15 @@ Temuan atlas fitur (bentuk distribusi saja, bukan kesimpulan):
 - `burst_ratio` median 1,0, >=3 pada 3,9% hari; dibatasi maksimum 20 (basis kecil membuat rasio meledak).
 - Hindari tabrakan nama: fitur harga mundur bernama `past_ret_10d`, hasil maju `ret_{1,3,5,10}d` / `rel_*` / `mfe_5d` / `mae_5d` (entry = open t+1).
 Berikutnya: mesin 1 (sapuan univariat dengan null permutasi) dan mesin 7 (modul plafon MM) pada data penuh setelah backfill 12 bulan + perpanjangan 2024.
+
+## 13. Mesin 1 (sapuan univariat) - dibangun dan diuji pada data dev (2026-10-22)
+Kode: `research/ipot_explore/sweep.py` (`python -m research.ipot_explore.sweep --B 500 [--null shift|date] [--inject FITUR --inject-size 0.06]`).
+Semua fitur x potongan (<=P20, <=P33, >=P67, >=P80 atau ==1) x horizon (rel_1d/3d/5d/10d) diuji; kalibrasi dengan null permutasi dan koreksi maxT (Westfall-Young); replikasi tanda di 3 blok tanggal.
+Pelajaran yang sekarang tertanam di kode:
+1. **Fitur berskala rupiah mentah** (`*_avg`, `*_vis`, `*_mid`, `dom_vwap`) mengidentifikasi saham itu sendiri (tingkat harga, likuiditas) dan "meramal" hanya lewat identitas ticker:
+   pada sapuan pertama semua bin teratas adalah harga rata-rata mentah (saham murah kalah di tiga minggu itu). Dikeluarkan; hanya rasio bebas-skala yang disapu.
+2. **Null harus menjaga struktur per ticker**: mengacak hasil dalam tanggal (antar ticker) menghasilkan 'temuan' palsu dengan p_adj 0,003 untuk fitur yang melekat per ticker. Default sekarang
+   `--null shift`: geser sirkular deret hasil tiap ticker dengan offset acak (autokorelasi dan drift ticker terjaga, kaitannya dengan fitur diputus). Dengan null ini bin teratas p_adj 0,58-0,99 (tidak ada).
+3. **Selalu laporkan efek minimum yang terdeteksi (MDE)** lewat kontrol positif. Pada data dev (30 saham x ~21 hari berhasil): suntikan +3% pada rel_5d tidak terdeteksi (t 5,3 tetapi p_adj 0,97),
+   +6% terdeteksi (peringkat #1, p_adj 0,003) -> MDE sekitar 5% selisih 5-hari. Data penuh (150 saham x ~24 bulan) harus diuji ulang dengan kontrol positif yang sama sebelum menyimpulkan 'tidak ada efek'.
+Hasil pada data dev sendiri: tidak ada bin yang lolos (konsisten dengan data sependek itu); 'tidak ada temuan' di sini BUKAN bukti tidak adanya efek kecil.
