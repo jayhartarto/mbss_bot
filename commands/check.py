@@ -40,7 +40,8 @@ import engine.news_sentiment as news_sentiment
 import engine.check_status as check_status
 
 # 2026-10-22 /check audit: the daytrade-era blocks (MACD lane labels, backbone Entry Rank, tactical rank, intraday breakout/VWAP
-# detail, intraday targets, company news, Top-3 broker info, Bias Bandar) are HIDDEN by default; the code is kept so flipping
+# detail, intraday targets, Top-3 broker info, Bias Bandar) are HIDDEN by default (company news and the news-sentiment tally
+# stay VISIBLE: user call 2026-10-22, "informasi berharga"); the code is kept so flipping
 # this to True restores the old layout. The default view leads with engine/check_status.py (swing-lane status, IHSG regime,
 # XL / weird-stock / liquidity tags).
 SHOW_LEGACY_BLOCKS = False
@@ -205,8 +206,7 @@ async def check_stock(update, context):
     # Company-specific news + real dividend/split history — this is what can
     # actually surface corporate actions like buybacks or earnings releases,
     # unlike the general market-wide news used in the daily briefs.
-    company_news = (await asyncio.to_thread(core.fetch_company_news, ticker, result.get("name", ticker))
-                    if SHOW_LEGACY_BLOCKS else [])
+    company_news = await asyncio.to_thread(core.fetch_company_news, ticker, result.get("name", ticker))
     # MBSS v2 (user request — real case: NELY/GIAA acquisition headlines):
     # anggota "sudah di-react market atau belum" dari harga sejak tanggal
     # artikel, pakai hist yang sudah di-fetch di atas (zero extra API cost).
@@ -828,7 +828,7 @@ async def check_stock(update, context):
         f"{broker_engine.format_smart_money_tag(ticker, nightly_engine.load_broksum_250()) if SHOW_LEGACY_BLOCKS else ''}"
         f"{dividend_calendar.format_check_line(dividend_calendar.get_ticker_dividend(ticker, result.get('price')))}"
         f"{fundamental_health.format_check_block(fundamental_health.get_fundamental_health(ticker))}"
-        f"{news_sentiment.format_check_block(news_sentiment.get_recent_sentiment_tally(ticker)) if SHOW_LEGACY_BLOCKS else ''}"
+        f"{news_sentiment.format_check_block(news_sentiment.get_recent_sentiment_tally(ticker))}"
         f"{_format_pillar_lane_block(result)}"
         f"{_format_action_tier_note(result)}"
     )
@@ -938,7 +938,7 @@ async def check_stock(update, context):
         "",
         raw_data_block + (bias_block if SHOW_LEGACY_BLOCKS else ""),
         brokersum_line if SHOW_LEGACY_BLOCKS else "",
-        news_block if SHOW_LEGACY_BLOCKS else "",
+        news_block,
     ]))
     await core.safe_reply(update.message, msg2_eod)
 
