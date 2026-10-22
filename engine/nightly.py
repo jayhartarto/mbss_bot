@@ -890,7 +890,9 @@ async def run_nightly_full_scan(context):
         # first thing to silently shrink if the shared monthly quota runs
         # hot, since it's called last and every fetch call is gated by the
         # same budget counter regardless of call order.
-        if trading_night_index % 2 == 0:
+        # 2026-10-22: OFF. It failed every night (broker_engine.RAPIDAPI_SENTIMENT_SHORTLIST_SIZE was never defined) and nothing reads its output
+        # (no caller of load_rapidapi_sentiment_shortlist); its shortlist was also picked by the unvalidated final score. Flip the flag to retry.
+        if FETCH_SENTIMENT_SHORTLIST and trading_night_index % 2 == 0:
             if _rapidapi_cache_fresh_today("rapidapi_sentiment_shortlist"):
                 print("📋 RapidAPI sentiment shortlist: sudah jalan hari ini, skip (hemat kuota).")
             else:
@@ -1483,6 +1485,7 @@ def load_rapidapi_sentiment_shortlist() -> dict:
 RAPIDAPI_MARKET_INTEL_DAILY_DIR = os.path.join(core.PROJECT_ROOT, "rapidapi_market_intel_daily")
 
 
+FETCH_SENTIMENT_SHORTLIST = False
 FETCH_BREAKOUT_ALERTS = False
 FETCH_MULTIBAGGER_SCAN = False
 
