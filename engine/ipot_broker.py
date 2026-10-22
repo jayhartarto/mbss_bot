@@ -65,8 +65,12 @@ _MULT = {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
 
 
 def connect(path: str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, timeout=60)  # the bulk backfill may be writing the same file
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = sqlite3.connect(path, timeout=300)  # the bulk backfill may be writing the same file; wait for its short transactions
+    conn.execute("PRAGMA busy_timeout=300000")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as e:      # another process has it open in rollback mode: keep going in that mode
+        print(f"⚠️ ipot_broker: WAL not enabled ({e}); continuing")
     conn.executescript(SCHEMA)
     return conn
 
@@ -196,7 +200,7 @@ def collect_days(days: list[str], tickers: list[str], variants=DEFAULT_VARIANTS,
                     i += 1
                     counts[res[0]] += 1
                     save(conn, *x, res)
-                    if i % 200 == 0:
+                    if i % 25 == 0:        # short transactions: a long-held write lock starves the other writer
                         conn.commit()
         conn.commit()
         return counts

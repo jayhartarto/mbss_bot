@@ -153,7 +153,14 @@ def main():
         days = days[-60:]
     tickers = a.tickers.split(",") if a.tickers else universe(40 if a.pilot else a.top)
 
-    conn = sqlite3.connect(a.db)
+    # Shares the file with the nightly IPOT top-up (engine/ipot_broker.collect_nightly): long busy timeout, WAL and short transactions,
+    # otherwise one process holds the write lock for ~40 s and the other dies with 'database is locked' (happened 2026-10-22).
+    conn = sqlite3.connect(a.db, timeout=300)
+    conn.execute("PRAGMA busy_timeout=300000")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as e:
+        print(f"WAL not enabled ({e}); continuing in rollback-journal mode")
     conn.executescript(SCHEMA)
     done = set(conn.execute("SELECT ticker, trade_date, fd, board FROM ipot_fetch_log WHERE status IN ('ok','empty','invalid')"))
     variants = [tuple(v.split("/")) for v in a.variants.split(",")]
@@ -203,8 +210,9 @@ def main():
                         conn.execute("INSERT OR REPLACE INTO ipot_broker_daily VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                      (t, d, fd, bd, code, r.get("buy_lot"), r.get("buy_val"), r.get("buy_avg"), r.get("buy_rank"),
                                       r.get("sell_lot"), r.get("sell_val"), r.get("sell_avg"), r.get("sell_rank")))
-                if done_n % 200 == 0:
+                if done_n % 25 == 0:
                     conn.commit()
+                if done_n % 200 == 0:
                     el = time.time() - t0
                     print(f"{done_n}/{len(todo)}  {counts}  {done_n / el:.1f} calls/s  eta {(len(todo) - done_n) / (done_n / el) / 60:.0f} min",
                           flush=True)
