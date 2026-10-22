@@ -37,6 +37,13 @@ import engine.lane_confidence as lane_confidence
 import engine.dividend_calendar as dividend_calendar
 import engine.fundamental_health as fundamental_health
 import engine.news_sentiment as news_sentiment
+import engine.check_status as check_status
+
+# 2026-10-22 /check audit: the daytrade-era blocks (MACD lane labels, backbone Entry Rank, tactical rank, intraday breakout/VWAP
+# detail, intraday targets, company news, Top-3 broker info, Bias Bandar) are HIDDEN by default; the code is kept so flipping
+# this to True restores the old layout. The default view leads with engine/check_status.py (swing-lane status, IHSG regime,
+# XL / weird-stock / liquidity tags).
+SHOW_LEGACY_BLOCKS = False
 
 
 async def check_stock(update, context):
@@ -102,19 +109,8 @@ async def check_stock(update, context):
     sharia_universe = core.fetch_online_sharia_list()
     result["is_sharia"] = ticker in sharia_universe
 
-    # MBSS v2 (user request — memperkaya backlog data untuk adaptive parameter
-    # ke depan): kunci /check ke mekanisme winrate yang sama, source="check".
-    # SENGAJA cuma untuk sinyal BELI yang genuinely yakin (STRONG_BUY/
-    # BUY_ACCUMULATE) — bukan setiap /check. Banyak /check itu cuma rasa
-    # penasaran atau cek posisi yang SUDAH dipegang (HOLD/AVOID_SELL/
-    # MIXED_SIGNALS), bukan prediksi baru yang layak diuji — kalau semua
-    # dikunci tanpa filter, datanya jadi kotor (bukan representasi "sistem
-    # merekomendasikan ini", cuma "user pernah lihat ini").
-    if result.get("action_id") in ("STRONG_BUY", "BUY_ACCUMULATE"):
-        try:
-            await asyncio.to_thread(core.lock_daily_daytrade_picks, [result], "check")
-        except Exception as e:
-            print(f"⚠️ Gagal mengunci pick /check {ticker} untuk /winrate: {e}")
+    # 2026-10-22: /check no longer locks STRONG_BUY/BUY_ACCUMULATE results into daytrade_picks_history.json (source="check"):
+    # the daytrade family is retired and its resolver was removed from the nightly job, so new locks would stay pending forever.
 
     # Intraday live context (5m bars) for /check only — used to update live price,
     # high/low, momentum, and breakout probability while market is open.
@@ -209,7 +205,8 @@ async def check_stock(update, context):
     # Company-specific news + real dividend/split history — this is what can
     # actually surface corporate actions like buybacks or earnings releases,
     # unlike the general market-wide news used in the daily briefs.
-    company_news = await asyncio.to_thread(core.fetch_company_news, ticker, result.get("name", ticker))
+    company_news = (await asyncio.to_thread(core.fetch_company_news, ticker, result.get("name", ticker))
+                    if SHOW_LEGACY_BLOCKS else [])
     # MBSS v2 (user request — real case: NELY/GIAA acquisition headlines):
     # anggota "sudah di-react market atau belum" dari harga sejak tanggal
     # artikel, pakai hist yang sudah di-fetch di atas (zero extra API cost).
@@ -382,6 +379,7 @@ async def check_stock(update, context):
     # yg dipakai compute_factor_scoring, konsisten dgn konvensi TP seluruh
     # sesi -- BUKAN harga live terpisah). current_price=None (sama spt EOD)
     # -- /check TIDAK live-intraday-tracking, selalu tampilkan WR%.
+    bb_line_core = bb_line
     _ref_price = result.get("price")
 
     # BUGFIX (user report 2026-08-27, live case VERN -- lihat catatan
@@ -529,22 +527,23 @@ async def check_stock(update, context):
     # universe syariah eligible) — /check tetap jalan seperti biasa.
     backbone_line = ""
     bb_info = None
-    try:
-        backbone_result, _ = nightly_engine.load_backbone_daily_allow_stale()
-        bb_info = (backbone_result or {}).get("all_scored", {}).get(ticker) if backbone_result else None
-        if bb_info and "predicted_danger" in bb_info:
-            if "entry_rank" in bb_info:
-                backbone_line = (
-                    f"\n🧱 Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} "
-                    f"(prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f}, lolos Danger Gate)"
-                )
-            else:
-                backbone_line = (
-                    f"\n🧱 TIDAK lolos Danger Gate malam ini "
-                    f"(prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f}) — tidak ikut ranking"
-                )
-    except Exception as e:
-        print(f"⚠️ /check: gagal ambil backbone entry rank untuk {ticker}: {e}")
+    if SHOW_LEGACY_BLOCKS:
+        try:
+            backbone_result, _ = nightly_engine.load_backbone_daily_allow_stale()
+            bb_info = (backbone_result or {}).get("all_scored", {}).get(ticker) if backbone_result else None
+            if bb_info and "predicted_danger" in bb_info:
+                if "entry_rank" in bb_info:
+                    backbone_line = (
+                        f"\n🧱 Entry Rank #{bb_info['entry_rank']}/{bb_info['entry_rank_total']} "
+                        f"(prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f}, lolos Danger Gate)"
+                    )
+                else:
+                    backbone_line = (
+                        f"\n🧱 TIDAK lolos Danger Gate malam ini "
+                        f"(prob {bb_info['probability_score']:.0f}, danger {bb_info['predicted_danger']:.0f}) — tidak ikut ranking"
+                    )
+        except Exception as e:
+            print(f"⚠️ /check: gagal ambil backbone entry rank untuk {ticker}: {e}")
 
     # AB-RC3 Tactical Live Rank (MBSS v2, user request: "/check jadi lebih
     # tactical"). MBSS v2 revisi (user request lanjutan): awalnya
@@ -555,65 +554,66 @@ async def check_stock(update, context):
     # observasi nyata (bukan shadow-mode). Tetap disimpan ke
     # tactical_shadow_log.json buat bahan riset nanti.
     tactical_line = ""
-    try:
-        validity = backbone_engine.classify_signal_validity(result)
-        daily_broksum_history = nightly_engine.load_broksum_daily_history()
-        tactical_rank = backbone_engine.compute_tactical_live_rank(result, bb_info, daily_broksum_history)
-        tactical_decision = backbone_engine.compute_tactical_decision(result, validity, result.get("is_held_position", False))
-        backbone_engine.save_tactical_shadow_snapshot(
-            ticker, validity, tactical_rank, tactical_decision, result.get("is_held_position", False)
-        )
+    if SHOW_LEGACY_BLOCKS:
+        try:
+            validity = backbone_engine.classify_signal_validity(result)
+            daily_broksum_history = nightly_engine.load_broksum_daily_history()
+            tactical_rank = backbone_engine.compute_tactical_live_rank(result, bb_info, daily_broksum_history)
+            tactical_decision = backbone_engine.compute_tactical_decision(result, validity, result.get("is_held_position", False))
+            backbone_engine.save_tactical_shadow_snapshot(
+                ticker, validity, tactical_rank, tactical_decision, result.get("is_held_position", False)
+            )
 
-        state = validity["state"]
-        state_icon = {
-            "VALID": "✅", "RETEST": "🔁", "INVALID": "❌", "UNKNOWN": "❔",
-            "EXTENDED_CHASE": "🔥", "EXTENDED_NO_CHASE": "⚠️",
-        }.get(state, "❔")
-        delta = tactical_rank["delta"]
-        delta_str = f" ({delta:+.1f} dari EOD)" if delta else ""
-        decision_label = tactical_decision["decision"].replace("_", " ")
+            state = validity["state"]
+            state_icon = {
+                "VALID": "✅", "RETEST": "🔁", "INVALID": "❌", "UNKNOWN": "❔",
+                "EXTENDED_CHASE": "🔥", "EXTENDED_NO_CHASE": "⚠️",
+            }.get(state, "❔")
+            delta = tactical_rank["delta"]
+            delta_str = f" ({delta:+.1f} dari EOD)" if delta else ""
+            decision_label = tactical_decision["decision"].replace("_", " ")
 
-        # BUGFIX (user report — MDKA real case: state UNKNOWN "data live
-        # tidak tersedia" TAPI Live Rank/RR LIVE tetap tampil dengan delta
-        # vs EOD, seolah ada info live): bias_bandar (data KEMARIN) dan
-        # RR-at-current-price (fallback ke harga EOD basi kalau fetch live
-        # gagal) TIDAK bergantung pada ab/im tersedia atau tidak, jadi tetap
-        # menghasilkan angka walau state sudah bilang "tidak bisa dinilai".
-        # Suppress baris-baris itu sama sekali kalau UNKNOWN -- jangan kasih
-        # angka "live" yang sebetulnya bukan live.
-        rr_line = support_line = ""
-        rank_line = ""
-        if state != "UNKNOWN":
-            rr_now, rr_eod, rr_delta = tactical_rank.get("rr_now"), tactical_rank.get("rr_eod"), tactical_rank.get("rr_delta")
-            if rr_now is not None:
-                rr_delta_str = f" ({rr_delta:+.2f} dari EOD 1:{rr_eod:.2f})" if rr_delta is not None else ""
-                rr_line = f"RR LIVE: 1:{rr_now:.2f}{rr_delta_str}\n"
+            # BUGFIX (user report — MDKA real case: state UNKNOWN "data live
+            # tidak tersedia" TAPI Live Rank/RR LIVE tetap tampil dengan delta
+            # vs EOD, seolah ada info live): bias_bandar (data KEMARIN) dan
+            # RR-at-current-price (fallback ke harga EOD basi kalau fetch live
+            # gagal) TIDAK bergantung pada ab/im tersedia atau tidak, jadi tetap
+            # menghasilkan angka walau state sudah bilang "tidak bisa dinilai".
+            # Suppress baris-baris itu sama sekali kalau UNKNOWN -- jangan kasih
+            # angka "live" yang sebetulnya bukan live.
+            rr_line = support_line = ""
+            rank_line = ""
+            if state != "UNKNOWN":
+                rr_now, rr_eod, rr_delta = tactical_rank.get("rr_now"), tactical_rank.get("rr_eod"), tactical_rank.get("rr_delta")
+                if rr_now is not None:
+                    rr_delta_str = f" ({rr_delta:+.2f} dari EOD 1:{rr_eod:.2f})" if rr_delta is not None else ""
+                    rr_line = f"RR LIVE: 1:{rr_now:.2f}{rr_delta_str}\n"
 
-            if state in ("EXTENDED_CHASE", "EXTENDED_NO_CHASE"):
-                support = backbone_engine.compute_tactical_support_zone(result)
-                if support:
-                    support_line = f"Tactical Support (VWAP): {support['support']}  |  Tactical Cut: {support['tactical_cut']}\n"
+                if state in ("EXTENDED_CHASE", "EXTENDED_NO_CHASE"):
+                    support = backbone_engine.compute_tactical_support_zone(result)
+                    if support:
+                        support_line = f"Tactical Support (VWAP): {support['support']}  |  Tactical Cut: {support['tactical_cut']}\n"
 
-            rank_line = f"Live Rank: {tactical_rank['live_rank']:.0f}/100{delta_str}\n"
+                rank_line = f"Live Rank: {tactical_rank['live_rank']:.0f}/100{delta_str}\n"
 
-        # MBSS v2 (user request — "terlalu panjang, ringkas"): dulu ada baris
-        # "Status sinyal" (mengulang reason kalimat panjang) + baris note
-        # tactical_decision (kalimat panjang lagi) — dua-duanya dibuang.
-        # decision_label TETAP disatukan ke header (bukan dibuang total,
-        # beda perlakuan held vs belum held cukup signifikan — misal
-        # EXTENDED_CHASE = TRAIL PROFIT kalau dipegang, tapi CHASE
-        # OPPORTUNITY kalau belum — hilang kalau cuma tampilkan state).
-        winrate_tag = validity.get("winrate_tag")
-        wr_str = f" [{winrate_tag}]" if winrate_tag else ""
-        tactical_line = (
-            f"🎯 TACTICAL: {state_icon} {state}{wr_str} — {decision_label}\n"
-            f"\n"
-            f"{rank_line}"
-            f"{rr_line}"
-            f"{support_line}"
-        )
-    except Exception as e:
-        print(f"⚠️ /check: gagal hitung tactical live rank untuk {ticker}: {e}")
+            # MBSS v2 (user request — "terlalu panjang, ringkas"): dulu ada baris
+            # "Status sinyal" (mengulang reason kalimat panjang) + baris note
+            # tactical_decision (kalimat panjang lagi) — dua-duanya dibuang.
+            # decision_label TETAP disatukan ke header (bukan dibuang total,
+            # beda perlakuan held vs belum held cukup signifikan — misal
+            # EXTENDED_CHASE = TRAIL PROFIT kalau dipegang, tapi CHASE
+            # OPPORTUNITY kalau belum — hilang kalau cuma tampilkan state).
+            winrate_tag = validity.get("winrate_tag")
+            wr_str = f" [{winrate_tag}]" if winrate_tag else ""
+            tactical_line = (
+                f"🎯 TACTICAL: {state_icon} {state}{wr_str} — {decision_label}\n"
+                f"\n"
+                f"{rank_line}"
+                f"{rr_line}"
+                f"{support_line}"
+            )
+        except Exception as e:
+            print(f"⚠️ /check: gagal hitung tactical live rank untuk {ticker}: {e}")
 
     # MBSS v2 (user request — order book + running trade ASLI dari Zapi,
     # "enrich entry buy call"): tampil HANYA kalau flag "zapi" dipakai dan
@@ -679,7 +679,7 @@ async def check_stock(update, context):
         f"{_icon_score(sv)} Nilai {sv}  |  "
         f"{_icon_score(sm)} Momentum {sm}  |  "
         f"{_icon_score(ss)} Sentimen {ss}"
-        f"{bb_line}"
+        f"{bb_line if SHOW_LEGACY_BLOCKS else bb_line_core}"
         f"{backbone_line}"
     )
 
@@ -719,6 +719,10 @@ async def check_stock(update, context):
             f"TP1    : {_fmt(tgt.get('tp_1', '?'))}\n"
             f"SL     : {_fmt(tgt.get('cut_loss', '?'))}"
         )
+
+    if not SHOW_LEGACY_BLOCKS:
+        # targets: the lane's own entry/SL/TP now sit in the STATUS LANE block; the generic intraday targets are hidden.
+        target_lines = f"📈 Harga: {_fmt(price)}"
 
     # ── Posisi (kalau saham ini dipegang) ─────────────────────────
     posisi_lines = ""
@@ -766,6 +770,7 @@ async def check_stock(update, context):
         intraday_status += f"Momentum {sess}: {im['reading']} ({im['change_pct']:+.2f}%)\n"
     elif hi and lo:
         intraday_status += "Momentum: di luar jam bursa\n"
+    intraday_short = intraday_status
 
     vwap_movement = result.get("vwap_movement") or {}
     intraday_status += core.format_vwap_movement_block(vwap_movement) + "\n"
@@ -820,10 +825,10 @@ async def check_stock(update, context):
         f"{_icon_adx(adx)} ADX {adx} ({core.format_adx_label(adx)})\n"
         f"{_icon_rs(rs)} RS vs IHSG {rs}%  |  Range {result['day_range_pct_10d']}%"
         f"{market_engine.format_sector_tag(result.get('sector'), prefix=chr(10))}"
-        f"{broker_engine.format_smart_money_tag(ticker, nightly_engine.load_broksum_250())}"
+        f"{broker_engine.format_smart_money_tag(ticker, nightly_engine.load_broksum_250()) if SHOW_LEGACY_BLOCKS else ''}"
         f"{dividend_calendar.format_check_line(dividend_calendar.get_ticker_dividend(ticker, result.get('price')))}"
         f"{fundamental_health.format_check_block(fundamental_health.get_fundamental_health(ticker))}"
-        f"{news_sentiment.format_check_block(news_sentiment.get_recent_sentiment_tally(ticker))}"
+        f"{news_sentiment.format_check_block(news_sentiment.get_recent_sentiment_tally(ticker)) if SHOW_LEGACY_BLOCKS else ''}"
         f"{_format_pillar_lane_block(result)}"
         f"{_format_action_tier_note(result)}"
     )
@@ -903,15 +908,23 @@ async def check_stock(update, context):
     # pesan panjang. Sekarang pesan 1 cuma yang butuh keputusan CEPAT SAAT
     # INI (tactical, posisi yang dipegang, kondisi live intraday), pesan 2
     # yang lain-lain dari data EOD (skor, target, raw data, broker, berita).
+    status_block = ""
+    if not SHOW_LEGACY_BLOCKS:
+        try:
+            status_block = await asyncio.to_thread(check_status.build_status_block, ticker)
+        except Exception as e:
+            print(f"⚠️ /check: status lane gagal untuk {ticker}: {e}")
     msg1 = "\n".join(filter(None, [
         f"{result.get('name', ticker)} ({ticker})",
         f"📅 {date_str}  |  {jam_str}",
         "",
+        status_block,
+        "" if status_block else None,
         tactical_line,
         orderflow_line,
         freshness_line,
-        posisi_lines,
-        intraday_status,
+        posisi_lines if SHOW_LEGACY_BLOCKS else "",
+        intraday_status if SHOW_LEGACY_BLOCKS else intraday_short,
     ]))
     await core.safe_reply(update.message, msg1)
 
@@ -923,14 +936,17 @@ async def check_stock(update, context):
         "",
         target_lines,
         "",
-        raw_data_block + bias_block,
-        brokersum_line,
-        news_block,
+        raw_data_block + (bias_block if SHOW_LEGACY_BLOCKS else ""),
+        brokersum_line if SHOW_LEGACY_BLOCKS else "",
+        news_block if SHOW_LEGACY_BLOCKS else "",
     ]))
     await core.safe_reply(update.message, msg2_eod)
 
     # Pesan 3 — sinyal ringkas deterministik pada waktu /check dijalankan
-    await core.safe_reply(update.message, analysis_text)
+    # 2026-10-22: the intraday action text (breakout/VWAP/intraday SL) is daytrade-era and was mostly about held positions,
+    # which the user no longer tracks in the bot -> legacy layout only.
+    if SHOW_LEGACY_BLOCKS:
+        await core.safe_reply(update.message, analysis_text)
 
     # Offer optional Broker Sum screenshot enrichment — SKIP entirely kalau sudah
     # ada data broker dari sumber lain (cache Index Alpha, atau baru saja fetch
