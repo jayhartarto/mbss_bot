@@ -156,35 +156,18 @@ async def start(update, context):
         "  kepastian — kita tidak punya akses ke app broker, cuma bandingkan harga)\n"
         "/order sell TICKER LOT HARGA — sama untuk order jual\n"
         "/order — lihat semua order dipantau | /order clear TICKER — hapus pantauan\n"
-        "/myportfolio — analisis mendalam + kategori siklus (Baru/Produktif/Hati-hati/Evaluasi)\n"
-        "/myportfolio brokersum — + data broker asing RIIL (Index Alpha), auto-pilih 5\n"
-        "  saham prioritas tertinggi (maks 5/hari — batas keras dari Index Alpha)\n"
-        "/myportfolio brokersum TICKER1 TICKER2 — pilih manual saham mana yang dicek\n"
-        "/myportfolio brokersum zapi — sama, tapi via Zapi, SEMUA posisi+watchlist\n"
-        "  tercover sekaligus (budget lebih longgar, ~10-12/hari aman dari 300/bulan)\n"
         "Setelah /check, bot akan tanya apakah kamu punya screenshot Broker Sum dari\n"
         "  app-mu hari ini — kirim untuk memperkaya analisis, atau tekan tombol Lewati.\n\n"
         "/glossary — kamus istilah (RSI, MACD, CMF, OBV, dll) yang dipakai di analisis\n\n"
-        "/screendaytrade — screening khusus saham paling aktif/volatil HARI INI\n"
-        "  (beda bobot dari brief pagi, fokus momentum bukan value; tanpa data broker\n"
-        "  karena horizonnya jam-menit, bukan cocok untuk data EOD)\n"
-        "/screendaytrade issi — sama, tapi universe ISSI (ratusan saham syariah,\n"
-        "  bukan cuma ISSI yang 70) dengan filter likuiditas (harga + volume 10hr\n"
-        "  bursa >=500rb lembar). Cache 2 minggu — pemakaian pertama tiap 2 minggu\n"
-        "  butuh beberapa menit (via Zapi bulk), setelahnya instan sampai 2 minggu berikutnya\n"
-        "/screendaytrade live — urutkan MURNI dari sinyal live (VWAP + volume pace\n"
-        "  SEKARANG), bukan lane EOD. Untuk buru saham yang lagi aktif/dikejar buyer\n"
-        "  saat ini juga — cuma berguna & bakal kosong di luar jam bursa\n"
-        "/gptpick — shortlist syariah likuid terbaik untuk besok; ranking top 3/5\n"
-        "/hc — top 10 saham DAY TRADE (EOD High Conviction) dari cache /eodscan, urut WR individual\n"
-        "  (instan, tidak fetch apa pun)\n"
-        "  pakai cache malam + broker flow bila tersedia\n"
-        "/eodscan — jalankan full scan EOD manual sekali jalan; semua analisis\n"
-        "  berikutnya baca cache yang sama\n"
-        "/winrate — scorecard uji akurasi rekomendasi /screendaytrade (TP1/CL asli\n"
-        "  dari rekomendasi hari itu, entry = harga open besoknya, dicek harian\n"
-        "  s/d 5 hari bursa). Picks otomatis terkunci tiap kali /screendaytrade\n"
-        "  dijalankan, diresolusi tiap malam setelah scan jam 22:00\n\n"
+        "Perintah sinyal (tag dari scorecard lane x regime backtest, bukan dari skor final):\n"
+        "/swing — pick aktif BOW/OSB-v2/VCP/MACD-confirm/BOS, tiap pick bertanda 🟢A BELI-A / 🟡B BELI-B /\n"
+        "  🔵 TAHAN / 🔴 KELUAR / ⚪ NETRAL; pick HINDARI disembunyikan (dihitung di baris penutup)\n"
+        "/rank (alias /sb) — peringkat pick aktif: return/hari + win-rate, tag yang sama\n"
+        "/bsjp — watchlist & status BSJP (overnight); /bsjp tp, /bsjp checkpoint\n"
+        "/allsetup — gabungan 9 lane MACD (audit cepat kandidat malam ini)\n"
+        "/eodscan — jalankan full scan EOD manual; /ffupdate — update foreign flow\n"
+        "/tanya — tanya Gemini dengan konteks pick & regime | /bandar TICKER — bacaan bandar\n"
+        "/dividen — kalender dividen\n\n"
         "Testing (jalankan manual tanpa nunggu jadwal):\n"
         "/testbrief — jalankan Morning Brief sekarang\n"
         "/testopening — jalankan Opening Dynamics sekarang\n\n"
@@ -641,8 +624,8 @@ async def show_shortcut_menu(update, context):
     platform, bukan sesuatu yang perlu kita bangun sendiri).
     """
     keyboard = [
-        ["/screendaytrade live", "/consensus"],
-        ["/bsjp", "/executiongate"],
+        ["/swing", "/rank"],
+        ["/bsjp", "/allsetup"],
         ["/check"],
     ]
     markup = core.ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)

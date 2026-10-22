@@ -5592,15 +5592,8 @@ async def run_morning_brief(context: ContextTypes.DEFAULT_TYPE):
         analyzed_dataset.sort(key=lambda s: s["scores"]["final"], reverse=True)
         top_picks = analyzed_dataset[:MORNING_BRIEF_TOP_N]
 
-        # MBSS v2 (user request — ditemukan lewat penelusuran manual /winrate:
-        # testbrief TIDAK PERNAH terlacak sama sekali sebelumnya, tidak ada
-        # cara ukur akurasinya). Kunci lewat mekanisme yang SAMA dengan
-        # screendaytrade/gptpick, source="testbrief" membedakannya. Gagal-lunak
-        # — kalau lock gagal, tetap kirim brief seperti biasa.
-        try:
-            await asyncio.to_thread(lock_daily_daytrade_picks, top_picks, "testbrief")
-        except Exception as e:
-            print(f"⚠️ Gagal mengunci picks testbrief untuk /winrate: {e}")
+        # 2026-10-22: /testbrief no longer locks its top picks into daytrade_picks_history.json (source="testbrief"): that family is
+        # retired and its resolver was removed from the nightly job, so new locks would stay pending forever.
 
         # Compute this deterministically rather than trusting the LLM to count
         # across a 10-item list itself — that was silently failing to trigger the
@@ -7984,7 +7977,8 @@ def build_app():
     app.add_handler(CommandHandler("setentrydate", commands_portfolio.set_entry_date_command))
     app.add_handler(CommandHandler("summary", commands_portfolio.portfolio_summary))
     app.add_handler(CommandHandler("order", commands_portfolio.order_command))
-    app.add_handler(CommandHandler(["myportfolio", "portofolio"], commands_portfolio.my_portfolio))
+    # MBSS v2 (user request 2026-10-22): /myportfolio DIPENSIUNKAN -- posisi tidak lagi dicatat di bot. my_portfolio() TIDAK dihapus.
+    # app.add_handler(CommandHandler(["myportfolio", "portofolio"], commands_portfolio.my_portfolio))
     app.add_handler(CommandHandler("testbrief", commands_misc.test_morning_brief))
     # MBSS v2 (user request 2026-09-21): /screendaytrade DINONAKTIFKAN --
     # semua 9 lane MACD-nya terbukti gagal honest backtest (touch-metric
@@ -8005,9 +7999,16 @@ def build_app():
     # go_command() TIDAK dihapus dari commands/scan.py, cuma tidak lagi
     # didaftarkan.
     # app.add_handler(CommandHandler(["go"], commands_scan.go_command))
-    app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.strong_buy_command))
+    # MBSS v2 (user request 2026-10-22): /strongbuy dan /sb sekarang menampilkan /rank -- daftar STRONG_BUY lama berasal dari skor
+    # final yang tidak tervalidasi, /rank (pick lane + tag BELI-A/B dari scorecard) menggantikannya. strong_buy_command() TIDAK dihapus
+    # dari commands/scan.py, cuma tidak lagi didaftarkan.
+    app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.rank_command))
     app.add_handler(CommandHandler("pingpong", commands_scan.pingpong_watchlist_command))
-    app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
+    # MBSS v2 (user request 2026-10-22): /consensus (dan /consensus live) DIPENSIUNKAN -- irisan beberapa tag/lane terbukti TIDAK
+    # memberi edge: pick yang muncul di >=2 lane (sinyal lane lain pada hari yang sama atau <=7 hari SEBELUMNYA, kausal) hanya +0.05pp
+    # (t=+0.3) setelah kontrol lane x regime; efek +1pp yang tampak di analisis non-kausal murni bias melihat ke depan. Lihat memory
+    # project_ipot_broker_backfill_and_check_redesign_2026_10_22. consensus_command()/consensus_live_command() TIDAK dihapus.
+    # app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
     app.add_handler(CommandHandler("fast", commands_scan.fast_candidates_command))
     app.add_handler(CommandHandler("fastscan", commands_scan.fast_scan_command))
     app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
