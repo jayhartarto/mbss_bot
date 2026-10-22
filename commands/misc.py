@@ -134,46 +134,20 @@ async def start(update, context):
     await core.safe_reply(update.message, STARTUP_DISCLAIMER)
     await core.safe_reply(update.message,
         "🤖 Sharia Stock Bot aktif.\n\n"
-        "Perintah analisa:\n"
-        "/check TICKER — analisa saham apa saja on-demand (aware posisi jika sudah dimiliki)\n"
-        "  Contoh: /check TLKM\n"
-        "/check TICKER zapi — + data broker riil dari Zapi (sumber alternatif,\n"
-        "  belum terverifikasi live vs harian — lihat catatan di hasil)\n\n"
-        "Perintah portofolio:\n"
-        "/buy TICKER HARGA LOT — catat posisi beli (butuh cash cukup)\n"
-        "  Contoh: /buy TLKM 2850 10\n"
-        "/sell TICKER LOT HARGA — jual & hitung realized P&L otomatis\n"
-        "  Contoh: /sell TLKM 5 2900\n"
-        "/addcash JUMLAH — tambah saldo cash\n"
-        "  Contoh: /addcash 5000000\n"
-        "/withdrawcash JUMLAH — kurangi saldo cash\n"
-        "/resetportfolio — hapus SEMUA posisi & cash (perlu konfirmasi)\n"
-        "/setentrydate TICKER YYYY-MM-DD — isi/perbaiki tanggal beli (untuk kategori siklus)\n"
-        "/watchlist — lihat/kelola watchlist (maks 3 saham, belum dimiliki)\n"
-        "  /watchlist add TICKER | /watchlist remove TICKER\n"
-        "/summary — ringkasan cepat + tombol cek harga cepat + order tracking\n"
-        "/order buy TICKER LOT HARGA — pantau order beli (PERKIRAAN status, bukan\n"
-        "  kepastian — kita tidak punya akses ke app broker, cuma bandingkan harga)\n"
-        "/order sell TICKER LOT HARGA — sama untuk order jual\n"
-        "/order — lihat semua order dipantau | /order clear TICKER — hapus pantauan\n"
-        "Setelah /check, bot akan tanya apakah kamu punya screenshot Broker Sum dari\n"
-        "  app-mu hari ini — kirim untuk memperkaya analisis, atau tekan tombol Lewati.\n\n"
-        "/glossary — kamus istilah (RSI, MACD, CMF, OBV, dll) yang dipakai di analisis\n\n"
         "Perintah sinyal (tag dari scorecard lane x regime backtest, bukan dari skor final):\n"
         "/swing — pick aktif BOW/OSB-v2/VCP/MACD-confirm/BOS, tiap pick bertanda 🟢A BELI-A / 🟡B BELI-B /\n"
         "  🔵 TAHAN / 🔴 KELUAR / ⚪ NETRAL; pick HINDARI disembunyikan (dihitung di baris penutup)\n"
         "/rank (alias /sb) — peringkat pick aktif: return/hari + win-rate, tag yang sama\n"
-        "/bsjp — watchlist & status BSJP (overnight); /bsjp tp, /bsjp checkpoint\n"
-        "/allsetup — gabungan 9 lane MACD (audit cepat kandidat malam ini)\n"
-        "/eodscan — jalankan full scan EOD manual; /ffupdate — update foreign flow\n"
-        "/tanya — tanya Gemini dengan konteks pick & regime | /bandar TICKER — bacaan bandar\n"
-        "/dividen — kalender dividen\n\n"
-        "Testing (jalankan manual tanpa nunggu jadwal):\n"
-        "/testbrief — jalankan Morning Brief sekarang\n"
-        "/testopening — jalankan Opening Dynamics sekarang\n\n"
-        "Otomatis terjadwal:\n"
-        "🌙 04:00 WIB — Morning Brief Sharia (ISSI), sebelum market buka\n"
-        "🕤 09:45 WIB — Opening Dynamics (gap, momentum, volume pagi)"
+        "/bsjp — watchlist & status BSJP (overnight); /bsjp tp, /bsjp checkpoint\n\n"
+        "Perintah analisa:\n"
+        "/check TICKER — tag + status lane + regime IHSG + peringatan (ex-dividen/right issue, gap, XL, likuiditas)\n"
+        "  Contoh: /check TLKM | /check TLKM zapi (+ data broker Zapi)\n"
+        "  Setelah /check, bot menawarkan kirim screenshot Broker Sum dari app-mu (atau tekan Lewati).\n"
+        "/tanya — tanya Gemini dengan konteks pick, regime, dan riset internal | /tanyareset\n"
+        "/bandar TICKER — bacaan bandar | /dividen — kalender dividen | /glossary — kamus istilah\n\n"
+        "Operasional:\n"
+        "/eodscan — full scan EOD manual (semua analisis lain membaca cache ini) | /ffupdate — update foreign flow\n"
+        "/testbrief — Morning Brief (narasi Gemini) sekarang | /testopening — Opening Dynamics sekarang\n"
     )
 
 
@@ -625,8 +599,7 @@ async def show_shortcut_menu(update, context):
     """
     keyboard = [
         ["/swing", "/rank"],
-        ["/bsjp", "/allsetup"],
-        ["/check"],
+        ["/bsjp", "/check"],
     ]
     markup = core.ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
     await update.message.reply_text(

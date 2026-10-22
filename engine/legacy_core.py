@@ -7966,17 +7966,20 @@ def build_app():
     app.add_handler(CallbackQueryHandler(commands_portfolio.order_clear_callback, pattern="^orderclear_"))
     app.add_handler(CallbackQueryHandler(commands_portfolio.select_screendaytrade_brokersum, pattern="^bsdt_"))
     app.add_handler(MessageHandler(filters.PHOTO, commands_check.handle_brokersum_photo))
-    app.add_handler(CommandHandler("buy", commands_portfolio.buy_position))
-    app.add_handler(CommandHandler("sell", commands_portfolio.sell_position))
-    app.add_handler(CommandHandler("batchbuy", commands_portfolio.batch_buy_position))
-    app.add_handler(CommandHandler("batchsell", commands_portfolio.batch_sell_position))
-    app.add_handler(CommandHandler("addcash", commands_portfolio.add_cash_command))
-    app.add_handler(CommandHandler("withdrawcash", commands_portfolio.withdraw_cash_command))
-    app.add_handler(CommandHandler("resetportfolio", commands_portfolio.reset_portfolio_command))
-    app.add_handler(CommandHandler("watchlist", commands_portfolio.watchlist_command))
-    app.add_handler(CommandHandler("setentrydate", commands_portfolio.set_entry_date_command))
-    app.add_handler(CommandHandler("summary", commands_portfolio.portfolio_summary))
-    app.add_handler(CommandHandler("order", commands_portfolio.order_command))
+    # MBSS v2 (user request 2026-10-22): keluarga PORTOFOLIO manual (/buy /sell /batchbuy /batchsell /addcash /withdrawcash /resetportfolio
+    # /watchlist /setentrydate /summary /order) DIPENSIUNKAN -- posisi tidak lagi dicatat di bot. Fungsinya (dan load_portfolio, yang masih
+    # dibaca beberapa tempat) TIDAK dihapus, cuma tidak lagi didaftarkan sebagai command.
+    # app.add_handler(CommandHandler("buy", commands_portfolio.buy_position))
+    # app.add_handler(CommandHandler("sell", commands_portfolio.sell_position))
+    # app.add_handler(CommandHandler("batchbuy", commands_portfolio.batch_buy_position))
+    # app.add_handler(CommandHandler("batchsell", commands_portfolio.batch_sell_position))
+    # app.add_handler(CommandHandler("addcash", commands_portfolio.add_cash_command))
+    # app.add_handler(CommandHandler("withdrawcash", commands_portfolio.withdraw_cash_command))
+    # app.add_handler(CommandHandler("resetportfolio", commands_portfolio.reset_portfolio_command))
+    # app.add_handler(CommandHandler("watchlist", commands_portfolio.watchlist_command))
+    # app.add_handler(CommandHandler("setentrydate", commands_portfolio.set_entry_date_command))
+    # app.add_handler(CommandHandler("summary", commands_portfolio.portfolio_summary))
+    # app.add_handler(CommandHandler("order", commands_portfolio.order_command))
     # MBSS v2 (user request 2026-10-22): /myportfolio DIPENSIUNKAN -- posisi tidak lagi dicatat di bot. my_portfolio() TIDAK dihapus.
     # app.add_handler(CommandHandler(["myportfolio", "portofolio"], commands_portfolio.my_portfolio))
     app.add_handler(CommandHandler("testbrief", commands_misc.test_morning_brief))
@@ -7987,9 +7990,13 @@ def build_app():
     # commands/scan.py (masih ada, cuma tidak lagi didaftarkan sbg command)
     # -- gampang dikembalikan kalau perlu, per konvensi arsip project ini.
     # app.add_handler(CommandHandler("screendaytrade", commands_scan.screen_daytrade))
-    app.add_handler(CommandHandler("gptpick", commands_scan.gptpick_command))
-    app.add_handler(CommandHandler(["hc", "highconviction"], commands_scan.high_conviction_command))
-    app.add_handler(CommandHandler(["allsetup", "allsetups"], commands_scan.all_setup_candidates_command))
+    # MBSS v2 (user request 2026-10-22): keluarga DAYTRADE/era-lama DIPENSIUNKAN: /gptpick /hc /allsetup /pingpong /fast /fastscan /broksum
+    # /ffdaytrade /executiongate. Bukti: pick /hc 56.8% win (n=95, CI 47-66%) vs 55.4% rata-rata semua sumber, /screendaytrade 43.4%; 9 lane MACD
+    # (/allsetup) gagal uji ulang jujur 2026-09-21; whitelist-akumulasi/pra-breakout tanpa edge andal (38 tanggal sinyal). Fungsi-fungsinya TIDAK
+    # dihapus dari commands/*.py. Pengganti: /swing /rank /bsjp /check (tag lane x regime).
+    # app.add_handler(CommandHandler("gptpick", commands_scan.gptpick_command))
+    # app.add_handler(CommandHandler(["hc", "highconviction"], commands_scan.high_conviction_command))
+    # app.add_handler(CommandHandler(["allsetup", "allsetups"], commands_scan.all_setup_candidates_command))
     # MBSS v2 (user request 2026-09-21): /go DIRETIRE SEPENUHNYA -- kedua
     # bagiannya (DAY TRADE section = EOD-HC model, SWING TRADE section =
     # 9-lane MACD yg sama dgn /screendaytrade) sudah terbukti gagal honest
@@ -8003,15 +8010,15 @@ def build_app():
     # final yang tidak tervalidasi, /rank (pick lane + tag BELI-A/B dari scorecard) menggantikannya. strong_buy_command() TIDAK dihapus
     # dari commands/scan.py, cuma tidak lagi didaftarkan.
     app.add_handler(CommandHandler(["strongbuy", "sb"], commands_scan.rank_command))
-    app.add_handler(CommandHandler("pingpong", commands_scan.pingpong_watchlist_command))
+    # app.add_handler(CommandHandler("pingpong", commands_scan.pingpong_watchlist_command))
     # MBSS v2 (user request 2026-10-22): /consensus (dan /consensus live) DIPENSIUNKAN -- irisan beberapa tag/lane terbukti TIDAK
     # memberi edge: pick yang muncul di >=2 lane (sinyal lane lain pada hari yang sama atau <=7 hari SEBELUMNYA, kausal) hanya +0.05pp
     # (t=+0.3) setelah kontrol lane x regime; efek +1pp yang tampak di analisis non-kausal murni bias melihat ke depan. Lihat memory
     # project_ipot_broker_backfill_and_check_redesign_2026_10_22. consensus_command()/consensus_live_command() TIDAK dihapus.
     # app.add_handler(CommandHandler("consensus", commands_scan.consensus_command))
-    app.add_handler(CommandHandler("fast", commands_scan.fast_candidates_command))
-    app.add_handler(CommandHandler("fastscan", commands_scan.fast_scan_command))
-    app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
+    # app.add_handler(CommandHandler("fast", commands_scan.fast_candidates_command))
+    # app.add_handler(CommandHandler("fastscan", commands_scan.fast_scan_command))
+    # app.add_handler(CommandHandler(["broksum", "brokeraktivitas"], commands_scan.broksum_command))
     app.add_handler(CommandHandler("brokerdiscovery", commands_scan.broker_discovery_command))
     app.add_handler(CommandHandler("bsjp", commands_scan.bsjp2_screening_command))
     # MBSS v2 (user request 2026-09-21): /bow (dan alias /buyonweakness)
@@ -8032,12 +8039,12 @@ def build_app():
     # project_daytrade_family_audit_2026_09_21). entry_pagi_manual_command()
     # TIDAK dihapus, cuma tidak lagi didaftarkan.
     # app.add_handler(CommandHandler("entrypagi", commands_scan.entry_pagi_manual_command))
-    app.add_handler(CommandHandler("ffdaytrade", commands_scan.ff_daytrade_manual_command))
+    # app.add_handler(CommandHandler("ffdaytrade", commands_scan.ff_daytrade_manual_command))
     app.add_handler(CommandHandler(["eodscan", "nightlyscan"], commands_scan.eodscan_command))
     app.add_handler(CommandHandler("ffupdate", commands_scan.ffupdate_command))
     app.add_handler(CallbackQueryHandler(commands_scan.gptpick_callback, pattern="^gptpick:(3|5)$"))
     app.add_handler(CommandHandler("brokersum", commands_check.brokersum_upload_command))
-    app.add_handler(CommandHandler("executiongate", commands_scan.executiongate_command))
+    # app.add_handler(CommandHandler("executiongate", commands_scan.executiongate_command))
     app.add_handler(CommandHandler("winrate", commands_misc.show_winrate))
     app.add_handler(CommandHandler("brokerwinrate", commands_misc.show_broker_winrate))
     app.add_handler(CommandHandler("menu", commands_misc.show_shortcut_menu))
