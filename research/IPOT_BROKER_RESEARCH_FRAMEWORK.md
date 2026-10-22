@@ -183,3 +183,17 @@ Temuan metodologis (data dev, 30 saham x ~21 hari berhasil; semuanya deskriptif)
 5. Hasil dev dengan plasebo benar: tingkat sentuh broker rujukan = broker acak (selisih ~+0,5 sampai +1 poin; p_ref_lower 0,5-0,8; mode counterparty -0,4 poin, p 0,36). **Tidak ada bukti plafon pada data dev**;
    daya uji rendah (n efektif jauh lebih kecil dari 448 baris karena hari-hari tumpang tindih). Ujian sebenarnya pada data penuh 24 bulan, dipisah per regime dan per kelas broker.
 Berikutnya: klaster perilaku (mesin 3) untuk kelas broker yang tidak statis, mesin keterampilan broker (mesin 4), dan menjalankan semua mesin pada data penuh dengan kontrol positif/daya (MDE) lebih dulu.
+
+## 15. Mesin 3 (klaster perilaku broker) dan mesin 4 (keterampilan broker) - dibangun 2026-10-22
+**Mesin 3** `broker_clusters.py` (`python -m research.ipot_explore.broker_clusters --db ... --min-rows 120 --boot 20`): profil per broker (pangsa kotor, luas ticker, dua-sisi, net/kotor, spread,
+korelasi net-dengan-return hari sama dan esok, posisi harga beli/jual dalam rentang harian, pangsa arus asing, autokorelasi net), KMeans dengan k dipilih silhouette, uji kestabilan bootstrap per ticker.
+Data dev (22 broker, k=3, silhouette 0,29, kesepakatan bootstrap 0,84): (0) domestik: aplikasi ritel XL/YP/PD/XC, scalper CP, lokal GR/SQ/KK, gov NI/OD; (1) arus hampir seluruhnya asing:
+AK, ZP, YU, RX, KZ, BK, **CC**, BB, TP (pangsa asing ~1,0); (2) kelompok kecil yang bertransaksi di bagian atas rentang harian (buy_pos 0,75): MG, AZ, LG. Pembeda dominan = pangsa asing;
+pemisahan lebih halus (aplikasi ritel vs lokal lain) belum terlihat dengan 22 broker. Dugaan menarik untuk dicek di data penuh: CC (Mandiri) berperilaku seperti broker pelaksana arus asing.
+**Mesin 4** `broker_skill.py` (`... .broker_skill --db ... --B 300 --n-min 30`, tes `test_skill.py`): kejadian = broker menjadi pembeli (atau penjual) net teratas ticker-hari; hasil = rel_{1,3,5}d dikurangi
+rata-rata ticker itu (kontrol identitas ticker); estimasi per broker dengan SE klaster per ticker; penyusutan empirical-Bayes (tau^2 = 0 berarti sebaran antar broker tidak lebih besar dari noise);
+uji dispersi dan max|z| terhadap null geser per ticker; persistensi (korelasi peringkat antar blok waktu). Tes sintetis: menemukan keterampilan yang ditanam (B0 +1,93% dari +2%, B2 -1,57% dari -1,5%,
+rho 0,81) dan tidak mengarang apa pun pada skenario nol (tau 0,10%, p 0,5-0,6).
+Hasil data dev (30 saham x ~3 minggu, rezim crash): tidak ada keterampilan yang terbukti (dispersi p 0,11-0,96; persistensi rho -0,35..+0,49 dengan hanya 5-9 broker, p 0,18-0,83). Satu pola yang sejalan dengan
+temuan lama: saat **XL** (dan CC) menjadi pembeli net teratas, saham lebih lemah 5 hari ke depan (XL raw -5,5%, z -3,8; CC -3,0%, z -3,6; max|z| p=0,04 sebelum koreksi untuk 6 uji, jadi belum bukti) - konsisten dengan
+'crowding XL kontrarian' (IC -0,049 di 18 pekan). Harus diuji ulang di data penuh dan per regime.
