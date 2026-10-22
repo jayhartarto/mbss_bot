@@ -189,12 +189,15 @@ def collect_days(days: list[str], tickers: list[str], variants=DEFAULT_VARIANTS,
             time.sleep(0.05)
             return x, fetch(*x)
 
+        i = 0
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            for i, (x, res) in enumerate(ex.map(work, todo), 1):
-                counts[res[0]] += 1
-                save(conn, *x, res)
-                if i % 200 == 0:
-                    conn.commit()
+            for c0 in range(0, len(todo), 500):  # bounded chunks: queuing everything at once is hundreds of MB on the 1 GB VPS
+                for x, res in ex.map(work, todo[c0:c0 + 500]):
+                    i += 1
+                    counts[res[0]] += 1
+                    save(conn, *x, res)
+                    if i % 200 == 0:
+                        conn.commit()
         conn.commit()
         return counts
     finally:

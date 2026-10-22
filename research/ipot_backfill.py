@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 URL = ("https://www.indopremier.com/module/saham/include/data-brokersummary.php"
        "?code={t}&start={d}&end={d}&fd={fd}&board={bd}")
@@ -172,41 +172,45 @@ def main():
         time.sleep(0.05)
         return t, d, fd, bd, fetch(t, d, fd, bd)
 
+    # Submit in bounded chunks: queuing all ~150k tasks up front costs hundreds of MB, which froze the 1 GB VPS.
+    CHUNK = 500
+    done_n = 0
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
-        futs = [ex.submit(work, *x) for x in todo]
-        for i, f in enumerate(as_completed(futs), 1):
-            t, d, fd, bd, res = f.result()
-            if res is None:
-                continue
-            status, buys, sells, html = res
-            counts[status] += 1
-            if status in ("ok", "empty", "invalid", "blocked", "error"):
+        for c0 in range(0, len(todo), CHUNK):
+            if stop.is_set():
+                break
+            for t, d, fd, bd, res in ex.map(lambda x: work(*x), todo[c0:c0 + CHUNK]):
+                if res is None:
+                    continue
+                done_n += 1
+                status, buys, sells, html = res
+                counts[status] += 1
                 conn.execute("INSERT OR REPLACE INTO ipot_fetch_log VALUES (?,?,?,?,?,?,?,?,?,?)",
                              (t, d, fd, bd, status, len(buys), len(sells),
                               min((x[2] for x in buys if x[2] is not None), default=None),
                               min((x[2] for x in sells if x[2] is not None), default=None),
                               datetime.datetime.now().isoformat(timespec="seconds")))
-            if html is not None and status in ("ok", "invalid"):
-                conn.execute("INSERT OR REPLACE INTO ipot_raw VALUES (?,?,?,?,?)",
-                             (t, d, fd, bd, gzip.compress(html.encode("utf-8"))))
-            if status == "ok":
-                rows = {}
-                for code, lot, val, avg, rk in buys:
-                    rows.setdefault(code, {}).update(buy_lot=lot, buy_val=val, buy_avg=avg, buy_rank=rk)
-                for code, lot, val, avg, rk in sells:
-                    rows.setdefault(code, {}).update(sell_lot=lot, sell_val=val, sell_avg=avg, sell_rank=rk)
-                for code, r in rows.items():
-                    conn.execute("INSERT OR REPLACE INTO ipot_broker_daily VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                 (t, d, fd, bd, code, r.get("buy_lot"), r.get("buy_val"), r.get("buy_avg"), r.get("buy_rank"),
-                                  r.get("sell_lot"), r.get("sell_val"), r.get("sell_avg"), r.get("sell_rank")))
-            if i % 200 == 0:
-                conn.commit()
-                el = time.time() - t0
-                print(f"{i}/{len(todo)}  {counts}  {i / el:.1f} calls/s  eta {(len(todo) - i) / (i / el) / 60:.0f} min",
-                      flush=True)
-            if counts["blocked"] >= 20 and counts["ok"] == 0:
-                print("looks blocked (no ok answers, 20+ blocked) - stopping", file=sys.stderr)
-                stop.set()
+                if html is not None and status in ("ok", "invalid"):
+                    conn.execute("INSERT OR REPLACE INTO ipot_raw VALUES (?,?,?,?,?)",
+                                 (t, d, fd, bd, gzip.compress(html.encode("utf-8"))))
+                if status == "ok":
+                    rows = {}
+                    for code, lot, val, avg, rk in buys:
+                        rows.setdefault(code, {}).update(buy_lot=lot, buy_val=val, buy_avg=avg, buy_rank=rk)
+                    for code, lot, val, avg, rk in sells:
+                        rows.setdefault(code, {}).update(sell_lot=lot, sell_val=val, sell_avg=avg, sell_rank=rk)
+                    for code, r in rows.items():
+                        conn.execute("INSERT OR REPLACE INTO ipot_broker_daily VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                     (t, d, fd, bd, code, r.get("buy_lot"), r.get("buy_val"), r.get("buy_avg"), r.get("buy_rank"),
+                                      r.get("sell_lot"), r.get("sell_val"), r.get("sell_avg"), r.get("sell_rank")))
+                if done_n % 200 == 0:
+                    conn.commit()
+                    el = time.time() - t0
+                    print(f"{done_n}/{len(todo)}  {counts}  {done_n / el:.1f} calls/s  eta {(len(todo) - done_n) / (done_n / el) / 60:.0f} min",
+                          flush=True)
+                if counts["blocked"] >= 20 and counts["ok"] == 0:
+                    print("looks blocked (no ok answers, 20+ blocked) - stopping", file=sys.stderr)
+                    stop.set()
     conn.commit()
     print("done", counts)
 
