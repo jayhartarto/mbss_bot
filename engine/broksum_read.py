@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 
 import engine.broker_roles as roles
 import engine.legacy_core as core
@@ -61,7 +62,19 @@ Do not guess numbers.
 def extract_tab(image_bytes: bytes, mime_type: str, ticker: str) -> dict:
     """One screenshot -> raw dict (see _prompt). Never raises."""
     try:
-        raw = core._gemini_image_text(image_bytes, mime_type, _prompt(ticker)).strip()
+        raw = None
+        for attempt in (1, 2, 3):
+            try:
+                raw = core._gemini_image_text(image_bytes, mime_type, _prompt(ticker)).strip()
+                break
+            except Exception as e:  # noqa: BLE001
+                transient = getattr(e, "status_code", None) in (429, 500, 502, 503, 504)
+                if transient and attempt < 3:
+                    time.sleep(6 * attempt)
+                    continue
+                if transient:
+                    return {"success": False, "reason_if_failed": f"Gemini sedang sibuk (HTTP {e.status_code}); tunggu sebentar lalu kirim ulang foto yang SAMA — sesi /bandar masih terbuka"}
+                raise
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
         out = json.loads(raw)
         out["image_sha1"] = hashlib.sha1(image_bytes).hexdigest()

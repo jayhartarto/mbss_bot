@@ -306,7 +306,11 @@ async def tanya_command(update, context):
             core.ask_gemini_chat, history, question, json.dumps(context_bundle, default=str), core.TANYA_INSTRUCTION, 3, use_search
         )
     except Exception as e:
-        await core.safe_reply(update.message, f"⚠️ Gagal minta jawaban ke Gemini: {str(e)[:200]}")
+        msg = str(e)
+        if "503" in msg or "429" in msg:
+            await core.safe_reply(update.message, "⏳ Gemini sedang sibuk (server Google overload, HTTP 503/429). Itu sementara, bukan masalah bot — coba lagi 1-2 menit.")
+        else:
+            await core.safe_reply(update.message, f"⚠️ Gagal minta jawaban ke Gemini: {core._redact_secrets(msg)[:200]}")
         return
 
     await core.safe_reply(update.message, answer)

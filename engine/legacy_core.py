@@ -476,6 +476,22 @@ import base64
 GEMINI_REST_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_MODEL    = "gemini-3.1-flash-lite"
 
+class GeminiHTTPError(RuntimeError):
+    """Gemini REST failure with a SAFE message (status + short reason, never the request URL / API key)."""
+
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(f"HTTP {status_code} {detail}" if status_code else detail)
+        self.status_code = status_code
+
+
+def _redact_secrets(text: str) -> str:
+    """Strip API keys out of any text before it is logged or sent to Telegram."""
+    text = re.sub(r"([?&]key=)[^&\s'\"]+", r"\1***", text or "")
+    if GEMINI_API_KEY and len(GEMINI_API_KEY) > 8:
+        text = text.replace(GEMINI_API_KEY, "***")
+    return text
+
+
 def _gemini_rest(contents: list, system_instruction: str = None, model: str = None, timeout: int = 60, use_search: bool = False) -> str:
     url  = GEMINI_REST_URL.format(model=model or GEMINI_MODEL)
     body = {"contents": contents}
@@ -484,8 +500,19 @@ def _gemini_rest(contents: list, system_instruction: str = None, model: str = No
     if use_search:
         body["tools"] = [{"google_search": {}}]  # Google Search grounding (web knowledge for /tanya)
         timeout = max(timeout, 90)
-    resp = requests.post(url, params={"key": GEMINI_API_KEY}, json=body, timeout=timeout)
-    resp.raise_for_status()
+    resp = None
+    for _try in (1, 2):
+        try:
+            resp = requests.post(url, params={"key": GEMINI_API_KEY}, json=body, timeout=timeout)
+        except requests.RequestException as e:
+            # requests puts the full URL (incl. ?key=...) into its messages -> never let that reach logs/Telegram
+            raise GeminiHTTPError(0, f"request error: {_redact_secrets(str(e))[:160]}") from None
+        if resp.status_code in (429, 500, 502, 503, 504) and _try == 1:
+            time.sleep(4)  # transient overload: one quick retry here, the callers' own loops back off longer
+            continue
+        break
+    if resp.status_code >= 400:
+        raise GeminiHTTPError(resp.status_code, f"{resp.reason}: {_redact_secrets(resp.text)[:160]}")
     data = resp.json()
     try:
         cand = data["candidates"][0]
@@ -5193,9 +5220,10 @@ def ask_gemini_chat(history_turns: list, question: str, context_json, system_ins
             if search_on:
                 search_on = False  # search tool unsupported/failed -> answer from bot data alone rather than fail the chat
             if attempt < max_retries:
-                time.sleep(3 * attempt)  # 3s, 6s backoff
+                overloaded = getattr(e, "status_code", None) in (429, 503) or "503" in str(e)
+                time.sleep((8 if overloaded else 3) * attempt)  # overload (503/429): 8s, 16s; other errors: 3s, 6s
 
-    raise RuntimeError(f"Gemini API failed after {max_retries} attempts: {last_error}")
+    raise RuntimeError(f"Gemini API failed after {max_retries} attempts: {_redact_secrets(str(last_error))}")
 
 
 def trim_check_commentary(text: str, max_words: int = 90) -> str:
