@@ -1483,6 +1483,10 @@ def load_rapidapi_sentiment_shortlist() -> dict:
 RAPIDAPI_MARKET_INTEL_DAILY_DIR = os.path.join(core.PROJECT_ROOT, "rapidapi_market_intel_daily")
 
 
+FETCH_BREAKOUT_ALERTS = False
+FETCH_MULTIBAGGER_SCAN = False
+
+
 def build_rapidapi_market_intelligence_sweep() -> dict:
     """
     One call each to breakout/alerts, multibagger/scan, and sector-rotation
@@ -1491,8 +1495,11 @@ def build_rapidapi_market_intelligence_sweep() -> dict:
     others. Returns {"breakout_alerts": {...}|None, "multibagger": {...}|None,
     "sector_rotation": {...}|None}.
     """
-    breakout = broker_engine.fetch_rapidapi_breakout_alerts()
-    multibagger = broker_engine.fetch_rapidapi_multibagger_scan()
+    # 2026-10-22 (user decision): breakout alerts and the multibagger scan are OFF -- from the 12 archived snapshots the alerts are
+    # spike-chasing (5d mean -3.7%, vendor target hit 26% vs stop 66%) and the multibagger list is frozen (same 20 names and scores all
+    # 12 days). Saves 2 of ~3 RapidAPI calls per night. Flip the flags to bring them back. Sector rotation stays (feeds the /check sector tag).
+    breakout = broker_engine.fetch_rapidapi_breakout_alerts() if FETCH_BREAKOUT_ALERTS else None
+    multibagger = broker_engine.fetch_rapidapi_multibagger_scan() if FETCH_MULTIBAGGER_SCAN else None
     sector_rotation = broker_engine.fetch_rapidapi_sector_rotation()
     return {"breakout_alerts": breakout, "multibagger": multibagger, "sector_rotation": sector_rotation}
 

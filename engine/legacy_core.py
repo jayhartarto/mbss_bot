@@ -5590,7 +5590,9 @@ async def run_morning_brief(context: ContextTypes.DEFAULT_TYPE):
         # dipisah jadi section sendiri, bukan dicampur ke top_picks di atas.
         try:
             multibagger_data = nightly_engine.load_rapidapi_market_intelligence().get("multibagger") or {}
-            candidates = multibagger_data.get("candidates") or []
+            # 2026-10-22: hidden -- the multibagger feed is switched off (frozen list, see engine/nightly.py FETCH_MULTIBAGGER_SCAN);
+            # whatever is still in the cache is stale, so the message is only built when the fetch flag is on.
+            candidates = (multibagger_data.get("candidates") or []) if nightly_engine.FETCH_MULTIBAGGER_SCAN else []
             if candidates:
                 mb_lines = [f"📈 LONGER-HORIZON WATCHLIST — {len(candidates)} kandidat 6-12 bulan (cache /eodscan malam ini)\n"]
                 for i, c in enumerate(candidates[:10], 1):
