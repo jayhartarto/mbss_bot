@@ -43,6 +43,18 @@ E. **Kandidat MM / penyedia likuiditas** - skor dua-sisi = min(beli,jual)/max(be
 F. **Konteks pengendali** - regime IHSG, keanggotaan/umur lane dan tag, ret 1/5/10 hari, rasio volume, bendera lonjakan/EXT (supaya efek lonjakan tidak
    ditemukan ulang sebagai "efek broker"), likuiditas.
 
+G. **Pola akumulasi harian** (catatan pengguna 2026-10-22: mendadak vs rutin vs lainnya). Taksonomi yang diukur, bukan dipercaya:
+   1. *Letupan* - pembeli #1 hari ini >= k kali median pangsa-hariannya sendiri (20 hari) dan pangsanya di top-10 beli >= P90, disertai lonjakan volume.
+   2. *Rutin / senyap (stealth)* - broker yang sama di top-3 pembeli pada >= m dari n hari (mis. 6 dari 10), sebaran pangsa net-harian rendah, harga datar (|ret 10 hari| kecil,
+      ATR menyempit), harga rata-rata beli stabil ("menjaga area") -> inventori kumulatif naik sementara harga tidak.
+   3. *Tangga / rampa* - pangsa net-harian naik berurutan dan harga rata-rata beli ikut naik (tanda awal mark-up).
+   4. *Terpecah / rotasi* - pembelian terkonsentrasi tetapi dibagi ke beberapa broker yang bergerak bersama (aliansi) vs net-buy tersebar di banyak broker kecil (minat ritel).
+   5. *Penyerapan* - net-buy besar pada hari turun dengan penutupan jauh dari low (kapitulasi diserap).
+   6. *Distribusi tersamar* - harga datar/naik sedikit, volume tinggi, jual besar dari asing/institusi, sisi beli terfragmentasi (ke ritel).
+   7. *Churn / pencucian* - kotor besar, net kecil, putaran beli-jual berukuran serupa berulang (MM atau wash) -> pembeda dari akumulasi nyata.
+   8. *Blok negosiasi* - transaksi besar di papan NG (`all/NG`): pindah kepemilikan, bukan akumulasi pasar.
+   Tiap pola dibuat sebagai fitur kontinu (skor) plus bendera, lalu dibiarkan bersaing di mesin 1-6; tidak ada pola yang diasumsikan menang.
+
 ## 4. Mesin eksplorasi
 1. **Sapuan univariat** semua fitur x kuartil/ekstrem x horizon (1/3/5/10 hari) x metrik hasil. Bandingkan dengan null permutasi (acak hasil, pertahankan fitur).
 2. **Kombinasi dangkal** - pohon keputusan kedalaman 2-3 / boosting kecil dengan validasi walk-forward; hanya aturan sederhana (<=3 syarat) yang diteruskan.
@@ -59,6 +71,13 @@ F. **Konteks pengendali** - regime IHSG, keanggotaan/umur lane dan tag, ret 1/5/
    - Uji: (a) distribusi (high maksimum N hari ke depan / rata-rata MM - 1); (b) apakah harga cenderung berhenti dekat rata-rata MM atau pada kelipatan tertentu;
      (c) dibandingkan dengan kontrol (saham serupa tanpa MM, atau hari tanpa ritel-keluar); (d) apakah pola ini ada hanya di sekitar lonjakan (pengacau).
    - Keluaran: plafon ekspektasi (persentil 50/75 mark-up) per ticker bila terbukti, sebagai informasi "perkiraan area jual MM".
+
+8. **Replikasi heuristik populer** - tiru apa adanya alat yang dipakai ritel (Top-1/3/5 net ratio dan label Acc/Dist kecil-normal-besar ala Bandar Detector, rata-rata
+   modal bandar 10 hari, net-buy terkonsentrasi di sedikit broker vs tersebar, harga rata-rata beli stabil) lalu ujikan *apa adanya*. Tujuannya dua: melihat apakah ada
+   edge, atau justru kontrarian (selaras dengan XL: sinyal yang ramai dibaca ritel cenderung berbalik).
+9. **Uji bergaya literatur** - (a) persistensi keterampilan: korelasi peringkat broker antar jendela 10 hari berdekatan (jangkar: studi dompet on-chain mendapat 0,52); (b) jackknife
+   "leave-one-broker-out": apakah aliran satu broker berbeda nyata dari sisa pasar (jangkar: studi Praha); (c) ukuran: apakah transaksi/aliran *menengah* lebih informatif daripada
+   yang sangat besar atau kecil (stealth trading); (d) runtun satu sisi berurutan oleh broker yang sama (jangkar: Frino-Johnstone-Zheng, ASX); (e) sentralitas broker (NBER).
 
 ## 5. Definisi hasil (winner / loser)
 Utama: return ke depan 1/3/5/10 hari relatif terhadap median universe likuid hari yang sama (netral terhadap regime). Pendamping: hasil jalur
@@ -100,3 +119,18 @@ Kelonggaran "indikasi" (disetujui): untuk kartu indikasi yang dicek manual di ap
   perkiraan 8-10 jam; gabungkan DB lama dan baru (`engine/ipot_broker.merge_into`). Hasil: ~24 bulan, mencakup episode crash 2025 dan 2026 sehingga bisa diuji lintas regime.
 - Sementara itu, di data kecil laptop: Fase 0 (audit) dan skrip atlas fitur (Fase 1) boleh disiapkan dan diuji.
 - Keputusan tampilan ditunda ("kita atur nanti").
+
+## 11. Sumber luar yang sudah dibaca (2026-10-22) dan cara memakainya
+**Bahan hipotesis, bukan bukti** (artikel edukasi ritel; sebagian halaman memblokir akses sehingga hanya ringkasan hasil pencarian yang terbaca):
+- Ajaib (cara baca akumulasi/bandarmologi): akumulasi jangka panjang, bertahap, biasanya lebih dari satu broker; pembelian dipecah agar harga tidak langsung naik; net-buy terkonsentrasi
+  di sedikit broker = akumulasi kuat, tersebar di banyak broker = minat ritel; broker konsisten net-buy berminggu-minggu tanpa harga naik; rata-rata beli relatif stabil; distribusi =
+  harga datar/naik tipis, volume tinggi, jual besar asing/institusi, jual tersebar ke banyak broker kecil; distribusi sering berupa letupan pendek setelah berita.
+- Stockbit (Bandar Detector / help center): level Neutral / Small / Normal / Big Acc-Dist, tampilan Top 1 / Top 3 / Top 5 / Average (konsentrasi beberapa broker), B.Avg (harga rata-rata
+  beli) sebagai perkiraan modal bandar; rumus resmi tidak dipublikasikan. Peringatan mereka sendiri: broker summary hanya salah satu alat dan satu broker melayani banyak investor.
+- GitHub `ihkaru/stockbit-explorer`: merekonstruksi rata-rata modal bandar dari broker summary harian 10 hari bursa dan rasio net Top-3 pembeli vs penjual; **tanpa backtest atau validasi**.
+- Tidak ditemukan satu pun proyek IDX publik dengan sinyal broker yang di-backtest -> prior publik rendah; mudah populer karena dijual ke ritel, bukan karena terbukti.
+**Jangkar akademik (broker-level data)**: Frino, Johnstone & Zheng (ASX, 2010): runtun transaksi satu sisi oleh broker yang sama berdampak permanen besar dan transaksi *ukuran menengah* paling
+informatif (stealth trading); studi Helsinki (aliran order broker meramal return, ukuran/gaya broker penting); MPRA 61710 (aliran order broker harian meramal penampang return);
+NBER (broker sentral menghasilkan alfa ~40 bps/bulan); studi dompet Hyperliquid (informativitas persisten, korelasi peringkat 0,52 antar jendela 10 hari); Hanousek & Kopriva (Praha,
+jackknife leave-one-out untuk perilaku market maker); catatan Elliptic: wash trading tampak sebagai putaran beli-jual berukuran serupa dengan net hampir nol.
+Catatan: semua studi itu memakai data transaksi berpengenal broker per order, lebih kaya daripada top-10 harian IPOT; transfer ke data kita bersifat hipotesis.
