@@ -134,3 +134,23 @@ informatif (stealth trading); studi Helsinki (aliran order broker meramal return
 NBER (broker sentral menghasilkan alfa ~40 bps/bulan); studi dompet Hyperliquid (informativitas persisten, korelasi peringkat 0,52 antar jendela 10 hari); Hanousek & Kopriva (Praha,
 jackknife leave-one-out untuk perilaku market maker); catatan Elliptic: wash trading tampak sebagai putaran beli-jual berukuran serupa dengan net hampir nol.
 Catatan: semua studi itu memakai data transaksi berpengenal broker per order, lebih kaya daripada top-10 harian IPOT; transfer ke data kita bersifat hipotesis.
+
+## 12. Hasil Fase 0 dan Fase 1 pada data dev (2026-10-22; 30 saham likuid x 31 hari, varian all/F/D; file `research/ipot_dev.sqlite`)
+Kode: `research/ipot_explore/` (`common.py`, `audit.py`, `features.py`, `test_features.py`); `python -m research.ipot_explore.audit --db ...`, `... .features --db ...`,
+`... .test_features` (tes sintetis: batas net, pola rutin/letupan/churn). Data dev diunduh dengan `research/ipot_backfill.py --top 30 --start 2026-09-09 --end 2026-10-21
+--variants all/all,F/all,D/all --db research/ipot_dev.sqlite` (2.780 panggilan, ±3,5 menit, tanpa blokir).
+Temuan audit:
+- **Cakupan top-10 besar**: nilai beli yang tampak median 83% dari nilai transaksi OHLCV (P10 72%, P90 ~102%; >100% karena IPOT mencakup papan negosiasi/tunai), 0% hari di bawah 40%.
+  Jadi pada saham likuid, net broker teratas dapat diperkirakan dengan batas yang sempit (jauh lebih baik dari kekhawatiran awal). Perlu dicek ulang pada saham kurang likuid.
+- Konsistensi internal baik: val/(lot*100) vs harga rata-rata median 0,24% (pembulatan 0,1 M/B/T); (F + D)/all median 1,000 (P10 0,989, P90 1,005); harga rata-rata beli di luar rentang
+  harga hari itu hanya 3,1% baris (kemungkinan papan negosiasi).
+- 73 kode broker; broker besar selalu hadir. **Dua-sisi berkorelasi dengan ukuran**: XL 96%, CC 96%, AK 92% hari dua-sisi (median baris dua-sisi 51%). Maka "dua-sisi" TIDAK cukup untuk
+  menandai market maker; harus disesuaikan ukuran (net/kotor kecil + kesimetrisan harga + persisten) dan dibandingkan dengan perilaku broker ritel agregat seperti XL.
+- Rekonsiliasi dengan RapidAPI belum bisa dijalankan di laptop (baris harian tunggal hanya ada di VPS); jalankan audit di salinan VPS atau salin `broker_flow_history.sqlite`.
+Temuan atlas fitur (bentuk distribusi saja, bukan kesimpulan):
+- **Definisi pertama "rutin" (top-3 pembeli kotor) jenuh**: median 0,9 dan 85% hari >= 0,6, karena broker besar selalu ada. Diganti `routine_net_score` (top-3 pembeli NET, hanya net>0): median 0,56,
+  >= 0,6 pada 42% hari. `routine_gross_*` dipertahankan hanya sebagai kontrol ukuran. Tambahan: `dom_pos_days` (porsi hari akumulator dominan menjadi pembeli net).
+- `churn_share` median 0,58 (jenuh oleh broker besar dua-sisi) -> pada tahap analisis pakai z-score terhadap riwayat ticker itu sendiri dan dibanding broker lain, bukan nilai mentah.
+- `burst_ratio` median 1,0, >=3 pada 3,9% hari; dibatasi maksimum 20 (basis kecil membuat rasio meledak).
+- Hindari tabrakan nama: fitur harga mundur bernama `past_ret_10d`, hasil maju `ret_{1,3,5,10}d` / `rel_*` / `mfe_5d` / `mae_5d` (entry = open t+1).
+Berikutnya: mesin 1 (sapuan univariat dengan null permutasi) dan mesin 7 (modul plafon MM) pada data penuh setelah backfill 12 bulan + perpanjangan 2024.
