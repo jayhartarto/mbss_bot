@@ -82,7 +82,21 @@ mengeceknya di aplikasi (apa yang dilihat di broker summary / running trade), da
 `mm_ceiling.py`, `report.py`. Data masuk: `research/ipot_broker_daily.sqlite` (VPS -> laptop setelah backfill selesai), OHLCV, regime, tabel lane.
 Pemeriksaan awal dan atlas fitur bisa mulai dengan data kecil di laptop; pencarian sungguhan menunggu backfill 12 bulan selesai.
 
-## 9. Keputusan terbuka
-- Perpanjang riwayat ke 2024 (lebih banyak regime, +sekitar 8-10 jam di VPS) sebelum kesimpulan akhir?
-- Tampilan: hanya baris informasi `/check`, atau juga masuk bundel `/tanya`?
-- Seberapa jauh aturan "indikasi" boleh lebih longgar dari aturan tag (mis. replikasi 2 dari 3 blok)?
+## 9. Dua tujuan hasil, dua standar bukti (keputusan pengguna 2026-10-22)
+**Jalur 1 - Penguat conviction di lane yang sudah ada.** Pertanyaan: apakah fitur broker menaikkan hasil *di dalam* sel lane x regime yang sudah ada
+(BELI-A/B/NETRAL), mis. memisahkan pick OSB-v2 yang baik dari yang buruk, atau mengangkat BOW/BOS di BOUNCE_OFF_LOW ke BELI-A (hipotesis lama yang gagal
+dengan booster OHLCV/FF: p=0,29 terhadap null). Standar: kenaikan win/rata-rata *di dalam sel* yang replikasi searah di >=2 blok waktu, lolos null permutasi,
+n minimum per sub-kelompok >=30. Keluaran: baris informasi atau penanda pada pick (mis. "🔎 broker mendukung/menolak"), tidak mengubah level tag tanpa persetujuan terpisah.
+**Jalur 2 - Lane baru murni dari broker summary / bandarmology / market maker.** Standar lebih berat, setara lane produksi: aturan masuk yang sederhana (<=3 syarat),
+mekanik keluar tetap (TP/SL/maks hari) disimulasikan seperti lane lain, populasi >=200 transaksi dengan dedup per ticker per episode, hasil per regime (bukan hanya agregat),
+replikasi waktu dengan embargo, dan **tidak tumpang tindih** dengan lane yang ada (cek korelasi hari-sinyal; ingat irisan lane terbukti tanpa edge). Lalu masuk ke
+tabel scorecard dengan aturan tag yang sama (BELI-A/B butuh n>=30 per sel, win/rata-rata/CI). Lane baru *tidak* dibuat dari ambang yang dioptimalkan pada seluruh data.
+Kesimpulan "belum ada lane baru" adalah hasil yang sah.
+Kelonggaran "indikasi" (disetujui): untuk kartu indikasi yang dicek manual di aplikasi, replikasi 2 dari 3 blok cukup; tetap wajib lolos null permutasi.
+
+## 10. Jadwal & ketergantungan
+- Backfill 12 bulan (150 ticker, 4 varian) sedang berjalan di VPS; setelah selesai, unduh `research/ipot_broker_daily.sqlite` ke laptop.
+- **Jumat malam 2026-10-23, setelah `/eodscan` malam selesai:** perpanjang riwayat ke 2024-10-01..2025-09-30 dengan skrip yang sama (resumable),
+  perkiraan 8-10 jam; gabungkan DB lama dan baru (`engine/ipot_broker.merge_into`). Hasil: ~24 bulan, mencakup episode crash 2025 dan 2026 sehingga bisa diuji lintas regime.
+- Sementara itu, di data kecil laptop: Fase 0 (audit) dan skrip atlas fitur (Fase 1) boleh disiapkan dan diuji.
+- Keputusan tampilan ditunda ("kita atur nanti").
