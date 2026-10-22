@@ -166,3 +166,20 @@ Pelajaran yang sekarang tertanam di kode:
 3. **Selalu laporkan efek minimum yang terdeteksi (MDE)** lewat kontrol positif. Pada data dev (30 saham x ~21 hari berhasil): suntikan +3% pada rel_5d tidak terdeteksi (t 5,3 tetapi p_adj 0,97),
    +6% terdeteksi (peringkat #1, p_adj 0,003) -> MDE sekitar 5% selisih 5-hari. Data penuh (150 saham x ~24 bulan) harus diuji ulang dengan kontrol positif yang sama sebelum menyimpulkan 'tidak ada efek'.
 Hasil pada data dev sendiri: tidak ada bin yang lolos (konsisten dengan data sependek itu); 'tidak ada temuan' di sini BUKAN bukti tidak adanya efek kecil.
+
+## 14. Mesin 7 - modul plafon market maker (dibangun 2026-10-22; `research/ipot_explore/mm_ceiling.py`, tes `test_mm.py`)
+Hipotesis pengguna dirumuskan terukur: broker rujukan (MM) -> harga rata-rata jualnya (VWAP jual 10 hari) sebagai plafon mark-up; diuji dengan harga tertinggi 5 dan 10 hari berikutnya,
+dipisah menurut ritel sedang keluar (net jual kelas aplikasi ritel).
+Temuan metodologis (data dev, 30 saham x ~21 hari berhasil; semuanya deskriptif):
+1. **Aturan simetri (dua sisi + lot seimbang + net kecil + spread kecil) TIDAK mengisolasi market maker**: 43% broker besar lolos, didominasi XL, CC, AK, YP, XC, PD (aplikasi ritel dan
+   institusi besar), karena semua broker besar memang dua sisi dan seimbang di jendela 10 hari. Dua-sisi mengikuti ukuran.
+2. **Sidik jari perilaku memisahkan jenis broker** (korelasi net hari t dengan return hari t, pooled 30 saham): aplikasi ritel kontrarian/pembeli dip (XL -0,24; YP -0,32; XC -0,31), institusi
+   asing dan sebagian lain pengejar harga (AK +0,14; YU +0,13; AZ +0,18); korelasi ke return esok ~0. Ini bahan utama klaster perilaku (mesin 3).
+3. Mode kedua dibangun: **counterparty** = broker non-ritel yang net-nya bergerak berlawanan dengan net kelas ritel (cp_corr <= -0,30, pangsa >= 4%, hadir >= 70% hari). Pertanyaan yang lebih
+   tajam daripada 'siapa MM' adalah 'siapa lawan transaksi ritel'. Hasil dev: yang terpilih AK, CC, ZP, YU, MG, BK (institusi/asing/scalper), bukan aplikasi ritel.
+4. **Plasebo pertama saya SALAH** (mengacak jarak acuan antar saham pada tanggal yang sama): memutus kaitan jarak dengan volatilitas saham dan menghasilkan 'plafon' palsu (p=0,003 di jarak 5-10%).
+   Diganti `placebo_other_brokers`: bandingkan tingkat sentuh acuan broker rujukan dengan acuan broker besar acak LAIN pada saham-hari yang sama (volatilitas dan jendela sama), per ember jarak.
+   Terbukti dengan dua tes sintetis (mendeteksi plafon sungguhan p=0,010; tidak menciptakan plafon bila rujukan hanya broker biasa p=0,91).
+5. Hasil dev dengan plasebo benar: tingkat sentuh broker rujukan = broker acak (selisih ~+0,5 sampai +1 poin; p_ref_lower 0,5-0,8; mode counterparty -0,4 poin, p 0,36). **Tidak ada bukti plafon pada data dev**;
+   daya uji rendah (n efektif jauh lebih kecil dari 448 baris karena hari-hari tumpang tindih). Ujian sebenarnya pada data penuh 24 bulan, dipisah per regime dan per kelas broker.
+Berikutnya: klaster perilaku (mesin 3) untuk kelas broker yang tidak statis, mesin keterampilan broker (mesin 4), dan menjalankan semua mesin pada data penuh dengan kontrol positif/daya (MDE) lebih dulu.
