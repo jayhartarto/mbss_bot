@@ -5095,6 +5095,7 @@ OUTPUT STYLE:
 
 import engine.tanya_knowledge as tanya_knowledge  # no imports of its own -> no cycle
 TANYA_INSTRUCTION = tanya_knowledge.build_instruction()
+MORNING_BRIEF_V2_INSTRUCTION = tanya_knowledge.build_instruction(tanya_knowledge.BRIEF_BASE)  # /testbrief since 2026-10-22
 
 
 def get_portfolio_reasoning_and_synthesis(combined_data: list, portfolio_context: str) -> dict:
@@ -5530,7 +5531,6 @@ async def run_morning_brief(context: ContextTypes.DEFAULT_TYPE):
             print("📅 Skipping Morning Brief — IDX market holiday today.")
             return
 
-        sharia_universe = fetch_online_sharia_list()
 
         # Broader market backdrop: Wall St overnight, regional Asia, USD/IDR, oil,
         # plus real Indonesian market news headlines. Fetched once for the whole
@@ -5548,79 +5548,37 @@ async def run_morning_brief(context: ContextTypes.DEFAULT_TYPE):
                 parts.append(f"Recent Indonesian market/economy headlines:\n{news_lines}")
             extra_context_str = "\n\n".join(parts)
 
-        full_universe_list = list(sharia_universe)
-        sharia_universe_list = await asyncio.to_thread(load_or_build_whitelist, full_universe_list)
-        print(f"📡 Fetching {len(sharia_universe_list)} eligible tickers (of {len(full_universe_list)} total) "
-              f"— cek cache scan malam dulu, sisanya via fetch chunks of {ITICK_CHUNK_SIZE} "
-              f"with {ITICK_COOLDOWN_SECONDS}s cooldowns...")
+        # 2026-10-22: the brief no longer picks the 10 highest FINAL-SCORE stocks (that ranking has no validation) and no longer asks
+        # Gemini to restate action_label_id. Gemini now gets the same validated context as /tanya: IHSG regime + the lane x regime
+        # scorecard cells for today + every active pick with its tag (BELI-A/B, TAHAN, KELUAR, NETRAL), reason, warnings and
+        # corporate-action window (engine/gemini_context.py), plus the macro/news snapshot above. Web search is on with the usual
+        # fallback to bot data only. If Gemini fails, a deterministic tag summary is still sent.
+        import engine.gemini_context as gemini_context
+        lane_tags = await asyncio.to_thread(gemini_context.lane_tag_bundle)
+        brief_bundle = {
+            "lane_tags": lane_tags,
+            "macro_indices_pct_change_most_recent_session": macro_context or None,
+            "market_news_headlines": [h["title"] for h in (news_headlines or [])][:15],
+        }
+        tag_counts = lane_tags.get("tag_counts") or {}
+        fallback_text = (
+            "🌅 Morning Brief (ringkas, tanpa narasi Gemini)" + chr(10) +
+            f"Regime IHSG: {(lane_tags.get('regime') or {}).get('phase', 'tidak diketahui')}" + chr(10) +
+            ("Pick aktif per tag: " + ", ".join(f"{k} {v}" for k, v in tag_counts.items()) if tag_counts else "Tidak ada pick aktif.")
+        )
         try:
-            # fetch_tickers_scored_with_cache() cek cache bersama (dari scan malam
-            # 22:00 WIB) dulu — kalau ISSI sudah tercakup dalam cache ISSI liquid
-            # semalam, ini jadi nyaris instan, tanpa panggilan iTick baru sama sekali.
-            analyzed_dataset, skip_reasons = await asyncio.wait_for(
-                asyncio.to_thread(nightly_engine.fetch_tickers_scored_with_cache, sharia_universe_list), timeout=1800
-            )
-        except asyncio.TimeoutError:
-            print("⏱️ Overall fetch exceeded the 20-minute timeout — aborting this run.")
-            await safe_reply(
-                context.bot,
-                "⚠️ Morning Brief gagal: proses pengambilan data melebihi batas waktu.",
-                chat_id=TELEGRAM_CHAT_ID,
-            )
-            return
-
-        if not analyzed_dataset:
-            print("No Sharia stocks compiled. Skipping send.")
-            # Real diagnostic summary sent directly to Telegram — console scrollback
-            # isn't reliable for a run this long, so this is the trustworthy record
-            # of what actually happened, not just "0 results" with no explanation.
-            reason_lines = "\n".join(f"- {t}: {r}" for t, r in list(skip_reasons.items())[:20])
-            more_note = f"\n...dan {len(skip_reasons) - 20} lainnya" if len(skip_reasons) > 20 else ""
-            await safe_reply(
-                context.bot,
-                f"⚠️ Morning Brief gagal: 0 dari {len(sharia_universe_list)} saham berhasil diproses.\n\n"
-                f"Alasan per saham:\n{reason_lines}{more_note}",
-                chat_id=TELEGRAM_CHAT_ID,
-            )
-            return
-
-        if skip_reasons:
-            print(f"ℹ️ {len(skip_reasons)} of {len(sharia_universe_list)} tickers skipped: "
-                  f"{list(skip_reasons.keys())[:15]}{'...' if len(skip_reasons) > 15 else ''}")
-
-        # Only send the highest-scoring picks, not the full universe.
-        analyzed_dataset.sort(key=lambda s: s["scores"]["final"], reverse=True)
-        top_picks = analyzed_dataset[:MORNING_BRIEF_TOP_N]
-
-        # 2026-10-22: /testbrief no longer locks its top picks into daytrade_picks_history.json (source="testbrief"): that family is
-        # retired and its resolver was removed from the nightly job, so new locks would stay pending forever.
-
-        # Compute this deterministically rather than trusting the LLM to count
-        # across a 10-item list itself — that was silently failing to trigger the
-        # batch-wide caution note even when the majority of stocks qualified.
-        caution_count = sum(
-            1 for s in top_picks
-            if s.get("is_overbought_caution") or s.get("obv_divergence") == "bearish_divergence"
-            or (isinstance(s.get("cmf"), (int, float)) and s["cmf"] < -0.05)
-        )
-        caution_note = (
-            f"\n\nDETERMINISTIC FACT (not your judgment call — this count is computed, use it): "
-            f"{caution_count} of {len(top_picks)} stocks in this batch show overbought caution, "
-            f"bearish OBV divergence, or negative CMF. "
-            + (
-                "This is a MAJORITY — you MUST open with an explicit market-wide caution note "
-                "reflecting this, and your batch should skew meaningfully more conservative overall."
-                if caution_count > len(top_picks) / 2
-                else "This is not yet a majority, but still weigh it into your overall framing."
-            )
-        )
-        combined_context = (extra_context_str or "") + caution_note
-
-        morning_brief_text = ask_gemini_to_analyze(
-            top_picks, MORNING_BRIEF_INSTRUCTION, extra_context=combined_context
-        )
+            morning_brief_text = await asyncio.to_thread(
+                ask_gemini_chat, [], "Buatkan Morning Brief hari ini sesuai format.", json.dumps(brief_bundle, default=str, ensure_ascii=False),
+                MORNING_BRIEF_V2_INSTRUCTION, 3, True)
+        except Exception as gem_err:
+            print(f"⚠️ Gemini morning brief gagal, kirim ringkasan deterministik: {gem_err}")
+            morning_brief_text = fallback_text
         await safe_reply(context.bot, morning_brief_text, chat_id=TELEGRAM_CHAT_ID)
-        print(f"✅ Telegram Sharia Morning Brief sent! (top {len(top_picks)} of {len(analyzed_dataset)} scored)")
+        hidden_n = len(lane_tags.get("hidden_hindari") or [])
+        footer = ("Tag: 🟢A BELI-A | 🟡B BELI-B | 🔵 TAHAN | 🔴 KELUAR | ⚪ NETRAL (dari scorecard lane x regime backtest)"
+                  + (f"{chr(10)}🚫 {hidden_n} pick HINDARI disembunyikan (lihat /swing)." if hidden_n else ""))
+        await safe_reply(context.bot, footer, chat_id=TELEGRAM_CHAT_ID)
+        print(f"✅ Telegram Morning Brief (lane/tag) sent! picks per tag: {tag_counts}")
 
         # MBSS v2 (RapidAPI integration, user request) — "Longer-Horizon
         # Watchlist" — pesan KEDUA, TERPISAH dari brief Gemini di atas (pure

@@ -210,45 +210,19 @@ def _build_extra_context(mentioned: list) -> dict:
 
 def _build_context_bundle(scored: dict, staleness_note, portfolio: dict, live_data: dict, extra: dict | None = None) -> dict:
     """Ringkasan konteks pasar buat Gemini — bukan seluruh field mentah scoring, biar fokus & hemat token."""
-    broksum_data = nightly_engine.load_broksum_250()
-    backbone_result, _ = nightly_engine.load_backbone_daily_allow_stale()
-    market_regime = (backbone_result or {}).get("market_regime")
-    qualifying, multi_broker_lines = commands_scan.compute_consensus_candidates(scored, broksum_data, market_regime)
-
-    consensus_summary = [{
-        "ticker": r["ticker"], "tools": r["_consensus_tools"],
-        "final_score": r.get("scores", {}).get("final"),
-        "action_id": r.get("action_id"),
-        "risk_reward_at_max": r.get("targets", {}).get("risk_reward_at_max"),
-    } for r in qualifying[:TANYA_CONSENSUS_TOP_N]]
-
-    # MBSS v2 (user request 2026-08-30): is_high_conviction GANTI TOTAL ke
-    # commands_scan._daytrade_wr_tp1 -- lihat docstring helper itu utk
-    # alasan/riwayat audit Task #21. WR individual dari model dipakai
-    # langsung (bukan lagi compute_daytrade_score momentum-murni).
-    hc_wr_pairs = commands_scan._compute_daytrade_wr_candidates(list(scored.values()))
-    hc_summary = [{
-        "ticker": r["ticker"], "wr_pct": info["wr_pct"], "tp1_price": info["price"],
-        "final_score": r.get("scores", {}).get("final"),
-        "risk_reward_at_max": r.get("targets", {}).get("risk_reward_at_max"),
-    } for r, info in hc_wr_pairs[:TANYA_HC_TOP_N]]
-
-    positions = portfolio.get("positions", {})
-    portfolio_summary = {
-        "cash_idr": portfolio.get("cash", 0.0),
-        "positions": [
-            {"ticker": t, "lots": p["lots"], "avg_price": p["avg_price"]}
-            for t, p in positions.items()
-        ],
-        "watchlist": portfolio.get("watchlist", []),
-    }
+    # 2026-10-22: the retired lenses (consensus intersections, /hc high conviction, multi-broker accumulation, manual portfolio) are no
+    # longer fed to Gemini -- none had measurable edge and the user no longer keeps positions in the bot. Replaced by the validated
+    # lane/tag bundle (regime, scorecard cells for today's regime, every active pick with tag + reason + warnings), see engine/gemini_context.py.
+    import engine.gemini_context as gemini_context
+    try:
+        lane_tags = gemini_context.lane_tag_bundle()
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ /tanya: lane_tags gagal: {e}")
+        lane_tags = {"unavailable": [f"lane_tags ({str(e)[:60]})"]}
 
     return {
         "cache_staleness_warning": staleness_note or None,
-        "cross_tool_consensus_top_picks": consensus_summary,
-        "high_conviction_top_picks": hc_summary,
-        "multi_broker_accumulation": [line for _, line in multi_broker_lines[:5]],
-        "user_portfolio": portfolio_summary,
+        "lane_tags": lane_tags,
         "live_data_for_tickers_mentioned_in_question": live_data,
         **({"bot_context_2026_10": extra} if extra else {}),
     }
