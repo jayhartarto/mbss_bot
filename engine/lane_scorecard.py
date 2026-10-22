@@ -201,6 +201,9 @@ B_ALT_WIN, B_ALT_MEAN = 55.0, 2.0    # ... OR win >= 55% with mean >= +2.0% and 
 # Trading days after the trigger in which a NEW entry is still sensible. Adjustable assumption: after this the pick is TAHAN.
 ENTRY_WINDOW_DAYS = {"BOW": 2, "OSB-v2": 3, "VCP": 2, "MACD-confirm": 1, "BOS": 2}
 EXIT_RECENT_DAYS = 3                 # a resolved pick shows KELUAR for this many calendar days after resolved_date
+# Lanes whose level is NOT lowered by the EXT / spike warnings (the warning line still shows). User decision 2026-10-22: OSB-v2 picks
+# flagged EXT still meet the BELI-A bar on their own numbers (late half: win 73.8%, mean +3.64%, n=84).
+NO_DOWNGRADE_LANES = {"OSB-v2"}
 TAG_STYLE = {"A": ("🟢", "BELI-A"), "B": ("🟡", "BELI-B"), "TAHAN": ("🔵", "TAHAN"), "KELUAR": ("🔴", "KELUAR"),
              "NETRAL": ("⚪", "NETRAL"), "HINDARI": ("🚫", "HINDARI")}
 TAG_MARK = {"A": "🟢A", "B": "🟡B", "TAHAN": "🔵", "KELUAR": "🔴", "NETRAL": "⚪", "HINDARI": "🚫"}
@@ -289,7 +292,7 @@ def classify(lane: str, p: dict, last_close: float | None = None) -> dict:
     if lvl == "NA":
         return {"tag": "NETRAL", "reason": f"bukti {lane} saat {phase or 'regime tak diketahui'} kurang (n<{MIN_N})", "cell": c}
     stats = f"{lane} saat {phase}: win {c['win']:.0f}% | rata-rata {c['mean']:+.1f}% (n={c['n']})"
-    if lvl in ("A", "B") and ev["warn"]:
+    if lvl in ("A", "B") and ev["warn"] and lane not in NO_DOWNGRADE_LANES:
         lvl2 = "B" if lvl == "A" else "NETRAL"
         return {"tag": lvl2, "reason": f"{stats} — turun satu tingkat: {ev['warn'][0]}", "cell": c}
     return {"tag": lvl, "reason": stats, "cell": c}
