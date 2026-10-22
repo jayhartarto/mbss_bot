@@ -278,6 +278,11 @@ def _gather_candidates():
     try:
         import engine.lane_scorecard as lane_scorecard
         out, LAST_HIDDEN_HINDARI = lane_scorecard.partition_candidates(out)
+        for c in out:        # tag level (BELI-A / BELI-B / TAHAN / KELUAR / NETRAL) shown as a marker; never changes the score or order
+            try:
+                c["tag"] = lane_scorecard.classify(lane_scorecard.LANE_OF_RANK_KEY[c["lane_key"]], c["pick"])["tag"]
+            except Exception:  # noqa: BLE001
+                c["tag"] = None
     except Exception as e:  # noqa: BLE001
         print(f"⚠️ /rank: filter HINDARI gagal (diabaikan, semua pick tetap tampil): {e}")
     return out
@@ -356,8 +361,13 @@ def format_rank_message(ranked: list[dict], w_return: float = DEFAULT_W_RETURN, 
         if _bf:
             import engine.broker_flags as _broker_flags
             priority_tag += _broker_flags.short_tag(_bf)
+        try:
+            import engine.lane_scorecard as _ls
+            _mark = _ls.TAG_MARK.get(c.get("tag"), "")
+        except Exception:  # noqa: BLE001
+            _mark = ""
         block = (
-            f"{i}. {ticker} [{s['label']}{priority_tag}] — Score {c['score']:.1f}\n"
+            f"{i}. {(_mark + ' ') if _mark else ''}{ticker} [{s['label']}{priority_tag}] — Score {c['score']:.1f}\n"
             f"   ret/hari≈{s['ret_per_day']:+.2f}% (ann. simple {s['ret_per_day']*252:+.0f}%) | "
             f"win {s['win']:.1f}% (wlb {s['wlb']:.1f}%) | Day {age}"
         )
@@ -378,6 +388,8 @@ def format_rank_message(ranked: list[dict], w_return: float = DEFAULT_W_RETURN, 
         lines.append(block)
     if len(ranked) > top_n:
         lines.append(f"… +{len(ranked) - top_n} pick lain tidak ditampilkan (gunakan /swing untuk daftar lengkap).")
+    lines.append("Tag: 🟢A BELI-A | 🟡B BELI-B | 🔵 TAHAN (lewat jendela entry) | 🔴 KELUAR | ⚪ NETRAL (bukti lane belum cukup). "
+                 "Dari scorecard lane x regime backtest, bukan dari Score di atas; pick HINDARI disembunyikan.")
     lines.append(
         "ℹ️ Score = return/hari + win-rate (Wilson LB) + sisa jarak ke TP (ketiganya dinormalisasi 0-100 "
         "ANTAR pick yang aktif hari ini), SUDAH memperhitungkan pergerakan sejak entry (lihat baris "

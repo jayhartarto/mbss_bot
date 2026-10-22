@@ -773,6 +773,15 @@ async def run_nightly_full_scan(context):
         except Exception as e:
             print(f"⚠️ Gagal mengumpulkan IPOT broker summary: {e}")
 
+        # Corporate-action windows (ex-dividend / rights issue / split) for the active-pick tickers, from IPOT's free feed, so /swing can
+        # show them cache-only (2026-10-22, display-only warnings; see engine/corporate_actions.py).
+        try:
+            from engine import corporate_actions
+            ca_counts = await asyncio.to_thread(corporate_actions.prefetch, ipot_broker.active_pick_tickers())
+            print(f"📅 Corporate actions prefetch: {ca_counts}")
+        except Exception as e:
+            print(f"⚠️ Gagal prefetch corporate actions: {e}")
+
         try:
             await asyncio.to_thread(dividend_calendar_engine.refresh_if_stale)
         except Exception as e:

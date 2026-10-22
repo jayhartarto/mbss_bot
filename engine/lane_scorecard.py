@@ -182,3 +182,127 @@ def hidden_footnote(hidden: list, max_items: int = 8) -> str:
     items = "; ".join(f"{t} ({lane}: {', '.join(r)})" for lane, t, r in hidden[:max_items])
     more = f" +{len(hidden) - max_items} lainnya" if len(hidden) > max_items else ""
     return f"🚫 {len(hidden)} pick disembunyikan (HINDARI): {items}{more}."
+
+
+# ======================================================================================================================
+# Tag levels (BELI-A / BELI-B / TAHAN / KELUAR / NETRAL / HINDARI). Replaces STRONG_BUY / BUY_ACCUMULATE / MIXED_SIGNALS in the
+# views that adopt it (/check first, then /swing markers). Decided from the lane x regime backtest table
+# (engine/lane_scorecard_table.json, built by research/build_lane_scorecard.py) -- NOT from the final score.
+# ======================================================================================================================
+import json
+import os
+
+TABLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lane_scorecard_table.json")
+MIN_N = 30
+A_WIN, A_MEAN = 70.0, 1.0            # BELI-A: win >= 70% AND mean >= +1.0% AND 95% CI lower bound of the mean > 0
+B_WIN, B_MEAN = 60.0, 0.5            # BELI-B: win >= 60% AND mean >= +0.5% ...
+B_MEAN_LO_MIN = -1.0                  # BELI-B also needs the 95% CI lower bound of the mean above this (not clearly <= 0)
+B_ALT_WIN, B_ALT_MEAN = 55.0, 2.0    # ... OR win >= 55% with mean >= +2.0% and CI lower bound > 0 (fat-tail lanes such as BOS)
+# Trading days after the trigger in which a NEW entry is still sensible. Adjustable assumption: after this the pick is TAHAN.
+ENTRY_WINDOW_DAYS = {"BOW": 2, "OSB-v2": 3, "VCP": 2, "MACD-confirm": 1, "BOS": 2}
+EXIT_RECENT_DAYS = 3                 # a resolved pick shows KELUAR for this many calendar days after resolved_date
+TAG_STYLE = {"A": ("🟢", "BELI-A"), "B": ("🟡", "BELI-B"), "TAHAN": ("🔵", "TAHAN"), "KELUAR": ("🔴", "KELUAR"),
+             "NETRAL": ("⚪", "NETRAL"), "HINDARI": ("🚫", "HINDARI")}
+TAG_MARK = {"A": "🟢A", "B": "🟡B", "TAHAN": "🔵", "KELUAR": "🔴", "NETRAL": "⚪", "HINDARI": "🚫"}
+
+_table_cache: dict = {}
+
+
+def _table() -> dict:
+    if "t" not in _table_cache:
+        try:
+            with open(TABLE_PATH, encoding="utf-8") as f:
+                _table_cache["t"] = json.load(f).get("lanes", {})
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ lane_scorecard: tabel scorecard tidak terbaca (tag jadi NETRAL): {e}")
+            _table_cache["t"] = {}
+    return _table_cache["t"]
+
+
+def cell_level(lane: str, phase: str | None) -> tuple[str, dict | None]:
+    """('A'|'B'|'NETRAL'|'NA', cell) for a lane in a regime phase. 'NA' = no cell or n < MIN_N (evidence too thin)."""
+    c = _table().get(lane, {}).get(phase) if phase else None
+    if not c or c["n"] < MIN_N:
+        return "NA", c
+    lo = c.get("mean_lo")
+    if c["win"] >= A_WIN and c["mean"] >= A_MEAN and lo is not None and lo > 0:
+        return "A", c
+    if (c["win"] >= B_WIN and c["mean"] >= B_MEAN and lo is not None and lo > B_MEAN_LO_MIN) or             (c["win"] >= B_ALT_WIN and c["mean"] >= B_ALT_MEAN and lo is not None and lo > 0):
+        return "B", c
+    return "NETRAL", c
+
+
+def _last_close(ticker: str) -> float | None:
+    try:
+        df = core.get_ohlcv_daily_from_db(ticker, 5)
+        return float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _exit_reason(p: dict, last_close: float | None) -> str | None:
+    """KELUAR reason from the pick's own state: resolved recently, or price already through its SL / main TP."""
+    st = p.get("status")
+    if st and st not in ("ALIVE", "LEGACY_CLOSED"):
+        rd = p.get("resolved_date")
+        try:
+            recent = rd is None or (datetime.date.today() - datetime.date.fromisoformat(str(rd)[:10])).days <= EXIT_RECENT_DAYS
+        except Exception:  # noqa: BLE001
+            recent = True
+        if recent:
+            what = "TP tercapai" if "TP" in str(st).upper() else "SL kena" if "SL" in str(st).upper() else "habis horizon" if "EXPIRED" in str(st).upper() else str(st)
+            ret = p.get("resolved_ret_pct")
+            return f"{what}{f' ({ret:+.1f}%)' if ret is not None else ''}"
+        return None
+    if last_close is None:
+        return None
+    sl = p.get("sl_price")
+    if sl and last_close <= sl:
+        return f"harga {last_close:,.0f} sudah di/bawah SL {sl:,.0f}"
+    tp = p.get("tp_price") or p.get("tp2_price") or p.get("tp1_price")
+    if tp and last_close >= tp:
+        return f"harga {last_close:,.0f} sudah mencapai TP {tp:,.0f}: ambil untung"
+    return None
+
+
+def classify(lane: str, p: dict, last_close: float | None = None) -> dict:
+    """{'tag': A|B|TAHAN|KELUAR|NETRAL|HINDARI, 'reason': str, 'cell': dict|None} for one lane pick (priority: KELUAR > HINDARI >
+    TAHAN > BELI-A/B > NETRAL). EXT / spike warnings downgrade BELI-A -> BELI-B and BELI-B -> NETRAL."""
+    t = p["ticker"]
+    trig = p.get("trigger_date")
+    if last_close is None:
+        last_close = _last_close(t)
+    exit_r = _exit_reason(p, last_close)
+    if exit_r:
+        return {"tag": "KELUAR", "reason": exit_r, "cell": None}
+    if p.get("status") not in (None, "ALIVE"):
+        return {"tag": "NETRAL", "reason": "pick lama, sudah selesai", "cell": None}
+    ev = evaluate(lane, t, trig)
+    if ev["hindari"]:
+        return {"tag": "HINDARI", "reason": "; ".join(ev["hindari"]), "cell": None}
+    age = int(p.get("age_days", 1) or 1)
+    if age > ENTRY_WINDOW_DAYS.get(lane, 2):
+        note = ", TP1 sudah tersentuh" if p.get("tp1_touched") else ""
+        return {"tag": "TAHAN", "reason": f"hari ke-{age}, lewat jendela entry baru{note}", "cell": None}
+    phase = regime_phase_on(trig) if trig else None
+    lvl, c = cell_level(lane, phase)
+    if lvl == "NA":
+        return {"tag": "NETRAL", "reason": f"bukti {lane} saat {phase or 'regime tak diketahui'} kurang (n<{MIN_N})", "cell": c}
+    stats = f"{lane} saat {phase}: win {c['win']:.0f}% | rata-rata {c['mean']:+.1f}% (n={c['n']})"
+    if lvl in ("A", "B") and ev["warn"]:
+        lvl2 = "B" if lvl == "A" else "NETRAL"
+        return {"tag": lvl2, "reason": f"{stats} — turun satu tingkat: {ev['warn'][0]}", "cell": c}
+    return {"tag": lvl, "reason": stats, "cell": c}
+
+
+def classify_lookup(ticker: str) -> dict:
+    """Tag for a ticker that is not an active pick (plain /check lookup): HINDARI only on the documented generic rules."""
+    ev = evaluate(None, ticker.upper(), None)
+    if ev["hindari"]:
+        return {"tag": "HINDARI", "reason": "; ".join(ev["hindari"]), "cell": None}
+    return {"tag": "NETRAL", "reason": "bukan pick aktif di lane mana pun", "cell": None}
+
+
+def tag_text(d: dict) -> str:
+    icon, name = TAG_STYLE[d["tag"]]
+    return f"{icon} {name} — {d['reason']}"

@@ -129,51 +129,81 @@ def risk_tags(ticker: str) -> list[str]:
     return tags
 
 
-def active_pick_lanes(ticker: str) -> list[tuple[str, str | None]]:
-    """[(lane, trigger_date)] for every lane where `ticker` has an ALIVE pick (the keys engine.lane_scorecard uses)."""
+def pick_lanes(ticker: str, include_recent_resolved: bool = True) -> list[tuple[str, dict]]:
+    """[(lane, pick)] for every lane where `ticker` has an ALIVE pick, plus (optionally) picks resolved within the last few days so
+    /check can say KELUAR. Lane keys are the ones engine.lane_scorecard uses."""
+    import datetime
     import engine.buy_on_weakness as bow
     import engine.oversold_bounce_v2 as osb
     import engine.vcp_pillar as vcp
     import engine.macd_confirm_pillar as mc
     import engine.buy_on_strength as bos
+    import engine.lane_scorecard as lane_scorecard
 
     t = ticker.upper()
-    pairs: list[tuple[str, str | None]] = []
+    out: list[tuple[str, dict]] = []
     for lane, mod, fn in (("BOW", bow, "load_buy_on_weakness_picks"), ("OSB-v2", osb, "load_oversold_bounce_v2_picks"),
                           ("VCP", vcp, "load_vcp_picks"), ("MACD-confirm", mc, "load_macd_confirm_picks"),
                           ("BOS", bos, "load_buy_on_strength_picks")):
         for p in _picks(mod, fn):
-            if p.get("ticker") == t and p.get("status") == "ALIVE":
-                pairs.append((lane, p.get("trigger_date")))
-    return pairs
+            if p.get("ticker") != t:
+                continue
+            if p.get("status") == "ALIVE":
+                out.append((lane, p))
+            elif include_recent_resolved and p.get("status") not in (None, "LEGACY_CLOSED") and p.get("resolved_date"):
+                try:
+                    days = (datetime.date.today() - datetime.date.fromisoformat(str(p["resolved_date"])[:10])).days
+                except Exception:  # noqa: BLE001
+                    continue
+                if days <= lane_scorecard.EXIT_RECENT_DAYS:
+                    out.append((lane, p))
+    return out
 
 
-def verdict(ticker: str) -> tuple[list[str], list[str]]:
-    """(hindari reasons, warning reasons) over every active pick lane, or the plain-lookup rules when it is not a pick.
-    Rules and evidence: engine/lane_scorecard.py. Best-effort: any failure -> no verdict."""
+_TAG_PRIORITY = {"KELUAR": 0, "HINDARI": 1, "TAHAN": 2, "A": 3, "B": 4, "NETRAL": 5}
+
+
+def tag_lines(ticker: str) -> tuple[list[str], list[str]]:
+    """(tag lines, warning reasons). Tag lines are the new BELI-A / BELI-B / TAHAN / KELUAR / NETRAL / HINDARI verdicts (most urgent
+    first); warnings are the lane-specific cautions (EXT, spike). Best-effort: a failure returns a plain NETRAL line."""
     try:
         import engine.lane_scorecard as lane_scorecard
-        hindari: list[str] = []
+        picks = pick_lanes(ticker)
+        if not picks:
+            d = lane_scorecard.classify_lookup(ticker)
+            ev = lane_scorecard.evaluate(None, ticker.upper(), None)
+            return [lane_scorecard.tag_text(d)], list(ev["warn"])
+        decided = sorted(((lane_scorecard.classify(lane, p), lane, p) for lane, p in picks), key=lambda x: _TAG_PRIORITY[x[0]["tag"]])
         warn: list[str] = []
-        for lane, date in (active_pick_lanes(ticker) or [(None, None)]):
-            ev = lane_scorecard.evaluate(lane, ticker.upper(), date)
-            hindari += [r for r in ev["hindari"] if r not in hindari]
-            warn += [r for r in ev["warn"] if r not in warn]
-        return hindari, warn
+        for lane, p in picks:
+            if p.get("status") == "ALIVE":
+                warn += [w for w in lane_scorecard.evaluate(lane, ticker.upper(), p.get("trigger_date"))["warn"] if w not in warn]
+        return [lane_scorecard.tag_text(d) for d, _, _ in decided[:3]], warn
     except Exception as e:  # noqa: BLE001
-        print(f"⚠️ check_status: verdict gagal (diabaikan): {e}")
-        return [], []
+        print(f"⚠️ check_status: tag gagal (diabaikan): {e}")
+        return ["⚪ NETRAL — tag tidak bisa dihitung"], []
+
+
+def corporate_action_lines(ticker: str) -> list[str]:
+    """Ex-dividend / rights issue / split inside the next ~25 days (one live IPOT fetch for this ticker, 12h cache)."""
+    try:
+        import engine.corporate_actions as corporate_actions
+        return corporate_actions.window_lines(ticker, allow_fetch=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ check_status: corporate action gagal (diabaikan): {e}")
+        return []
 
 
 def build_status_block(ticker: str) -> str:
-    """The block shown at the top of /check message 1: HINDARI verdict (if any), lane lines, one regime line, one line per tag."""
-    lines = lane_status(ticker) or ["🧭 Bukan pick aktif"]
-    hindari, warn = verdict(ticker)
-    if hindari:
-        lines.insert(0, "🚫 HINDARI — " + "; ".join(hindari))
+    """The block shown at the top of /check message 1: tag verdict, lane lines, one regime line, warnings, corporate-action windows,
+    one line per risk tag."""
+    tags, warn = tag_lines(ticker)
+    lines = list(tags)
+    lines += lane_status(ticker)
     reg = regime_line()
     if reg:
         lines.append(reg)
     lines += [f"⚠️ {w}" for w in warn]
+    lines += corporate_action_lines(ticker)
     lines += risk_tags(ticker)
-    return "\n".join(lines)
+    return chr(10).join(lines)

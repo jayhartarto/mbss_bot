@@ -4325,12 +4325,22 @@ async def swing_command(update, context):
     # Fail-open: any evaluation error keeps the pick visible. The persisted pick still tracks/resolves in the background.
     import engine.lane_scorecard as lane_scorecard
 
+    _swing_tags = {}
+
+    def _mk(lane, p):
+        return lane_scorecard.TAG_MARK.get(_swing_tags.get((lane, p["ticker"])), "") + " " if _swing_tags.get((lane, p["ticker"])) else ""
+
     def _apply_hindari():
         hidden_all = []
         out = []
         for lane, picks in (("BOW", bow_active), ("OSB-v2", osb_active), ("VCP", vcp_active),
                             ("MACD-confirm", macd_confirm_active), ("BOS", bos_active)):
             kept, hidden = lane_scorecard.partition(lane, picks)
+            for kp in kept:     # tag level marker (BELI-A/B, TAHAN, KELUAR, NETRAL); never reorders or hides
+                try:
+                    _swing_tags[(lane, kp["ticker"])] = lane_scorecard.classify(lane, kp)["tag"]
+                except Exception as _e:  # noqa: BLE001
+                    print(f"⚠️ /swing: tag {lane} {kp.get('ticker')} gagal (diabaikan): {_e}")
             out.append(kept)
             hidden_all += hidden
         return out, hidden_all
@@ -4380,7 +4390,7 @@ async def swing_command(update, context):
         note_line = f"\n{note}" if note else ""
 
         lines.append(
-            f"{fire} {p['ticker']} — Tier {tier}{priority_tag}\n"
+            f"{_mk('BOW', p)}{fire} {p['ticker']} — Tier {tier}{priority_tag}\n"
             f"{age_label}\n"
             f"Entry: {p['entry_low']:,.0f} - {p['entry_high']:,.0f}\n"
             f"SL: {p['sl_price']:,.0f}\n"
@@ -4409,7 +4419,7 @@ async def swing_command(update, context):
         macd_note = f", MACD {p['macd_line_pct_at_trigger']:.1f}%" if p.get("macd_line_pct_at_trigger") is not None else ""
         tier1_tag = " 🏆 TIER1 (RSI+MACD, CRASH_FAST)" if p.get("tier") == "TIER1" else ""
         lines.append(
-            f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger{macd_note}){ff_tag}{priority_tag}{tier1_tag}\n"
+            f"{_mk('OSB-v2', p)}{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger{macd_note}){ff_tag}{priority_tag}{tier1_tag}\n"
             f"{age_label}\n"
             f"Entry ref: {p['entry_ref_price']:,.0f}\n"
             f"SL: {p['sl_price']:,.0f} (-20%, WAJIB)\n"
@@ -4438,7 +4448,7 @@ async def swing_command(update, context):
             if drift_zone == "NAIK" else ""
         )
         lines.append(
-            f"{p['ticker']} (entry ref {p['entry_ref_price']:,.0f})\n"
+            f"{_mk('VCP', p)}{p['ticker']} (entry ref {p['entry_ref_price']:,.0f})\n"
             f"{age_label}\n"
             f"SL: {p['sl_price']:,.0f} (-{vcp_pillar_engine.SL_PCT:.0f}%)\n"
             f"TP1: {p['tp1_price']:,.0f} (+{vcp_pillar_engine.TP1_PCT:.1f}%, ~{p['tp1_touch_rate']:.0f}% historical touch-rate) — resolusi utama\n"
@@ -4459,7 +4469,7 @@ async def swing_command(update, context):
         sl_pct = (p["sl_price"] / entry_ref - 1) * 100
         tp_pct = (p["tp_price"] / entry_ref - 1) * 100
         lines.append(
-            f"{lane_icon} {p['ticker']}\n"
+            f"{_mk('MACD-confirm', p)}{lane_icon} {p['ticker']}\n"
             f"{win_rate_line}"
             f"NEW (Day 1/{macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS})\n"
             f"Entry ref: {entry_ref:,.0f}\n"
@@ -4506,7 +4516,7 @@ async def swing_command(update, context):
         sl_price = p.get("sl_price") or round(p["entry_ref_price"] * (1 + sl_pct / 100))
         tp_price = round(p["entry_ref_price"] * (1 + buy_on_strength_engine.TP_PCT / 100))
         lines.append(
-            f"{p['ticker']} (ret_10d {p['ret_10d_at_trigger']:+.1f}% saat trigger)\n"
+            f"{_mk('BOS', p)}{p['ticker']} (ret_10d {p['ret_10d_at_trigger']:+.1f}% saat trigger)\n"
             f"{age_label}\n"
             f"Entry ref: {p['entry_ref_price']:,.0f}\n"
             f"SL: {sl_price:,.0f} ({sl_pct:.0f}%)\n"
@@ -4551,6 +4561,20 @@ async def swing_command(update, context):
             lines.append(_xl_line)
     except Exception as e:  # noqa: BLE001
         print(f"⚠️ /swing XL flag gagal (diabaikan): {e}")
+    try:
+        import engine.corporate_actions as corporate_actions
+        _ca = []
+        for _t in sorted({p["ticker"] for grp in (bow_active, osb_active, vcp_active, macd_confirm_active, bos_active) for p in grp}):
+            _w = corporate_actions.window_lines(_t, allow_fetch=False, max_lines=1)
+            if _w:
+                _ca.append(f"{_t}: {_w[0][2:].strip()}")
+        if _ca:
+            lines.append("📅 Jendela corporate action (ex-dividen/right issue/split) di antara pick aktif:" + chr(10) + chr(10).join(_ca[:10])
+                         + (f"{chr(10)}… +{len(_ca) - 10} lainnya" if len(_ca) > 10 else ""))
+    except Exception as _e:  # noqa: BLE001
+        print(f"⚠️ /swing corporate action gagal (diabaikan): {_e}")
+    lines.append("Tag: 🟢A BELI-A | 🟡B BELI-B | 🔵 TAHAN (lewat jendela entry) | 🔴 KELUAR | ⚪ NETRAL (bukti lane belum cukup). "
+                 "Dari scorecard lane x regime backtest; pick HINDARI disembunyikan.")
     if _hindari_note:
         lines.append(_hindari_note)
     await core.safe_reply(update.message, "\n\n".join(lines))

@@ -801,7 +801,8 @@ async def check_stock(update, context):
 
     # ── Conviction + karakter ──────────────────────────────────────
     meta_line = ""
-    if hc: meta_line += f"{hc.get('conviction_label', '')}\n"
+    # High/Low conviction label hidden by default (2026-10-22): is_high_conviction showed no win-rate difference (55.6% vs 55.3%, n=775).
+    if hc and SHOW_LEGACY_BLOCKS: meta_line += f"{hc.get('conviction_label', '')}\n"
     if risk_label: meta_line += risk_label
 
     # ── Raw data dengan icon ───────────────────────────────────────
@@ -929,7 +930,9 @@ async def check_stock(update, context):
     await core.safe_reply(update.message, msg1)
 
     msg2_eod = "\n".join(filter(None, [
-        f"🎯 {result['action_label_id']}",
+        # 2026-10-22: the old STRONG_BUY / BUY_ACCUMULATE / SINYAL CAMPURAN label (from the unvalidated final score) is replaced by the
+        # lane-based tag at the top of message 1 (engine/lane_scorecard.py); the legacy layout keeps it.
+        f"🎯 {result['action_label_id']}" if SHOW_LEGACY_BLOCKS else None,
         meta_line,
         "",
         skor_line,
