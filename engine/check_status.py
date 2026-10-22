@@ -129,11 +129,51 @@ def risk_tags(ticker: str) -> list[str]:
     return tags
 
 
+def active_pick_lanes(ticker: str) -> list[tuple[str, str | None]]:
+    """[(lane, trigger_date)] for every lane where `ticker` has an ALIVE pick (the keys engine.lane_scorecard uses)."""
+    import engine.buy_on_weakness as bow
+    import engine.oversold_bounce_v2 as osb
+    import engine.vcp_pillar as vcp
+    import engine.macd_confirm_pillar as mc
+    import engine.buy_on_strength as bos
+
+    t = ticker.upper()
+    pairs: list[tuple[str, str | None]] = []
+    for lane, mod, fn in (("BOW", bow, "load_buy_on_weakness_picks"), ("OSB-v2", osb, "load_oversold_bounce_v2_picks"),
+                          ("VCP", vcp, "load_vcp_picks"), ("MACD-confirm", mc, "load_macd_confirm_picks"),
+                          ("BOS", bos, "load_buy_on_strength_picks")):
+        for p in _picks(mod, fn):
+            if p.get("ticker") == t and p.get("status") == "ALIVE":
+                pairs.append((lane, p.get("trigger_date")))
+    return pairs
+
+
+def verdict(ticker: str) -> tuple[list[str], list[str]]:
+    """(hindari reasons, warning reasons) over every active pick lane, or the plain-lookup rules when it is not a pick.
+    Rules and evidence: engine/lane_scorecard.py. Best-effort: any failure -> no verdict."""
+    try:
+        import engine.lane_scorecard as lane_scorecard
+        hindari: list[str] = []
+        warn: list[str] = []
+        for lane, date in (active_pick_lanes(ticker) or [(None, None)]):
+            ev = lane_scorecard.evaluate(lane, ticker.upper(), date)
+            hindari += [r for r in ev["hindari"] if r not in hindari]
+            warn += [r for r in ev["warn"] if r not in warn]
+        return hindari, warn
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ check_status: verdict gagal (diabaikan): {e}")
+        return [], []
+
+
 def build_status_block(ticker: str) -> str:
-    """The block shown at the top of /check message 1: lane lines, one regime line, one line per tag."""
+    """The block shown at the top of /check message 1: HINDARI verdict (if any), lane lines, one regime line, one line per tag."""
     lines = lane_status(ticker) or ["🧭 Bukan pick aktif"]
+    hindari, warn = verdict(ticker)
+    if hindari:
+        lines.insert(0, "🚫 HINDARI — " + "; ".join(hindari))
     reg = regime_line()
     if reg:
         lines.append(reg)
+    lines += [f"⚠️ {w}" for w in warn]
     lines += risk_tags(ticker)
     return "\n".join(lines)

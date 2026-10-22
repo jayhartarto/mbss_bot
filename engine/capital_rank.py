@@ -96,6 +96,7 @@ DEFAULT_W_TPGAIN = 0.15  # user request 2026-10-11: TP gain is a less certain fa
                          # (target band itself moves, no hard trigger like win/SL) --
                          # de-emphasized vs win-rate/return, was 0.30
 NEUTRAL_TPGAIN_SCORE = 50.0  # assigned when tp_gain_pct can't be computed for a lane yet
+LAST_HIDDEN_HINDARI: list = []  # [(lane, ticker, reasons)] hidden by the last _gather_candidates() call, see engine/lane_scorecard.py
 
 
 def _bow_stats_and_adjustment(pick: dict) -> tuple[dict, float, bool]:
@@ -270,6 +271,15 @@ def _gather_candidates():
         out.append({"lane_key": "MACD", "ff_priority": None, "pick": p,
                      "stats": stats, "score_bonus": 0.0, "tp_gain_pct": tp_gain})
 
+    # HINDARI filter (2026-10-22, engine/lane_scorecard.py) -- same rule set /swing applies, so the two never disagree.
+    # Fail-open: if the scorecard cannot be evaluated the candidates are returned untouched.
+    global LAST_HIDDEN_HINDARI
+    LAST_HIDDEN_HINDARI = []
+    try:
+        import engine.lane_scorecard as lane_scorecard
+        out, LAST_HIDDEN_HINDARI = lane_scorecard.partition_candidates(out)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ /rank: filter HINDARI gagal (diabaikan, semua pick tetap tampil): {e}")
     return out
 
 

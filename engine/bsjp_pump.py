@@ -187,6 +187,27 @@ def build_bsjp_pump_watchlist(results: dict) -> list[dict]:
         f"(ret_1d>={D0_RET1D_MIN_PCT}% & liquid>={LIQ_MIN:,.0f})."
     )
     today = _today_str()
+
+    # HINDARI filter (2026-10-22, user decision; engine/lane_scorecard.py): a D0 that was a +12% one-day spike on >=3.5x volume
+    # backtested negative for this lane (-1.0pp, t-3.1, win 35% vs 44%; 40% of lane trades). Filtered BEFORE the occurrence log and
+    # the state files, so the name never enters session-1/session-2 tracking or /bsjp tp. Fail-open on any error.
+    hindari_hidden: list[dict] = []
+    try:
+        import engine.lane_scorecard as lane_scorecard
+        kept = []
+        for r in passers:
+            ev = lane_scorecard.evaluate("BSJP-L2", r["ticker"], today)
+            if ev["hindari"]:
+                hindari_hidden.append({"ticker": r["ticker"], "reasons": ev["hindari"]})
+            else:
+                kept.append(r)
+        passers = kept
+        if hindari_hidden:
+            print(f"🚫 BSJP-PUMP: {len(hindari_hidden)} kandidat disembunyikan (HINDARI): "
+                  f"{', '.join(h['ticker'] for h in hindari_hidden)}")
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ BSJP-PUMP: filter HINDARI gagal (diabaikan, semua kandidat tetap): {e}")
+
     occurrence = _prune_and_append_signal_log([r["ticker"] for r in passers], today)
 
     ff_ratios = {}
@@ -210,6 +231,7 @@ def build_bsjp_pump_watchlist(results: dict) -> list[dict]:
     _save_json_state("bsjp_pump_watchlist_state.json", {
         "trading_day_marker": today,
         "candidates": {c["ticker"]: c for c in candidates},
+        "hindari_hidden": hindari_hidden,
     })
     # Session-1/session-2 state resets for the new trading day -- stale
     # checkpoint/live state from a previous day must never leak into
@@ -220,14 +242,28 @@ def build_bsjp_pump_watchlist(results: dict) -> list[dict]:
     return candidates
 
 
+def _hindari_footnote() -> str:
+    """Closing line naming today's candidates hidden by the HINDARI filter ('' when none / state is from another day)."""
+    state = _load_json_state("bsjp_pump_watchlist_state.json")
+    hidden = state.get("hindari_hidden") or [] if state.get("trading_day_marker") == _today_str() else []
+    if not hidden:
+        return ""
+    items = "; ".join(f"{h['ticker']} ({', '.join(h['reasons'])})" for h in hidden[:8])
+    more = f" +{len(hidden) - 8} lainnya" if len(hidden) > 8 else ""
+    return f"🚫 {len(hidden)} kandidat disembunyikan (HINDARI): {items}{more}."
+
+
 def build_bsjp_pump_watchlist_message(candidates: list[dict]) -> str:
+    note = _hindari_footnote()
     if not candidates:
-        return "📋 BSJP-PUMP watchlist malam ini kosong."
+        return "📋 BSJP-PUMP watchlist malam ini kosong." + (f"\n\n{note}" if note else "")
     lines = [f"🌙 BSJP-PUMP WATCHLIST (loose) — {len(candidates)} kandidat (cek checkpoint sesi-1 ~12:00 WIB besok)\n"]
     for c in sorted(candidates, key=lambda x: x["occurrence"], reverse=True):
         occ_tag = f" [{c['occurrence']}x dlm {OCCURRENCE_WINDOW_CALENDAR_DAYS}d]" if c["occurrence"] >= 2 else ""
         lines.append(f"{c['ticker']} — closing {c['close_d0']:,.0f}, ret_1d {c['ret_1d_d0']:+.1f}%{occ_tag}")
     lines.append("\n⚠️ Ini watchlist LONGGAR, belum sinyal final -- checkpoint besok siang yang menentukan.")
+    if note:
+        lines.append(note)
     return "\n\n".join(lines)
 
 

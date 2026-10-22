@@ -4320,11 +4320,30 @@ async def swing_command(update, context):
     bos_active = [p for p in bos_picks if p.get("status") == "ALIVE"]
     bos_active.sort(key=lambda p: -p.get("ret_10d_at_trigger", 0))
 
+    # HINDARI filter (2026-10-22, user decision; rules + evidence in engine/lane_scorecard.py): picks whose signal-day
+    # conditions backtested as negative-expectancy are hidden from the list and counted in a closing line instead.
+    # Fail-open: any evaluation error keeps the pick visible. The persisted pick still tracks/resolves in the background.
+    import engine.lane_scorecard as lane_scorecard
+
+    def _apply_hindari():
+        hidden_all = []
+        out = []
+        for lane, picks in (("BOW", bow_active), ("OSB-v2", osb_active), ("VCP", vcp_active),
+                            ("MACD-confirm", macd_confirm_active), ("BOS", bos_active)):
+            kept, hidden = lane_scorecard.partition(lane, picks)
+            out.append(kept)
+            hidden_all += hidden
+        return out, hidden_all
+
+    (bow_active, osb_active, vcp_active, macd_confirm_active, bos_active), _hindari_hidden = await asyncio.to_thread(_apply_hindari)
+    _hindari_note = lane_scorecard.hidden_footnote(_hindari_hidden)
+
     if not bow_active and not osb_active and not vcp_active and not macd_confirm_active and not bos_active:
         await core.safe_reply(
             update.message,
             "🧭 SWING — belum ada sinyal aktif saat ini (BOW, OSB-v2, VCP, MACD-confirm, maupun BOS). "
             "Lane ini jalan otomatis tiap malam via /eodscan, cek lagi besok."
+            + (f"\n\n{_hindari_note}" if _hindari_note else "")
         )
         return
 
@@ -4532,6 +4551,8 @@ async def swing_command(update, context):
             lines.append(_xl_line)
     except Exception as e:  # noqa: BLE001
         print(f"⚠️ /swing XL flag gagal (diabaikan): {e}")
+    if _hindari_note:
+        lines.append(_hindari_note)
     await core.safe_reply(update.message, "\n\n".join(lines))
 
 
@@ -4573,11 +4594,15 @@ async def rank_command(update, context):
             )
             return
 
-    ranked = capital_rank_engine.compute_rank(w_return, w_win, w_tpgain)
+    ranked = await asyncio.to_thread(capital_rank_engine.compute_rank, w_return, w_win, w_tpgain)
     import engine.broker_flags as broker_flags
     _flags = await asyncio.to_thread(broker_flags.xl_flags, [c["pick"].get("ticker") for c in ranked[:20]])
     message = capital_rank_engine.format_rank_message(ranked, w_return, w_win, w_tpgain, broker_flags=_flags)
     if _flags:
         message += ("\n⚠️ Tag XL = XL (Stockbit) net beli >= +1% nilai transaksi (⚠️⚠️ >= +5%): peringatan kontrarian, bukti LEMAH, "
                     "hanya info -- tidak mengubah skor atau urutan. Cek: /bandar TICKER.")
+    import engine.lane_scorecard as lane_scorecard
+    _hindari_note = lane_scorecard.hidden_footnote(getattr(capital_rank_engine, "LAST_HIDDEN_HINDARI", []))
+    if _hindari_note:
+        message += "\n" + _hindari_note
     await core.safe_reply(update.message, message)
