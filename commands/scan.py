@@ -147,6 +147,21 @@ async def ffupdate_command(update, context):
     except Exception as e:
         await core.safe_reply(update.message, f"⚠️ Update foreign-flow gagal: {str(e)[:250]}")
 
+    # IPOT broker summary top-up rides on /ffupdate (user runs it daily right before /eodscan), so the new-buyer tag in
+    # /eodscan finds today's broker rows already stored. Independent of the foreign-flow result above.
+    try:
+        from engine import ipot_broker
+        await core.safe_reply(update.message, "🏦 Top-up broker IPOT (picks aktif + top-150 + universe tag likuid)...")
+        r = await asyncio.to_thread(ipot_broker.collect_daily_topup)
+        n, t = r["nightly"], r["tag"]
+        warn = " ⚠️ ada yang blocked/error, jalankan /ffupdate lagi" if (n["blocked"] + n["error"] + t["blocked"] + t["error"]) else ""
+        await core.safe_reply(
+            update.message,
+            f"✅ IPOT: nightly-set ok={n['ok']} empty={n['empty']} ({n['tickers']} saham) | "
+            f"universe tag ok={t['ok']} empty={t['empty']} ({t['tickers']} saham){warn}")
+    except Exception as e:
+        await core.safe_reply(update.message, f"⚠️ Top-up IPOT gagal: {str(e)[:250]}")
+
 
 # ---------------------------------------------------------------------
 # /screendaytrade
@@ -4327,8 +4342,12 @@ async def swing_command(update, context):
 
     _swing_tags = {}
 
+    import engine.newbuyer_tag as newbuyer_tag
+
     def _mk(lane, p):
-        return lane_scorecard.TAG_MARK.get(_swing_tags.get((lane, p["ticker"])), "") + " " if _swing_tags.get((lane, p["ticker"])) else ""
+        # 🆕 = pembeli baru (booster, VCP/BOS/MACD-confirm only); sits beside the level marker and never replaces ⭐ FF PRIORITY (BOW/OSB-v2 only)
+        _nb = (newbuyer_tag.MARK + " ") if (lane in newbuyer_tag.TAG_LANES and newbuyer_tag.is_tagged(p)) else ""
+        return _nb + (lane_scorecard.TAG_MARK.get(_swing_tags.get((lane, p["ticker"])), "") + " " if _swing_tags.get((lane, p["ticker"])) else "")
 
     def _apply_hindari():
         hidden_all = []
@@ -4359,6 +4378,17 @@ async def swing_command(update, context):
 
     lines = [f"🧭 SWING — {len(bow_active)} BOW + {len(osb_active)} OSB-v2 + {len(vcp_active)} VCP + "
              f"{len(macd_confirm_active)} MACD-confirm + {len(bos_active)} BOS sinyal aktif"]
+
+    # "Pilihan Kuat" (2026-10-27): NEW picks (Day 1) carrying the 🆕 pembeli-baru booster. Shown only on days that have any; the full
+    # lane lists below are unchanged. Backtest: win +5pp / mean +0.5pp vs untagged, SL-hit not lower -> a booster, not a safer list.
+    _strong = [(ln_, p) for ln_, grp in (("VCP", vcp_active), ("MACD-confirm", macd_confirm_active), ("BOS", bos_active))
+               for p in grp if newbuyer_tag.is_tagged(p) and p.get("age_days", 1) <= 1]
+    if _strong:
+        lines.append(f"\n🆕 PILIHAN KUAT — pembeli baru ({len(_strong)})")
+        for ln_, p in _strong:
+            _sl = f" | SL {p['sl_price']:,.0f}" if p.get("sl_price") else ""
+            lines.append(f"• {p['ticker']} ({ln_}) entry ref {p.get('entry_ref_price') or 0:,.0f}{_sl}")
+        lines.append("ℹ️ Booster, bukan jaminan: win ~66% vs ~61% tanpa tag, risiko SL sama. Likuiditas ≥Rp0,3 M/hari. Detail tiap pick ada di lane masing-masing.")
 
     lines.append(f"\n🪶 BUY ON WEAKNESS ({len(bow_active)})")
     if not bow_active:

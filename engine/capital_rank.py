@@ -95,6 +95,7 @@ DEFAULT_W_WIN = 0.45
 DEFAULT_W_TPGAIN = 0.15  # user request 2026-10-11: TP gain is a less certain factor
                          # (target band itself moves, no hard trigger like win/SL) --
                          # de-emphasized vs win-rate/return, was 0.30
+NEWBUYER_RANK_BONUS = 2.0  # 2026-10-27: win +~5pp (65.6 vs 60.8) x 45% win weight; t~2.6, so deliberately small. VCP/MACD only (BOS not in /rank).
 NEUTRAL_TPGAIN_SCORE = 50.0  # assigned when tp_gain_pct can't be computed for a lane yet
 LAST_HIDDEN_HINDARI: list = []  # [(lane, ticker, reasons)] hidden by the last _gather_candidates() call, see engine/lane_scorecard.py
 
@@ -259,7 +260,7 @@ def _gather_candidates():
         if p.get("status") != "ALIVE":
             continue
         out.append({"lane_key": "VCP", "ff_priority": None, "pick": p,
-                     "stats": _vcp_stats_and_adjustment(p), "score_bonus": 0.0,
+                     "stats": _vcp_stats_and_adjustment(p), "score_bonus": NEWBUYER_RANK_BONUS if p.get("new_buyer") else 0.0,
                      "tp_gain_pct": _vcp_tp_gain_pct(p)})
 
     # Same filter as swing_command: show-once rule (age_days<=1), see
@@ -269,7 +270,7 @@ def _gather_candidates():
             continue
         stats, tp_gain = _macd_stats_and_tp_gain(p)
         out.append({"lane_key": "MACD", "ff_priority": None, "pick": p,
-                     "stats": stats, "score_bonus": 0.0, "tp_gain_pct": tp_gain})
+                     "stats": stats, "score_bonus": NEWBUYER_RANK_BONUS if p.get("new_buyer") else 0.0, "tp_gain_pct": tp_gain})
 
     # HINDARI filter (2026-10-22, engine/lane_scorecard.py) -- same rule set /swing applies, so the two never disagree.
     # Fail-open: if the scorecard cannot be evaluated the candidates are returned untouched.
@@ -357,6 +358,8 @@ def format_rank_message(ranked: list[dict], w_return: float = DEFAULT_W_RETURN, 
         entry = p.get("entry_ref_price") or p.get("entry_low")
         sl = p.get("sl_price")
         priority_tag = " ⭐FF" if c["ff_priority"] else ""
+        if p.get("new_buyer") and c["lane_key"] in ("VCP", "MACD"):
+            priority_tag += " 🆕"   # pembeli baru (booster, +NEWBUYER_RANK_BONUS pada skor)
         _bf = (broker_flags or {}).get(ticker)
         if _bf:
             import engine.broker_flags as _broker_flags

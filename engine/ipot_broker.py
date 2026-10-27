@@ -218,6 +218,32 @@ def collect_nightly(end: datetime.date | None = None, lookback_weekdays: int = 3
     return collect_days(recent_weekdays(end, lookback_weekdays), tickers) | {"tickers": len(tickers)}
 
 
+def tag_universe(min_value: float = 3e8, days: int = 30) -> list[str]:
+    """Tickers whose average daily traded value (close*volume, last `days` calendar days) is >= min_value (Rp0.3bn default):
+    the universe the new-buyer tag is allowed on (research 2026-10-27: the effect is negative below ~Rp0.1bn/day)."""
+    c = sqlite3.connect(OHLCV_DB, timeout=30)
+    try:
+        last = c.execute("SELECT MAX(date) FROM ohlcv_daily").fetchone()[0]
+        rows = c.execute("""SELECT ticker FROM ohlcv_daily WHERE date >= date(?, ?)
+                            GROUP BY ticker HAVING AVG(close*volume) >= ?""", (last, f"-{days} day", min_value)).fetchall()
+    finally:
+        c.close()
+    return sorted(r[0].replace(".JK", "") for r in rows)
+
+
+def collect_daily_topup(end: datetime.date | None = None, lookback_weekdays: int = 3) -> dict:
+    """What /ffupdate runs: the usual nightly set (active picks + top-150, all variants) PLUS the tag universe on the single
+    fd=all/board=all variant the new-buyer tag reads. Idempotent: already-logged (ticker, day, variant) are skipped, so the later
+    nightly collect_nightly() in /eodscan costs nothing."""
+    out = {"nightly": collect_nightly(end, lookback_weekdays)}
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
+    if end is None:
+        end = now.date() if now.hour >= MIN_HOUR_WIB_FOR_TODAY else now.date() - datetime.timedelta(days=1)
+    tk = tag_universe()
+    out["tag"] = collect_days(recent_weekdays(end, lookback_weekdays), tk, variants=(("all", "all"),)) | {"tickers": len(tk)}
+    return out
+
+
 def merge_into(dest_path: str, src_path: str) -> dict:
     """INSERT OR IGNORE every table of src into dest (e.g. the laptop's 10-day picks backfill into the VPS file)."""
     dest = connect(dest_path)

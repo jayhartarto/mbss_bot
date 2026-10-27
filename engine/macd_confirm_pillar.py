@@ -454,6 +454,8 @@ def update_and_save_picks(new_candidates: list[dict]) -> list:
         history.append(cand)
         active_tickers.add(cand["ticker"])
 
+    from engine import newbuyer_tag  # booster tag 2026-10-27, display-only; fail-safe (never raises)
+    newbuyer_tag.annotate(history, "MACD-confirm")
     save_macd_confirm_picks(history)
     return history
 
