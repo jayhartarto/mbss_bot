@@ -147,21 +147,6 @@ async def ffupdate_command(update, context):
     except Exception as e:
         await core.safe_reply(update.message, f"⚠️ Update foreign-flow gagal: {str(e)[:250]}")
 
-    # IPOT broker summary top-up rides on /ffupdate (user runs it daily right before /eodscan), so the new-buyer tag in
-    # /eodscan finds today's broker rows already stored. Independent of the foreign-flow result above.
-    try:
-        from engine import ipot_broker
-        await core.safe_reply(update.message, "🏦 Top-up broker IPOT (picks aktif + top-150 + universe tag likuid)...")
-        r = await asyncio.to_thread(ipot_broker.collect_daily_topup)
-        n, t = r["nightly"], r["tag"]
-        warn = " ⚠️ ada yang blocked/error, jalankan /ffupdate lagi" if (n["blocked"] + n["error"] + t["blocked"] + t["error"]) else ""
-        await core.safe_reply(
-            update.message,
-            f"✅ IPOT: nightly-set ok={n['ok']} empty={n['empty']} ({n['tickers']} saham) | "
-            f"universe tag ok={t['ok']} empty={t['empty']} ({t['tickers']} saham){warn}")
-    except Exception as e:
-        await core.safe_reply(update.message, f"⚠️ Top-up IPOT gagal: {str(e)[:250]}")
-
 
 # ---------------------------------------------------------------------
 # /screendaytrade

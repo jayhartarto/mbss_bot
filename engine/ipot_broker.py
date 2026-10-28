@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -102,12 +103,12 @@ def parse(html: str):
     return ("ok" if buys or sells else "empty"), buys, sells
 
 
-def fetch(ticker: str, day: str, fd: str = "all", bd: str = "all"):
+def fetch(ticker: str, day: str, fd: str = "all", bd: str = "all", attempts: int = 5, block_wait: float = 30):
     """-> (status, buyers, sellers, html). Never raises."""
     d = datetime.date.fromisoformat(day).strftime("%m/%d/%Y")
     url = URL.format(t=ticker, d=d, fd=fd, bd=bd)
     last = "error"
-    for attempt in range(5):
+    for attempt in range(attempts):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html"})
             with urllib.request.urlopen(req, timeout=30) as r:
@@ -115,20 +116,20 @@ def fetch(ticker: str, day: str, fd: str = "all", bd: str = "all"):
             return parse(html) + (html,)
         except urllib.error.HTTPError as e:
             last = "blocked" if e.code in (403, 429) else "error"
-            time.sleep(30 * (attempt + 1) if e.code in (403, 429) else 0.5 * (2 ** attempt))
+            time.sleep(block_wait * (attempt + 1) if e.code in (403, 429) else 0.5 * (2 ** attempt))
         except Exception:  # noqa: BLE001
             time.sleep(0.5 * (2 ** attempt))
     return last, [], [], None
 
 
-def save(conn: sqlite3.Connection, t: str, d: str, fd: str, bd: str, res) -> None:
+def save(conn: sqlite3.Connection, t: str, d: str, fd: str, bd: str, res, keep_raw: bool = True) -> None:
     status, buys, sells, html = res
     conn.execute("INSERT OR REPLACE INTO ipot_fetch_log VALUES (?,?,?,?,?,?,?,?,?,?)",
                  (t, d, fd, bd, status, len(buys), len(sells),
                   min((x[2] for x in buys if x[2] is not None), default=None),
                   min((x[2] for x in sells if x[2] is not None), default=None),
                   datetime.datetime.now().isoformat(timespec="seconds")))
-    if html is not None and status in ("ok", "invalid"):
+    if keep_raw and html is not None and status in ("ok", "invalid"):
         conn.execute("INSERT OR REPLACE INTO ipot_raw VALUES (?,?,?,?,?)", (t, d, fd, bd, gzip.compress(html.encode("utf-8"))))
     if status == "ok":
         rows: dict = {}
@@ -142,10 +143,10 @@ def save(conn: sqlite3.Connection, t: str, d: str, fd: str, bd: str, res) -> Non
                           r.get("sell_lot"), r.get("sell_val"), r.get("sell_avg"), r.get("sell_rank")))
 
 
-def active_pick_tickers(root: str = ROOT) -> list[str]:
+def active_pick_tickers(root: str = ROOT, files=PICK_FILES) -> list[str]:
     """Tickers of every still-open pick across the lane pick files."""
     out: set = set()
-    for f in PICK_FILES:
+    for f in files:
         try:
             with open(os.path.join(root, f), encoding="utf-8") as fh:
                 for r in json.load(fh):
@@ -177,21 +178,34 @@ def recent_weekdays(end: datetime.date, n: int) -> list[str]:
 
 
 def collect_days(days: list[str], tickers: list[str], variants=DEFAULT_VARIANTS, workers: int = 5,
-                 db_path: str = DB_PATH) -> dict:
+                 db_path: str = DB_PATH, keep_raw: bool = False, budget_s: float | None = None, max_blocked: int = 3) -> dict:
     """Fetch every (ticker, day, variant) not yet logged as ok/empty/invalid and store it. Returns status counts. Never raises
-    on a fetch failure (logged as blocked/error and retried by the next call)."""
+    on a fetch failure (logged as blocked/error and retried by the next call). Circuit breaker: after `max_blocked` consecutive
+    403/429 the rest of the run is skipped (not logged, so the next call retries); `budget_s` caps total wall time the same way."""
     conn = connect(db_path)
     try:
         done = set(conn.execute("SELECT ticker, trade_date, fd, board FROM ipot_fetch_log "
                                 "WHERE status IN ('ok','empty','invalid')"))
         todo = [(t, d, fd, bd) for d in days for t in tickers for fd, bd in variants if (t, d, fd, bd) not in done]
-        counts = {"ok": 0, "empty": 0, "invalid": 0, "blocked": 0, "error": 0, "todo": len(todo)}
+        counts = {"ok": 0, "empty": 0, "invalid": 0, "blocked": 0, "error": 0, "skipped": 0, "todo": len(todo)}
         if not todo:
             return counts
+        stop = threading.Event()
+        deadline = time.monotonic() + budget_s if budget_s else None
+        blocked_run = [0]
 
         def work(x):
+            if stop.is_set() or (deadline and time.monotonic() > deadline):
+                return x, ("skipped", [], [], None)
             time.sleep(0.05)
-            return x, fetch(*x)
+            res = fetch(*x, attempts=3, block_wait=10)
+            if res[0] == "blocked":
+                blocked_run[0] += 1
+                if blocked_run[0] >= max_blocked:
+                    stop.set()
+            elif res[0] != "error":
+                blocked_run[0] = 0
+            return x, res
 
         i = 0
         with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -199,7 +213,9 @@ def collect_days(days: list[str], tickers: list[str], variants=DEFAULT_VARIANTS,
                 for x, res in ex.map(work, todo[c0:c0 + 500]):
                     i += 1
                     counts[res[0]] += 1
-                    save(conn, *x, res)
+                    if res[0] == "skipped":
+                        continue
+                    save(conn, *x, res, keep_raw=keep_raw)
                     if i % 25 == 0:        # short transactions: a long-held write lock starves the other writer
                         conn.commit()
         conn.commit()
@@ -208,40 +224,31 @@ def collect_days(days: list[str], tickers: list[str], variants=DEFAULT_VARIANTS,
         conn.close()
 
 
-def collect_nightly(end: datetime.date | None = None, lookback_weekdays: int = 3) -> dict:
-    """Nightly top-up: active picks + most liquid names, the last few weekdays (so one missed night heals itself)."""
+TAG_PICK_FILES = ["macd_confirm_pillar_picks.json", "buy_on_strength_picks.json", "vcp_pillar_picks.json"]  # lanes engine/newbuyer_tag serves
+HISTORY_WEEKDAYS = 30      # newbuyer_tag needs >=15 broker days inside a 45-bar window ending at the trigger date
+
+
+def default_end(end: datetime.date | None = None) -> datetime.date:
+    """Last day IPOT has finalised: today after close, otherwise yesterday (a partial day logged as ok would never be refreshed)."""
+    if end is not None:
+        return end
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
-    if end is None:
-        # IPOT serves the running day intraday; a partial day logged as ok would never be refreshed, so wait until after close
-        end = now.date() if now.hour >= MIN_HOUR_WIB_FOR_TODAY else now.date() - datetime.timedelta(days=1)
-    tickers = sorted(set(active_pick_tickers()) | set(liquid_tickers()))
-    return collect_days(recent_weekdays(end, lookback_weekdays), tickers) | {"tickers": len(tickers)}
+    return now.date() if now.hour >= MIN_HOUR_WIB_FOR_TODAY else now.date() - datetime.timedelta(days=1)
 
 
-def tag_universe(min_value: float = 3e8, days: int = 30) -> list[str]:
-    """Tickers whose average daily traded value (close*volume, last `days` calendar days) is >= min_value (Rp0.3bn default):
-    the universe the new-buyer tag is allowed on (research 2026-10-27: the effect is negative below ~Rp0.1bn/day)."""
-    c = sqlite3.connect(OHLCV_DB, timeout=30)
-    try:
-        last = c.execute("SELECT MAX(date) FROM ohlcv_daily").fetchone()[0]
-        rows = c.execute("""SELECT ticker FROM ohlcv_daily WHERE date >= date(?, ?)
-                            GROUP BY ticker HAVING AVG(close*volume) >= ?""", (last, f"-{days} day", min_value)).fetchall()
-    finally:
-        c.close()
-    return sorted(r[0].replace(".JK", "") for r in rows)
+def ensure_history(tickers, end: datetime.date | None = None, days: int = HISTORY_WEEKDAYS, budget_s: float = 180) -> dict:
+    """Make sure the fd=all/board=all broker rows the new-buyer tag reads exist for `tickers` over the last `days` weekdays.
+    Idempotent (logged days are skipped), so steady state is ~1 fetch per watchlist ticker per night and a ticker new to the
+    watchlist costs one backfill. Bounded by `budget_s` and the 429 circuit breaker; never raises."""
+    tk = sorted({t.replace(".JK", "") for t in tickers if t})
+    if not tk:
+        return {"tickers": 0}
+    return collect_days(recent_weekdays(default_end(end), days), tk, variants=(("all", "all"),), budget_s=budget_s) | {"tickers": len(tk)}
 
 
-def collect_daily_topup(end: datetime.date | None = None, lookback_weekdays: int = 3) -> dict:
-    """What /ffupdate runs: the usual nightly set (active picks + top-150, all variants) PLUS the tag universe on the single
-    fd=all/board=all variant the new-buyer tag reads. Idempotent: already-logged (ticker, day, variant) are skipped, so the later
-    nightly collect_nightly() in /eodscan costs nothing."""
-    out = {"nightly": collect_nightly(end, lookback_weekdays)}
-    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
-    if end is None:
-        end = now.date() if now.hour >= MIN_HOUR_WIB_FOR_TODAY else now.date() - datetime.timedelta(days=1)
-    tk = tag_universe()
-    out["tag"] = collect_days(recent_weekdays(end, lookback_weekdays), tk, variants=(("all", "all"),)) | {"tickers": len(tk)}
-    return out
+def collect_nightly(end: datetime.date | None = None, lookback_weekdays: int = HISTORY_WEEKDAYS) -> dict:
+    """Nightly retry for every still-open pick of the tag lanes (heals a missed night or an earlier blocked run)."""
+    return ensure_history(active_pick_tickers(files=TAG_PICK_FILES), end, lookback_weekdays)
 
 
 def merge_into(dest_path: str, src_path: str) -> dict:

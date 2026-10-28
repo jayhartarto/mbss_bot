@@ -352,6 +352,19 @@ def fetch_tickers_scored_with_cache(tickers):
 # ---------------------------------------------------------------------
 # The nightly orchestrator itself
 # ---------------------------------------------------------------------
+async def _prefetch_ipot_for_tag(candidates) -> None:
+    """Fetch the IPOT broker rows the new-buyer tag needs for tonight's tag-lane candidates (plus any still-open pick), in a thread,
+    before the lane saves its picks. Bounded and fail-safe: a missing row only leaves the tag undecided until the next night."""
+    try:
+        from engine import ipot_broker
+        tk = {c["ticker"] for c in (candidates or []) if isinstance(c, dict) and c.get("ticker")}
+        tk |= set(ipot_broker.active_pick_tickers(files=ipot_broker.TAG_PICK_FILES))
+        counts = await asyncio.to_thread(ipot_broker.ensure_history, tk)
+        print(f"🏦 IPOT broker (tag): {counts}")
+    except Exception as e:
+        print(f"⚠️ Gagal prefetch IPOT untuk tag: {e}")
+
+
 async def run_nightly_full_scan(context):
     """
     Scheduled job jam 22:00 WIB (atau `--eodscan` manual) — refresh DB dari
@@ -564,6 +577,7 @@ async def run_nightly_full_scan(context):
             vcp_candidates = await asyncio.to_thread(
                 vcp_pillar_engine.compute_vcp_candidates, vcp_tickers
             )
+            await _prefetch_ipot_for_tag(vcp_candidates)
             vcp_pillar_engine.update_and_save_picks(vcp_candidates)
             print(f"📐 VCP: {len(vcp_candidates)} kandidat baru hari ini.")
         except Exception as e:
@@ -582,6 +596,7 @@ async def run_nightly_full_scan(context):
             macd_confirm_candidates = await asyncio.to_thread(
                 macd_confirm_pillar_engine.compute_macd_confirm_candidates, macd_confirm_tickers
             )
+            await _prefetch_ipot_for_tag(macd_confirm_candidates)
             macd_confirm_pillar_engine.update_and_save_picks(macd_confirm_candidates)
             print(f"🌀 MACD-confirm: {len(macd_confirm_candidates)} kandidat baru hari ini.")
         except Exception as e:
@@ -604,6 +619,7 @@ async def run_nightly_full_scan(context):
             bos_candidates = await asyncio.to_thread(
                 buy_on_strength_engine.compute_buy_on_strength_candidates, bos_tickers
             )
+            await _prefetch_ipot_for_tag(bos_candidates)
             buy_on_strength_engine.update_and_save_picks(bos_candidates)
             print(f"💪 Buy On Strength (BOS): {len(bos_candidates)} kandidat baru hari ini.")
         except Exception as e:

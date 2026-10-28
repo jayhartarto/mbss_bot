@@ -7908,7 +7908,7 @@ def build_app():
         pool_timeout=60.0,
     )
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).post_init(send_startup_notice).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).concurrent_updates(True).post_init(send_startup_notice).build()
 
     app.add_handler(CommandHandler("start", commands_misc.start))
     app.add_handler(CommandHandler("version", commands_misc.show_version))
