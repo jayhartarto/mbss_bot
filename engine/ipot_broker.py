@@ -178,10 +178,12 @@ def recent_weekdays(end: datetime.date, n: int) -> list[str]:
 
 
 def collect_days(days: list[str], tickers: list[str], variants=DEFAULT_VARIANTS, workers: int = 5,
-                 db_path: str = DB_PATH, keep_raw: bool = False, budget_s: float | None = None, max_blocked: int = 3) -> dict:
+                 db_path: str = DB_PATH, keep_raw: bool = False, budget_s: float | None = None, max_blocked: int = 3,
+                 max_errors: int = 8) -> dict:
     """Fetch every (ticker, day, variant) not yet logged as ok/empty/invalid and store it. Returns status counts. Never raises
-    on a fetch failure (logged as blocked/error and retried by the next call). Circuit breaker: after `max_blocked` consecutive
-    403/429 the rest of the run is skipped (not logged, so the next call retries); `budget_s` caps total wall time the same way."""
+    on a fetch failure (logged as blocked/error and retried by the next call). Circuit breakers: after `max_blocked` consecutive
+    403/429, or `max_errors` consecutive errors (e.g. the endpoint answering 502 for everything, as since 2026-10-23), the rest of
+    the run is skipped (not logged, so the next call retries); `budget_s` caps total wall time the same way."""
     conn = connect(db_path)
     try:
         done = set(conn.execute("SELECT ticker, trade_date, fd, board FROM ipot_fetch_log "
@@ -192,7 +194,7 @@ def collect_days(days: list[str], tickers: list[str], variants=DEFAULT_VARIANTS,
             return counts
         stop = threading.Event()
         deadline = time.monotonic() + budget_s if budget_s else None
-        blocked_run = [0]
+        blocked_run, error_run = [0], [0]
 
         def work(x):
             if stop.is_set() or (deadline and time.monotonic() > deadline):
@@ -203,8 +205,12 @@ def collect_days(days: list[str], tickers: list[str], variants=DEFAULT_VARIANTS,
                 blocked_run[0] += 1
                 if blocked_run[0] >= max_blocked:
                     stop.set()
-            elif res[0] != "error":
-                blocked_run[0] = 0
+            elif res[0] == "error":
+                error_run[0] += 1
+                if error_run[0] >= max_errors:
+                    stop.set()
+            else:
+                blocked_run[0] = error_run[0] = 0
             return x, res
 
         i = 0
