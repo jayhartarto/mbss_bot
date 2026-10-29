@@ -130,7 +130,7 @@ ATR20_MAX = 6.0
 CMF_MAX = 0.20
 CMF_TOP_LO, CMF_TOP_HI = -0.10, 0.05
 MACD_PCT_MAX = 1.0
-SL_PCT = 18.0
+SL_PCT = 12.0  # tightened from 18 (user 2026-10-29, research/bull5 sl_tighten); picks created earlier keep their stored sl_price
 FF_EXTREME_SELL = -10.0
 
 TIER_MEDIAN_RET = {1: 5.85, 2: 6.19, 3: 5.28}
@@ -739,7 +739,7 @@ def _resolve_active_pick(pick: dict) -> dict:
         return pick  # can't evaluate today (e.g. delisted/no data) -- leave as-is
 
     entry_ref = pick["entry_ref_price"]
-    sl_abs = entry_ref * (1 - SL_PCT / 100)
+    sl_abs = pick.get("sl_price") or entry_ref * (1 - SL_PCT / 100)
     today_low = float(df["Low"].iloc[-1])
     today_high = float(df["High"].iloc[-1])
     today_close = float(df["Close"].iloc[-1])

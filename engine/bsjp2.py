@@ -968,6 +968,14 @@ def finalize_bsjp2_confirmations(results: dict) -> list[dict]:
     return confirmed
 
 
+BSJP_GUIDE = (
+    "📖 Entry: sore menjelang tutup (harga closing di bawah)" + chr(10)
+    + "TP: sesuai TP1/TP2 tiap pick" + chr(10)
+    + "SL: sesuai SL tiap pick; masih floating -5% s.d -6% di akhir D2 → CUT" + chr(10)
+    + "Tahan: 2 hari (D2); lewat D4 jangan dipegang"
+)
+
+
 def build_bsjp2_tp_message() -> str:
     """/bsjp tp -- reads tonight's finalized confirmations.
 
@@ -990,7 +998,16 @@ def build_bsjp2_tp_message() -> str:
             "(atau rocket) -- wajar, ladder ini sengaja ketat (riset: STAGE1_BASE/TIER1/TIER2 "
             "flat-to-negative di SEMUA level occurrence, bukan worth ditampilkan)."
         )
+    # Hybrid IHSG gate (2026-10-29, user-approved; research/bull5: Lane1 kept +0.22% vs skipped -0.52%). Fail-open; drops are logged
+    # for the 4-6 week forward audit because the gate showed no benefit in Jul-Oct 2026.
+    import engine.ihsg_gate as ihsg_gate
+    _gate = ihsg_gate.get_gate_today()
+    if not _gate["open"]:
+        ihsg_gate.log_dropped("BSJP-Lane1", [{"ticker": p["ticker"], "entry_ref_price": p.get("close_d1")} for p in picks], _gate)
+        return (f"⛔ Gate IHSG tertutup ({_gate['reason']}): {len(picks)} pick BSJP Lane1 disembunyikan. "
+                "Tunggu gate terbuka, atau kalau tetap masuk, kecilkan ukuran posisi.")
     lines = [f"🎯 BSJP TP/SL REKOMENDASI — {len(picks)}/{len(all_picks)} pick lolos ladder (siap pasang sebelum open besok)\n"]
+    lines.append(BSJP_GUIDE)
     # FF PRIORITY booster breaks ties within rung (validated 2026-10-07,
     # see _ff_net_value_z20 docstring) -- rung itself stays the primary
     # sort, never overridden; this is a re-rank tag, never a gate.

@@ -76,7 +76,8 @@ Exit reference (informational display only -- NO auto-entry, same as the
 old lane): TP1 (+5%, conservative, touch flag only, does NOT end the
 alert's lifecycle) / TP2 (+10%, main resolution) / SL (-20%, do NOT tighten
 below this -- tested at -15%, one of the two OOS episodes went negative).
-Max hold 20 trading days, then EXPIRED (mark-to-market).
+Max hold 8 trading days (was 20; 2026-10-29), then EXPIRED (mark-to-market).
+SL tightened to -8% with a break-even stop (+0.2%) armed after the high touches +5%.
 
 CAVEAT carried over from the locked design: this is a pure stock-level
 technical gate with an IHSG regime pre-filter -- treat backtest hit-rates
@@ -106,8 +107,10 @@ FF_WINDOW = 5
 
 TP1_PCT = 5.0   # conservative, informational touch-flag only
 TP2_PCT = 10.0  # main resolution
-SL_PCT = -20.0  # do NOT tighten below this, see docstring
-ALERT_MAX_AGE_DAYS = 20  # trading days, matches the TP/SL touch-rate backtest horizon
+SL_PCT = -8.0   # tightened from -20 (user 2026-10-29): research/bull5 sl_tighten -- SL-8% + BE gives win 68%, worst -8%
+BE_TRIGGER_PCT = 5.0   # once the high reaches +5% ...
+BE_STOP_PCT = 0.2      # ... move the stop to entry +0.2% (covers cost). Armed from the NEXT bar, as in the backtest.
+ALERT_MAX_AGE_DAYS = 8  # trading days; horizon sweep 5-20d showed no loss of edge at 8 (avg hold ~3d)
 
 MACD_TIER1_CUTOFF_CRASH_FAST = -18.0  # see TIER1/union docstring note above; CRASH_FAST-gated only
 
@@ -347,7 +350,9 @@ def _resolve_active_pick(pick: dict) -> dict:
         return pick  # can't evaluate today (e.g. delisted/no data) -- leave as-is
 
     entry_ref = pick["entry_ref_price"]
-    sl_abs = entry_ref * (1 + SL_PCT / 100)
+    # Picks created before the 2026-10-29 SL change keep their stored (-20%) sl_price; new picks use SL_PCT.
+    sl_abs = pick.get("sl_price") or entry_ref * (1 + SL_PCT / 100)
+    be_abs = entry_ref * (1 + BE_STOP_PCT / 100)
     tp1_abs = entry_ref * (1 + TP1_PCT / 100)
     tp2_abs = entry_ref * (1 + TP2_PCT / 100)
     today_low = float(df["Low"].iloc[-1])
@@ -358,10 +363,11 @@ def _resolve_active_pick(pick: dict) -> dict:
     if today_date == pick.get("_last_checked_date"):
         return pick  # already resolved for today, avoid double-incrementing age
 
-    if today_low <= sl_abs:
-        pick["status"] = "SL_HIT"
+    stop_abs = max(sl_abs, be_abs) if pick.get("be_armed") else sl_abs
+    if today_low <= stop_abs:
+        pick["status"] = "BE_HIT" if pick.get("be_armed") else "SL_HIT"
         pick["resolved_date"] = today_date
-        pick["resolved_ret_pct"] = round((sl_abs - entry_ref) / entry_ref * 100, 2)
+        pick["resolved_ret_pct"] = round((stop_abs - entry_ref) / entry_ref * 100, 2)
     elif today_high >= tp2_abs:
         pick["status"] = "TP2_HIT"
         pick["resolved_date"] = today_date
@@ -369,6 +375,8 @@ def _resolve_active_pick(pick: dict) -> dict:
     else:
         if today_high >= tp1_abs:
             pick["tp1_touched"] = True
+        if today_high >= entry_ref * (1 + BE_TRIGGER_PCT / 100):
+            pick["be_armed"] = True   # takes effect from the next bar's stop check
         pick["age_days"] = pick.get("age_days", 1) + 1
         if pick["age_days"] > ALERT_MAX_AGE_DAYS:
             pick["status"] = "EXPIRED"
