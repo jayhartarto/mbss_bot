@@ -30,7 +30,7 @@ NB_REF_MIN = 0.0570
 LIQ_MIN = 3e8              # Rp per day, 20-day average of close*volume
 NEW_BROKER_MAX_ACTIVITY = 0.0025
 REF_ROLES = ("foreign_inst", "local_other", "foreign_retail_base")
-TAG_LANES = ("VCP", "BOS", "MACD-confirm")
+TAG_LANES = ("VCP", "BOS", "MACD-confirm", "BULL")
 MIN_BASELINE_DAYS = 15     # distinct days with broker rows among the 25 days before the trigger date
 MARK = "🆕"
 LABEL = "PEMBELI BARU"
@@ -113,7 +113,7 @@ def is_tagged(pick: dict) -> bool:
 def live_report() -> str:
     """Live validation from the pick files: resolved picks, tagged vs untagged, per lane (win = resolved_ret_pct > 0)."""
     import json
-    files = {"VCP": "vcp_pillar_picks.json", "BOS": "buy_on_strength_picks.json", "MACD-confirm": "macd_confirm_pillar_picks.json"}
+    files = {"VCP": "vcp_pillar_picks.json", "BOS": "buy_on_strength_picks.json", "MACD-confirm": "macd_confirm_pillar_picks.json", "BULL": "bull_picks.json"}
     rows = []
     for lane, f in files.items():
         try:

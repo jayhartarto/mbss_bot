@@ -55,6 +55,8 @@ import engine.backbone as backbone_engine
 import engine.lane_confidence as lane_confidence
 import engine.scanalert as scanalert_engine
 import engine.swing_horizon_confidence as swing_horizon_confidence
+import engine.lane_guide as lane_guide
+import engine.bull as bull_engine
 import engine.daytrade_hc_confidence as daytrade_hc_confidence
 import engine.daytrade_2d_screen as daytrade_2d_screen
 import engine.buy_on_weakness as buy_on_weakness_engine
@@ -4209,7 +4211,7 @@ async def buy_on_weakness_command(update, context):
         "dipakai, bukan opsional."
     )
 
-    lines.append(f"\n🔄 OVERSOLD BOUNCE v2 ({len(osb_active)})")
+    lines.append(f"\n🔄 OVERSOLD BOUNCE v2 ({len(osb_active)})\n{lane_guide.osb_guide()}")
     if not osb_active:
         lines.append("— tidak ada sinyal aktif (lane ini hanya nyala saat IHSG dd_100<=-10%, cek lagi kalau regime makin bearish).")
     for p in osb_active:
@@ -4230,7 +4232,7 @@ async def buy_on_weakness_command(update, context):
             f"{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger{macd_note}){ff_tag}{priority_tag}{tier1_tag}\n"
             f"{age_label}\n"
             f"Entry ref: {p['entry_ref_price']:,.0f}\n"
-            f"SL: {p['sl_price']:,.0f} (-20%, WAJIB, jangan dipersempit)\n"
+            f"SL: {p['sl_price']:,.0f} ({(p['sl_price'] / p['entry_ref_price'] - 1) * 100:.0f}%)\n"
             f"TP1: {p['tp1_price']:,.0f} (+5%, referensi konservatif){tp1_note}\n"
             f"TP2: {p['tp2_price']:,.0f} (+10%, referensi utama)"
         )
@@ -4241,6 +4243,9 @@ async def buy_on_weakness_command(update, context):
             "(satu dari dua episode OOS negatif saat dites di -15%)."
         )
     await core.safe_reply(update.message, "\n\n".join(lines))
+
+
+OSB_TOP_N = 5  # OSB-v2 plan B (user 2026-10-29): tiered Top-5 NEW picks + risk label when the IHSG gate is closed
 
 
 async def swing_command(update, context):
@@ -4315,10 +4320,15 @@ async def swing_command(update, context):
         if p.get("status") == "ALIVE" and p.get("age_days", 1) <= 1
     ]
     macd_confirm_active.sort(key=lambda p: p["ticker"])
+    vcp_active, macd_confirm_active = [], []   # VCP + MACD-confirm switched off 2026-10-29 (user: noise); engines/histories kept, nightly only resolves old picks
 
     bos_picks = buy_on_strength_engine.load_buy_on_strength_picks()
     bos_active = [p for p in bos_picks if p.get("status") == "ALIVE"]
     bos_active.sort(key=lambda p: -p.get("ret_10d_at_trigger", 0))
+
+    import engine.newbuyer_tag as _nbt
+    bull_active = [p for p in bull_engine.load_bull_picks() if p.get("status") == "ALIVE"]
+    bull_active.sort(key=lambda p: (not _nbt.is_tagged(p), p.get("kind") != "PULLBACK", p.get("age_days", 1)))
 
     # HINDARI filter (2026-10-22, user decision; rules + evidence in engine/lane_scorecard.py): picks whose signal-day
     # conditions backtested as negative-expectancy are hidden from the list and counted in a closing line instead.
@@ -4352,30 +4362,115 @@ async def swing_command(update, context):
     (bow_active, osb_active, vcp_active, macd_confirm_active, bos_active), _hindari_hidden = await asyncio.to_thread(_apply_hindari)
     _hindari_note = lane_scorecard.hidden_footnote(_hindari_hidden)
 
-    if not bow_active and not osb_active and not vcp_active and not macd_confirm_active and not bos_active:
+    # Hybrid IHSG gate (2026-10-29, user-approved): hides NEW BOW/VCP/MACD-confirm picks while closed; OSB-v2 is never
+    # hidden (crash-native) -- NEW picks capped to Top-5 and labelled instead. Fail-open; drops logged for the audit.
+    import engine.ihsg_gate as ihsg_gate
+    import engine.lane_guide as lane_guide
+
+    def _apply_gate():
+        _g, _n = None, 0
+        _res = []
+        for _lane, _picks in (("BOW", bow_active), ("VCP", vcp_active), ("MACD-confirm", macd_confirm_active)):
+            _kept, _g, _d = ihsg_gate.split_new(_lane, _picks)
+            _res.append(_kept)
+            _n += _d
+        return _res, _g, _n
+
+    (bow_active, vcp_active, macd_confirm_active), _gate, _gate_dropped = await asyncio.to_thread(_apply_gate)
+    _osb_new = [p for p in osb_active if p.get("age_days", 1) <= 1]
+    _osb_cut = max(0, len(_osb_new) - OSB_TOP_N)
+    if _osb_cut:
+        _drop_ids = {id(p) for p in _osb_new[OSB_TOP_N:]}
+        osb_active = [p for p in osb_active if id(p) not in _drop_ids]
+
+    # Crowd-avoid hide (2026-10-29, user-approved): NEW picks where scalpers (MG, CP) net-bought >= 3% or retail apps >= 5% of 5d lots.
+    import engine.crowd_flag as crowd_flag
+
+    def _apply_crowd():
+        _hid = []
+        _out = []
+        for _lane, _picks in (("BOW", bow_active), ("BULL", bull_active), ("BOS", bos_active)):
+            _k, _h = crowd_flag.partition(_lane, _picks)
+            _out.append(_k)
+            _hid += _h
+        return _out, _hid
+
+    (bow_active, bull_active, bos_active), _crowd_hidden = await asyncio.to_thread(_apply_crowd)
+    _crowd_note = crowd_flag.footnote(_crowd_hidden)
+    if _crowd_note:
+        _hindari_note = (_hindari_note + "\n" if _hindari_note else "") + _crowd_note
+
+    # Past-entry-window picks (lane_scorecard.ENTRY_WINDOW_DAYS, the same rule as the 🔵 TAHAN tag) are tracking only: one summary line.
+    _tracking = []
+
+    def _entry_only(lane, picks):
+        w = lane_scorecard.ENTRY_WINDOW_DAYS.get(lane, 2)
+        _tracking.extend((lane, q) for q in picks if q.get("age_days", 1) > w)
+        return [q for q in picks if q.get("age_days", 1) <= w]
+
+    bow_active = _entry_only("BOW", bow_active)
+    osb_active = _entry_only("OSB-v2", osb_active)
+    vcp_active = _entry_only("VCP", vcp_active)
+    macd_confirm_active = _entry_only("MACD-confirm", macd_confirm_active)
+    bos_active = _entry_only("BOS", bos_active)
+    bull_active = _entry_only("BULL", bull_active)
+
+    def _tracking_line():
+        parts = []
+        for ln_ in ("BULL", "OSB-v2", "BOS", "BOW"):
+            grp = [q for l_, q in _tracking if l_ == ln_]
+            if not grp:
+                continue
+            items = [f"{q['ticker']} {q['price_drift_pct']:+.1f}% (D{q.get('age_days', '?')})" if q.get("price_drift_pct") is not None
+                     else f"{q['ticker']} (D{q.get('age_days', '?')})" for q in grp[:8]]
+            parts.append(f"{ln_}: " + ", ".join(items) + (f" +{len(grp) - 8} lainnya" if len(grp) > 8 else ""))
+        return "📌 Tracking (bukan entry baru): " + " | ".join(parts)
+
+    if not bow_active and not osb_active and not bos_active and not bull_active:
         await core.safe_reply(
             update.message,
-            "🧭 SWING — belum ada sinyal aktif saat ini (BOW, OSB-v2, VCP, MACD-confirm, maupun BOS). "
-            "Lane ini jalan otomatis tiap malam via /eodscan, cek lagi besok."
+            "🧭 SWING — belum ada sinyal entry baru hari ini."
+            + (f"\n\n{_tracking_line()}" if _tracking else "")
             + (f"\n\n{_hindari_note}" if _hindari_note else "")
         )
         return
 
-    lines = [f"🧭 SWING — {len(bow_active)} BOW + {len(osb_active)} OSB-v2 + {len(vcp_active)} VCP + "
-             f"{len(macd_confirm_active)} MACD-confirm + {len(bos_active)} BOS sinyal aktif"]
+    lines = [f"🧭 SWING — {len(bull_active)} BULL + {len(osb_active)} OSB-v2 + {len(bos_active)} BOS + {len(bow_active)} BOW sinyal baru"]
+
+    if _gate and not _gate["open"]:
+        lines.append(f"\n⛔ Gate IHSG tertutup ({_gate['reason']}): {_gate_dropped} pick baru BOW disembunyikan; BULL tidak membuat pick saat gate tutup. "
+                     f"OSB-v2 tetap tampil dengan label ⚠️ RISIKO TINGGI (kecilkan ukuran posisi).")
+    if _osb_cut:
+        lines.append(f"ℹ️ OSB-v2: hanya Top-{OSB_TOP_N} pick baru ditampilkan ({_osb_cut} lainnya disembunyikan).")
 
     # "Pilihan Kuat" (2026-10-27): NEW picks (Day 1) carrying the 🆕 pembeli-baru booster. Shown only on days that have any; the full
     # lane lists below are unchanged. Backtest: win +5pp / mean +0.5pp vs untagged, SL-hit not lower -> a booster, not a safer list.
-    _strong = [(ln_, p) for ln_, grp in (("VCP", vcp_active), ("MACD-confirm", macd_confirm_active), ("BOS", bos_active))
+    _strong = [(ln_, p) for ln_, grp in (("BULL", bull_active), ("BOS", bos_active))
                for p in grp if newbuyer_tag.is_tagged(p) and p.get("age_days", 1) <= 1]
     if _strong:
         lines.append(f"\n🆕 PILIHAN KUAT — pembeli baru ({len(_strong)})")
         for ln_, p in _strong:
             _sl = f" | SL {p['sl_price']:,.0f}" if p.get("sl_price") else ""
             lines.append(f"• {p['ticker']} ({ln_}) entry ref {p.get('entry_ref_price') or 0:,.0f}{_sl}")
-        lines.append("ℹ️ Booster, bukan jaminan: win ~66% vs ~61% tanpa tag, risiko SL sama. Likuiditas ≥Rp0,3 M/hari. Detail tiap pick ada di lane masing-masing.")
+        lines.append("ℹ️ Booster, bukan jaminan (win ~66% vs ~61%).")
 
-    lines.append(f"\n🪶 BUY ON WEAKNESS ({len(bow_active)})")
+    lines.append(f"\n🐂 BULL ({len(bull_active)})\n{lane_guide.bull_guide()}")
+    if not bull_active:
+        lines.append("— tidak ada sinyal baru" + (" (gate IHSG tertutup)." if (_gate and not _gate["open"]) else "."))
+    for p in bull_active:
+        _kind = "pullback" if p.get("kind") == "PULLBACK" else "momentum"
+        _ref = p["entry_ref_price"]
+        _trail = f"\nTrailing aktif: SL {p['trail_stop']:,.0f}" if p.get("trail_stop") else ""
+        lines.append(
+            f"{_nbt.MARK + ' ' if _nbt.is_tagged(p) else ''}{p['ticker']} — {_kind} ({'+'.join(p.get('formulas', []))})\n"
+            f"NEW (Day {p.get('age_days', 1)}/{bull_engine.MAX_HOLD_DAYS})\n"
+            f"Entry: open besok (ref close {_ref:,.0f})\n"
+            f"SL: {p['sl_price']:,.0f} (-{bull_engine.SL_PCT:.0f}%)\n"
+            f"TP: {p['tp_price']:,.0f} (+{bull_engine.TP_PCT:.0f}%)"
+            f"{_trail}"
+        )
+
+    lines.append(f"\n🪶 BUY ON WEAKNESS ({len(bow_active)})\n{lane_guide.bow_guide()}")
     if not bow_active:
         lines.append("— tidak ada sinyal aktif.")
     for p in bow_active:
@@ -4416,7 +4511,7 @@ async def swing_command(update, context):
             f"{note_line}"
         )
 
-    lines.append(f"\n🔄 OVERSOLD BOUNCE v2 ({len(osb_active)})")
+    lines.append(f"\n🔄 OVERSOLD BOUNCE v2 ({len(osb_active)})\n{lane_guide.osb_guide()}")
     if not osb_active:
         lines.append("— tidak ada sinyal aktif (lane ini hanya nyala saat IHSG dd_100<=-10%).")
     for p in osb_active:
@@ -4434,89 +4529,23 @@ async def swing_command(update, context):
         macd_note = f", MACD {p['macd_line_pct_at_trigger']:.1f}%" if p.get("macd_line_pct_at_trigger") is not None else ""
         tier1_tag = " 🏆 TIER1 (RSI+MACD, CRASH_FAST)" if p.get("tier") == "TIER1" else ""
         lines.append(
-            f"{_mk('OSB-v2', p)}{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger{macd_note}){ff_tag}{priority_tag}{tier1_tag}\n"
+            f"{_mk('OSB-v2', p)}{'⚠️ RISIKO TINGGI ' if (_gate and not _gate['open'] and p.get('age_days', 1) <= 1) else ''}{p['ticker']} (RSI {p['rsi14_at_trigger']} saat trigger{macd_note}){ff_tag}{priority_tag}{tier1_tag}\n"
             f"{age_label}\n"
             f"Entry ref: {p['entry_ref_price']:,.0f}\n"
-            f"SL: {p['sl_price']:,.0f} (-20%, WAJIB)\n"
+            f"SL: {p['sl_price']:,.0f} ({(p['sl_price'] / p['entry_ref_price'] - 1) * 100:.0f}%)\n"
             f"TP1: {p['tp1_price']:,.0f} (+5%, referensi konservatif){tp1_note}\n"
             f"TP2: {p['tp2_price']:,.0f} (+10%, referensi utama)"
         )
 
-    lines.append(f"\n📐 VCP BREAKOUT ({len(vcp_active)})")
-    if not vcp_active:
-        lines.append("— tidak ada sinyal aktif.")
-    for p in vcp_active:
-        age = p["age_days"]
-        age_label = f"NEW (Day {age}/{vcp_pillar_engine.ALERT_MAX_AGE_DAYS})" if age <= 1 else f"AGING (Day {age}/{vcp_pillar_engine.ALERT_MAX_AGE_DAYS}) — ALIVE"
-        bonus = []
-        if p.get("tp2_touched"):
-            bonus.append("TP2")
-        if p.get("tp3_touched"):
-            bonus.append("TP3")
-        bonus_note = f" ✅ {'+'.join(bonus)} juga tersentuh (upside bonus)" if bonus else ""
-        drift_pct = p.get("price_drift_pct", 0.0)
-        drift_label = p.get("drift_label", "😌 Baru alert")
-        drift_zone = p.get("drift_zone", "NETRAL")
-        naik_note = (
-            f"\n💡 Konfirmasi lanjut terdeteksi — pertimbangkan target diperpanjang ke "
-            f"~{vcp_pillar_engine.VCP_NAIK_TP_TARGET_PCT:.1f}% (bukan TP1/TP2 baku) berdasarkan riset."
-            if drift_zone == "NAIK" else ""
-        )
-        lines.append(
-            f"{_mk('VCP', p)}{p['ticker']} (entry ref {p['entry_ref_price']:,.0f})\n"
-            f"{age_label}\n"
-            f"SL: {p['sl_price']:,.0f} (-{vcp_pillar_engine.SL_PCT:.0f}%)\n"
-            f"TP1: {p['tp1_price']:,.0f} (+{vcp_pillar_engine.TP1_PCT:.1f}%, ~{p['tp1_touch_rate']:.0f}% historical touch-rate) — resolusi utama\n"
-            f"TP2: {p['tp2_price']:,.0f} (+{vcp_pillar_engine.TP2_PCT:.1f}%, ~{p['tp2_touch_rate']:.0f}% touch-rate)\n"
-            f"TP3: {p['tp3_price']:,.0f} (+{vcp_pillar_engine.TP3_PCT:.1f}%, ~{p['tp3_touch_rate']:.0f}% touch-rate){bonus_note}\n"
-            f"Pergerakan sejak entry: {drift_pct:+.1f}% — {drift_label}"
-            f"{naik_note}"
-        )
-
-    lines.append(f"\n🌀 MACD-CONFIRM ({len(macd_confirm_active)})")
-    if not macd_confirm_active:
-        lines.append("— tidak ada sinyal aktif.")
-    for p in macd_confirm_active:
-        lane_icon = macd_confirm_pillar_engine.LANE_ICONS.get(p["lane"], "")
-        entry_ref = p["entry_ref_price"]
-        win_rate = macd_confirm_pillar_engine.win_rate_of(p)
-        win_rate_line = f"Win Rate: ~{win_rate:.0f}% (regime BOUNCE_OFF_LOW)\n" if win_rate is not None else ""
-        sl_pct = (p["sl_price"] / entry_ref - 1) * 100
-        tp_pct = (p["tp_price"] / entry_ref - 1) * 100
-        lines.append(
-            f"{_mk('MACD-confirm', p)}{lane_icon} {p['ticker']}\n"
-            f"{win_rate_line}"
-            f"NEW (Day 1/{macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS})\n"
-            f"Entry ref: {entry_ref:,.0f}\n"
-            f"TP: {p['tp_price']:,.0f} ({tp_pct:+.0f}%)\n"
-            f"SL: {p['sl_price']:,.0f} ({sl_pct:+.0f}%)\n"
-            f"Horizon: maksimal {macd_confirm_pillar_engine.ALERT_MAX_AGE_DAYS} hari bursa"
-        )
-
-    lines.append(
-        "\n⚠️ MACD-CONFIRM: regime-gated (hanya aktif saat IHSG BOUNCE_OFF_LOW) "
-        "+ exit mekanis tetap (SL/TP dicek dari High/Low harian, bukan close) "
-        "-- SL wajib dipatuhi, bukan opsional. Sinyal muncul SEKALI saat entry "
-        "(Day 1), lalu diam sampai resolve (kena TP/SL/atau habis horizon) -- "
-        "tidak ada keputusan susulan yang perlu diambil di hari 2-5."
-    )
-
-    lines.append(f"\n💪 BOS — BUY ON STRENGTH ({len(bos_active)})")
+    lines.append(f"\n💪 BOS — BUY ON STRENGTH ({len(bos_active)})\n{lane_guide.bos_guide()}")
     if not bos_active:
-        lines.append(
-            "— tidak ada sinyal aktif (lane ini hanya nyala saat IHSG sedang "
-            "BOUNCE_OFF_LOW -- fase recovery di dalam bear regime, bukan "
-            "capitulation/CRASH_FAST maupun pasar normal)."
-        )
+        lines.append("— tidak ada sinyal (hanya aktif saat IHSG BOUNCE_OFF_LOW).")
     for p in bos_active:
         age = p["age_days"]
         age_label = (f"NEW (Day {age})" if age <= 1
                      else f"AGING (Day {age}) — ALIVE")
         hold_note = (
-            f"\n⏰ Sudah Day {age} — menurut backtest, posisi yang belum "
-            f"resolve lewat hari ke-{buy_on_strength_engine.MAX_HOLD_GUIDANCE_DAYS} "
-            "cenderung ret/hari-nya memburuk (bukan auto-exit, pertimbangkan "
-            "manual)."
+            f"\n⏰ Day {age}: lewat hari ke-{buy_on_strength_engine.MAX_HOLD_GUIDANCE_DAYS}, pertimbangkan keluar manual."
             if age >= buy_on_strength_engine.MAX_HOLD_GUIDANCE_DAYS else ""
         )
         sl_pct = p.get("sl_pct", buy_on_strength_engine.SL_PCT_NORMAL)
@@ -4540,37 +4569,19 @@ async def swing_command(update, context):
         )
     if bos_active:
         buy_on_strength_engine.save_buy_on_strength_picks(bos_picks)  # persist quick_sl_alert_pending clear
-    lines.append(
-        "\n⚠️ BOS: ikut kekuatan yang SUDAH terbukti (ret_10d>+5%) khusus saat "
-        "market recovery dari crash -- bukan nebak dasar seperti OSB-v2. SL "
-        "normal -15%, otomatis diperketat ke -7% kalau hari pertama closing "
-        "merah ≥2% (lihat alert QUICK-SL di atas). Max hold 6 hari cuma "
-        "panduan tertulis, BUKAN auto-exit -- keputusan keluar tetap manual."
-    )
-    lines.append(
-        "\n⚠️ BOW, OSB-v2, VCP, MACD-CONFIRM & BOS lima pilar terpisah (JANGAN "
-        "digabung jadi satu skor). BOW: winrate tinggi, gain stabil, butuh "
-        "uptrend intak. OSB-v2: kebalikan BOW (butuh trend RUSAK + IHSG "
-        "bearish dd_100<=-10%), watchlist-only belum ada auto-entry. VCP: TP1 "
-        "cepat & reliable, TP2/TP3 upside tapi tail-driven (persentase "
-        "touch-rate BUKAN jaminan). MACD-CONFIRM: regime-gated (hanya "
-        "BOUNCE_OFF_LOW) + exit mekanis SL-6%/TP+8%/maks 5 hari — diredesain "
-        "2026-10-14 setelah tag D1-D5 lama terbukti tidak prediktif. BOS: BARU "
-        "(2026-10-13), hanya nyala saat BOUNCE_OFF_LOW, komplementer dengan "
-        "OSB-v2 bukan tumpang-tindih (OSB-v2 nyala di CRASH_FAST). SL wajib "
-        "dipakai di semua pilar, bukan opsional."
-    )
+    if _tracking:
+        lines.append("\n" + _tracking_line())
+    lines.append("\n⚠️ Empat lane terpisah, jangan digabung jadi satu skor. Ikuti 📖 di tiap lane. SL wajib, bukan opsional.")
     # HSC: sinyal BARU sudah di-hide di whitelist, tapi pick ALIVE lama tetap
     # ditampilkan/di-track sampai selesai -- kasih tanda supaya jelas (2026-10-20).
-    _hsc_in_view = sorted({p["ticker"] for grp in (bow_active, osb_active, vcp_active, macd_confirm_active, bos_active)
+    _hsc_in_view = sorted({p["ticker"] for grp in (bow_active, osb_active, bos_active, bull_active)
                            for p in grp if core.hsc_tag(p["ticker"])})
     if _hsc_in_view:
-        lines.append(f"\n⚠️ HSC (kepemilikan terkonsentrasi) di antara pick aktif: {', '.join(_hsc_in_view)} "
-                     f"-- pick lama yang masih di-track sampai selesai, bukan sinyal baru.")
+        lines.append(f"\n⚠️ HSC (kepemilikan terkonsentrasi): {', '.join(_hsc_in_view)}")
     # XL net-buy warning (2026-10-21): display-only, never hides a pick or changes a score -- see engine/broker_flags.py.
     try:
         import engine.broker_flags as broker_flags
-        _xl = await asyncio.to_thread(broker_flags.xl_flags, sorted({p["ticker"] for grp in (bow_active, osb_active, vcp_active, macd_confirm_active, bos_active) for p in grp}))
+        _xl = await asyncio.to_thread(broker_flags.xl_flags, sorted({p["ticker"] for grp in (bow_active, osb_active, bos_active, bull_active) for p in grp}))
         _xl_line = broker_flags.summary_line(_xl)
         if _xl_line:
             lines.append(_xl_line)
@@ -4579,7 +4590,7 @@ async def swing_command(update, context):
     try:
         import engine.corporate_actions as corporate_actions
         _ca = []
-        for _t in sorted({p["ticker"] for grp in (bow_active, osb_active, vcp_active, macd_confirm_active, bos_active) for p in grp}):
+        for _t in sorted({p["ticker"] for grp in (bow_active, osb_active, bos_active, bull_active) for p in grp}):
             _w = corporate_actions.window_lines(_t, allow_fetch=False, max_lines=1)
             if _w:
                 _ca.append(f"{_t}: {_w[0][2:].strip()}")
@@ -4588,8 +4599,7 @@ async def swing_command(update, context):
                          + (f"{chr(10)}… +{len(_ca) - 10} lainnya" if len(_ca) > 10 else ""))
     except Exception as _e:  # noqa: BLE001
         print(f"⚠️ /swing corporate action gagal (diabaikan): {_e}")
-    lines.append("Tag: 🟢A BELI-A | 🟡B BELI-B | 🔵 TAHAN (lewat jendela entry) | 🔴 KELUAR | ⚪ NETRAL (bukti lane belum cukup). "
-                 "Dari scorecard lane x regime backtest; pick HINDARI disembunyikan.")
+    lines.append("Tag: 🟢A/🟡B beli | 🔵 tahan | 🔴 keluar | ⚪ netral")
     if _hindari_note:
         lines.append(_hindari_note)
     await core.safe_reply(update.message, "\n\n".join(lines))

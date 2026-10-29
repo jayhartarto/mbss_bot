@@ -30,7 +30,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(ROOT, "research", "ipot_broker_daily.sqlite")
 OHLCV_DB = os.path.join(ROOT, "mbss_ohlcv.db")
 PICK_FILES = ["macd_confirm_pillar_picks.json", "oversold_bounce_v2_picks.json", "buy_on_strength_picks.json",
-              "vcp_pillar_picks.json", "buy_on_weakness_picks.json"]
+              "vcp_pillar_picks.json", "buy_on_weakness_picks.json", "bull_picks.json"]
 DEFAULT_VARIANTS = (("all", "all"), ("F", "all"), ("D", "all"), ("all", "NG"))
 TOP_LIQUID = 150
 MIN_HOUR_WIB_FOR_TODAY = 17  # IDX closes 16:00 WIB (Fri 16:00 too); give IPOT time to finalise the day
@@ -224,7 +224,7 @@ def collect_days(days: list[str], tickers: list[str], variants=DEFAULT_VARIANTS,
         conn.close()
 
 
-TAG_PICK_FILES = ["macd_confirm_pillar_picks.json", "buy_on_strength_picks.json", "vcp_pillar_picks.json"]  # lanes engine/newbuyer_tag serves
+TAG_PICK_FILES = ["macd_confirm_pillar_picks.json", "buy_on_strength_picks.json", "vcp_pillar_picks.json", "bull_picks.json"]  # lanes engine/newbuyer_tag serves
 HISTORY_WEEKDAYS = 30      # newbuyer_tag needs >=15 broker days inside a 45-bar window ending at the trigger date
 
 

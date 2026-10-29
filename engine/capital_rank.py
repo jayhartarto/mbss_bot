@@ -95,6 +95,7 @@ DEFAULT_W_WIN = 0.45
 DEFAULT_W_TPGAIN = 0.15  # user request 2026-10-11: TP gain is a less certain factor
                          # (target band itself moves, no hard trigger like win/SL) --
                          # de-emphasized vs win-rate/return, was 0.30
+DISABLED_LANES = ('VCP', 'MACD')  # 2026-10-29: switched off by the user (noise); /rank must follow /swing, so their picks are not ranked
 NEWBUYER_RANK_BONUS = 2.0  # 2026-10-27: win +~5pp (65.6 vs 60.8) x 45% win weight; t~2.6, so deliberately small. VCP/MACD only (BOS not in /rank).
 NEUTRAL_TPGAIN_SCORE = 50.0  # assigned when tp_gain_pct can't be computed for a lane yet
 LAST_HIDDEN_HINDARI: list = []  # [(lane, ticker, reasons)] hidden by the last _gather_candidates() call, see engine/lane_scorecard.py
@@ -256,7 +257,7 @@ def _gather_candidates():
         out.append({"lane_key": "OSB", "ff_priority": bool(p.get("ff_priority")), "pick": p,
                      "stats": dict(stats), "score_bonus": 0.0, "tp_gain_pct": None})
 
-    for p in vcp_engine.load_vcp_picks():
+    for p in ([] if 'VCP' in DISABLED_LANES else vcp_engine.load_vcp_picks()):
         if p.get("status") != "ALIVE":
             continue
         out.append({"lane_key": "VCP", "ff_priority": None, "pick": p,
@@ -265,7 +266,7 @@ def _gather_candidates():
 
     # Same filter as swing_command: show-once rule (age_days<=1), see
     # engine/macd_confirm_pillar.py module docstring (2026-10-14 redesign).
-    for p in macd_engine.load_macd_confirm_picks():
+    for p in ([] if 'MACD' in DISABLED_LANES else macd_engine.load_macd_confirm_picks()):
         if p.get("status") != "ALIVE" or p.get("age_days", 1) > 1:
             continue
         stats, tp_gain = _macd_stats_and_tp_gain(p)

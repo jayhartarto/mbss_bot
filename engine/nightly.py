@@ -69,6 +69,7 @@ import engine.oversold_bounce_v2 as oversold_bounce_v2_engine
 import engine.vcp_pillar as vcp_pillar_engine
 import engine.macd_confirm_pillar as macd_confirm_pillar_engine
 import engine.buy_on_strength as buy_on_strength_engine
+import engine.bull as bull_engine
 import engine.winrate_monitor as winrate_monitor_engine
 import engine.bsjp2 as bsjp2_engine
 
@@ -287,6 +288,8 @@ def fetch_all_tickers_scored(tickers):
     try:
         for chunk_start in range(0, len(tickers), core.ITICK_CHUNK_SIZE):
             chunk = tickers[chunk_start:chunk_start + core.ITICK_CHUNK_SIZE]
+            chunk_live = 0
+            scoring_engine.last_info_live = False
             for ticker in chunk:
                 # MBSS v2 (user request): skip ticker yang sudah dikonfirmasi gagal
                 # fetch berkali-kali berturut-turut (biasanya delisted) — tidak ada
@@ -297,6 +300,7 @@ def fetch_all_tickers_scored(tickers):
                     reason = core.get_blacklist_reason(ticker)
                     skip_reasons[ticker] = f"blacklisted ({reason})" if reason else "blacklisted (persisten gagal fetch)"
                     continue
+                scoring_engine.last_info_live = False
                 try:
                     res = scoring_engine.compute_factor_scoring(ticker, include_quote_check=False)
                     core.record_fetch_result(ticker, success=bool(res))
@@ -308,9 +312,11 @@ def fetch_all_tickers_scored(tickers):
                     print(f"Error processing {ticker}: {e}")
                     core.record_fetch_result(ticker, success=False)
                     skip_reasons[ticker] = f"exception: {str(e)[:100]}"
-                core.time.sleep(1.0)  # light pacing within a chunk
+                if scoring_engine.last_info_live:
+                    chunk_live += 1
+                    core.time.sleep(1.0)  # light pacing within a chunk (only after a real Yahoo call; cached .info needs none)
             is_last_chunk = (chunk_start + core.ITICK_CHUNK_SIZE) >= len(tickers)
-            if not is_last_chunk:
+            if not is_last_chunk and chunk_live:
                 print(f"⏳ Fetch/scoring: cooling down {core.ITICK_COOLDOWN_SECONDS}s before next chunk "
                       f"({chunk_start + len(chunk)}/{len(tickers)} tickers done)...")
                 core.time.sleep(core.ITICK_COOLDOWN_SECONDS)
@@ -574,12 +580,10 @@ async def run_nightly_full_scan(context):
         # trail behind every threshold.
         try:
             vcp_tickers = [r["ticker"] for r in results if r and r.get("ticker")]
-            vcp_candidates = await asyncio.to_thread(
-                vcp_pillar_engine.compute_vcp_candidates, vcp_tickers
-            )
-            await _prefetch_ipot_for_tag(vcp_candidates)
+            # DISABLED 2026-10-29 (user: noise -> VCP off). No new picks; existing ALIVE picks are still resolved so the history stays honest.
+            vcp_candidates = []
             vcp_pillar_engine.update_and_save_picks(vcp_candidates)
-            print(f"📐 VCP: {len(vcp_candidates)} kandidat baru hari ini.")
+            print("📐 VCP: nonaktif (hanya menutup pick lama).")
         except Exception as e:
             print(f"⚠️ Gagal menjalankan VCP: {e}")
 
@@ -593,12 +597,10 @@ async def run_nightly_full_scan(context):
         # reuse-of-`results` pattern as BOW/VCP above.
         try:
             macd_confirm_tickers = [r["ticker"] for r in results if r and r.get("ticker")]
-            macd_confirm_candidates = await asyncio.to_thread(
-                macd_confirm_pillar_engine.compute_macd_confirm_candidates, macd_confirm_tickers
-            )
-            await _prefetch_ipot_for_tag(macd_confirm_candidates)
+            # DISABLED 2026-10-29 (user: noise -> MACD-confirm off). Resolve-only, same as VCP above.
+            macd_confirm_candidates = []
             macd_confirm_pillar_engine.update_and_save_picks(macd_confirm_candidates)
-            print(f"🌀 MACD-confirm: {len(macd_confirm_candidates)} kandidat baru hari ini.")
+            print("🌀 MACD-confirm: nonaktif (hanya menutup pick lama).")
         except Exception as e:
             print(f"⚠️ Gagal menjalankan MACD-confirm: {e}")
 
@@ -624,6 +626,17 @@ async def run_nightly_full_scan(context):
             print(f"💪 Buy On Strength (BOS): {len(bos_candidates)} kandidat baru hari ini.")
         except Exception as e:
             print(f"⚠️ Gagal menjalankan Buy On Strength (BOS): {e}")
+
+        # MBSS v2 (user request 2026-10-29 -- lane BULL, research/bull5): confirmed momentum/pullback alert, hybrid IHSG gate, TP20/SL8/trail/9d.
+        # Gate closed -> compute_bull_candidates returns [] (dropped candidates are logged). Existing ALIVE picks are always resolved.
+        try:
+            bull_tickers = [r["ticker"] for r in results if r and r.get("ticker")]
+            bull_candidates = await asyncio.to_thread(bull_engine.compute_bull_candidates, bull_tickers)
+            await _prefetch_ipot_for_tag(bull_candidates)
+            bull_engine.update_and_save_picks(bull_candidates)
+            print(f"🐂 BULL: {len(bull_candidates)} kandidat baru hari ini.")
+        except Exception as e:
+            print(f"⚠️ Gagal menjalankan BULL: {e}")
 
         # Win-rate drift monitor (2026-10-11, user request) -- lightweight
         # REALIZED-vs-ASSUMED check from each lane's own resolved pick

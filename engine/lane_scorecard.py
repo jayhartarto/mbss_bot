@@ -199,7 +199,7 @@ B_WIN, B_MEAN = 60.0, 0.5            # BELI-B: win >= 60% AND mean >= +0.5% ...
 B_MEAN_LO_MIN = -1.0                  # BELI-B also needs the 95% CI lower bound of the mean above this (not clearly <= 0)
 B_ALT_WIN, B_ALT_MEAN = 55.0, 2.0    # ... OR win >= 55% with mean >= +2.0% and CI lower bound > 0 (fat-tail lanes such as BOS)
 # Trading days after the trigger in which a NEW entry is still sensible. Adjustable assumption: after this the pick is TAHAN.
-ENTRY_WINDOW_DAYS = {"BOW": 2, "OSB-v2": 3, "VCP": 2, "MACD-confirm": 1, "BOS": 2}
+ENTRY_WINDOW_DAYS = {"BOW": 2, "OSB-v2": 3, "VCP": 2, "MACD-confirm": 1, "BOS": 2, "BULL": 1}
 EXIT_RECENT_DAYS = 3                 # a resolved pick shows KELUAR for this many calendar days after resolved_date
 # Lanes whose level is NOT lowered by the EXT / spike warnings (the warning line still shows). User decision 2026-10-22: OSB-v2 picks
 # flagged EXT still meet the BELI-A bar on their own numbers (late half: win 73.8%, mean +3.64%, n=84).

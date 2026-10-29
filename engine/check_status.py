@@ -58,6 +58,12 @@ def lane_status(ticker: str) -> list[str]:
         out.append(f"🌀 MACD-confirm Day {p.get('age_days', 1)}/{mc.ALERT_MAX_AGE_DAYS} | Entry {p['entry_ref_price']:,.0f} | "
                    f"SL {p['sl_price']:,.0f} | TP {p['tp_price']:,.0f}")
 
+    import engine.bull as bull
+    for p in (x for x in _picks(bull, "load_bull_picks") if x.get("ticker") == t and x.get("status") == "ALIVE"):
+        trail = f" | Trailing SL {p['trail_stop']:,.0f}" if p.get("trail_stop") else ""
+        out.append(f"🐂 BULL Day {p.get('age_days', 1)}/{bull.MAX_HOLD_DAYS} | Entry {(p.get('entry_open') or p['entry_ref_price']):,.0f} | "
+                   f"SL {p['sl_price']:,.0f} | TP {p['tp_price']:,.0f}{trail}")
+
     for p in (x for x in _picks(bos, "load_buy_on_strength_picks") if x.get("ticker") == t and x.get("status") == "ALIVE"):
         sl_pct = p.get("sl_pct", bos.SL_PCT_NORMAL)
         sl_price = p.get("sl_price") or round(p["entry_ref_price"] * (1 + sl_pct / 100))

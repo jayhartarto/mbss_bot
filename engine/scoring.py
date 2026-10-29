@@ -56,6 +56,10 @@ on import order.
 """
 from __future__ import annotations
 
+import datetime
+import json
+import os
+
 import pandas as pd
 
 from engine import legacy_core as core
@@ -1064,6 +1068,53 @@ SENTIMENT_SCORE_WEIGHT = 0.319
 GOLD_LINKED_TICKERS = {"ARCI", "EMAS", "PSAB", "SQMI"}
 
 
+INFO_CACHE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yf_info_cache.json")
+INFO_CACHE_TTL_DAYS = 5
+INFO_KEYS = ("trailingPE", "priceToBook", "bookValue", "revenueGrowth", "returnOnEquity", "profitMargins",
+             "industry", "forwardPE", "pegRatio", "dividendYield", "longName", "shortName", "sector")
+_info_cache = None
+last_info_live = False  # True when the most recent _get_info_cached call hit Yahoo (the nightly loop paces only those)
+
+
+def _get_info_cached(ticker, stock):
+    """yfinance .info (PE/PB/ROE/dividend) changes quarterly but costs ~1.6s + pacing per ticker, so keep only the fields this
+    module reads for INFO_CACHE_TTL_DAYS. A failed live call falls back to the stale entry; failures are never cached."""
+    global _info_cache, last_info_live
+    now = datetime.datetime.now()
+    if _info_cache is None:
+        try:
+            with open(INFO_CACHE_PATH, encoding="utf-8") as f:
+                _info_cache = json.load(f)
+        except Exception:
+            _info_cache = {}
+    ent = _info_cache.get(ticker)
+    if ent:
+        try:
+            if (now - datetime.datetime.fromisoformat(ent["at"])).days < INFO_CACHE_TTL_DAYS:
+                last_info_live = False
+                return ent["info"]
+        except Exception:
+            pass
+    last_info_live = True
+    try:
+        raw = core.yf_fetch_with_retry(lambda: stock.info)
+    except Exception as e:
+        print(f"⚠️ {ticker}: yfinance PE/PB/dividend lookup failed ({e}) — scoring with iTick data only, "
+              f"value score will be neutral on the fundamentals it can't see.")
+        return ent["info"] if ent else {}
+    info = {k: raw.get(k) for k in INFO_KEYS if raw.get(k) is not None}
+    if info:
+        _info_cache[ticker] = {"at": now.isoformat(timespec="seconds"), "info": info}
+        try:
+            tmp = INFO_CACHE_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(_info_cache, f)
+            os.replace(tmp, INFO_CACHE_PATH)
+        except Exception as e:
+            print(f"⚠️ yf_info_cache tidak bisa ditulis: {e}")
+    return info
+
+
 def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundamentals=False, skip_live_refresh=False):
     """
     Returns a scored dict for one ticker, or None if data is unavailable/insufficient.
@@ -1154,12 +1205,7 @@ def compute_factor_scoring(ticker, include_quote_check=True, skip_live_fundament
     if skip_live_fundamentals:
         info = {}
     else:
-        try:
-            info = core.yf_fetch_with_retry(lambda: stock.info)
-        except Exception as e:
-            print(f"⚠️ {ticker}: yfinance PE/PB/dividend lookup failed ({e}) — scoring with iTick data only, "
-                  f"value score will be neutral on the fundamentals it can't see.")
-            info = {}
+        info = _get_info_cached(ticker, stock)
     close_prices = hist["Close"]
     volumes = hist["Volume"]
     low_prices = hist["Low"]
