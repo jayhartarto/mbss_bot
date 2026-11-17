@@ -4549,15 +4549,16 @@ async def swing_command(update, context):
             if age >= buy_on_strength_engine.MAX_HOLD_GUIDANCE_DAYS else ""
         )
         sl_pct = p.get("sl_pct", buy_on_strength_engine.SL_PCT_NORMAL)
+        # BOS picks store sl_pct only (no sl_price) -> derive it first; the quick-SL note below needs it.
+        sl_price = p.get("sl_price") or round(p["entry_ref_price"] * (1 + sl_pct / 100))
         quick_sl_note = ""
         if p.get("quick_sl_alert_pending"):
             quick_sl_note = (
                 f"\n🚨 QUICK-SL AKTIF — hari pertama closing merah ≥2%, SL "
-                f"diperketat ke {p['sl_price']:,.0f} ({sl_pct:.0f}%). "
+                f"diperketat ke {sl_price:,.0f} ({sl_pct:.0f}%). "
                 "KELUAR kalau harga tersentuh level ini."
             )
             p["quick_sl_alert_pending"] = False  # shown once, cleared on next save
-        sl_price = p.get("sl_price") or round(p["entry_ref_price"] * (1 + sl_pct / 100))
         tp_price = round(p["entry_ref_price"] * (1 + buy_on_strength_engine.TP_PCT / 100))
         lines.append(
             f"{_mk('BOS', p)}{p['ticker']} (ret_10d {p['ret_10d_at_trigger']:+.1f}% saat trigger)\n"
