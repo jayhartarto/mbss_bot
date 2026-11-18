@@ -70,6 +70,7 @@ import engine.vcp_pillar as vcp_pillar_engine
 import engine.macd_confirm_pillar as macd_confirm_pillar_engine
 import engine.buy_on_strength as buy_on_strength_engine
 import engine.bull as bull_engine
+import engine.pick_ledger as pick_ledger_engine
 import engine.winrate_monitor as winrate_monitor_engine
 import engine.bsjp2 as bsjp2_engine
 
@@ -637,6 +638,19 @@ async def run_nightly_full_scan(context):
             print(f"🐂 BULL: {len(bull_candidates)} kandidat baru hari ini.")
         except Exception as e:
             print(f"⚠️ Gagal menjalankan BULL: {e}")
+
+        # MBSS v2 (user request 2026-11-18 -- PICK LEDGER): catat SETIAP kandidat baru lane (source=live) lalu nilai ulang semua pick
+        # yg belum selesai terhadap beberapa aturan exit (engine/pick_ledger.py, /ledger). Gagal di sini tidak boleh mengganggu nightly.
+        try:
+            _loc = locals()
+            for _lane, _name in (("BOW", "bow_candidates"), ("OSBv2", "osb_v2_candidates"), ("BOS", "bos_candidates"), ("BULL", "bull_candidates")):
+                _c = _loc.get(_name)
+                if _c:
+                    pick_ledger_engine.record_picks(_lane, _c, source="live")
+            _res = await asyncio.to_thread(pick_ledger_engine.resolve_all)
+            print(f"📒 Ledger: {_res}")
+        except Exception as e:
+            print(f"⚠️ Gagal update pick ledger: {e}")
 
         # Win-rate drift monitor (2026-10-11, user request) -- lightweight
         # REALIZED-vs-ASSUMED check from each lane's own resolved pick

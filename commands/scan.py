@@ -67,6 +67,7 @@ import engine.buy_on_strength as buy_on_strength_engine
 import engine.ihsg_regime as ihsg_regime_engine
 import engine.bsjp2 as bsjp2_engine
 import engine.capital_rank as capital_rank_engine
+import engine.pick_ledger as pick_ledger_engine
 
 
 # MBSS v2 (user request 2026-08-27 -- TP1/TP2 individual per ticker, boleh
@@ -4509,6 +4510,7 @@ async def swing_command(update, context):
             f"Swing horizon: ~{p25:g}-{p75:g} hari (median {median_days:g})\n"
             f"Pergerakan sejak entry: {drift_pct:+.1f}% — {drift_label}"
             f"{note_line}"
+            f"{_ledger_filter_tag(p)}"
         )
 
     lines.append(f"\n🔄 OVERSOLD BOUNCE v2 ({len(osb_active)})\n{lane_guide.osb_guide()}")
@@ -4535,6 +4537,7 @@ async def swing_command(update, context):
             f"SL: {p['sl_price']:,.0f} ({(p['sl_price'] / p['entry_ref_price'] - 1) * 100:.0f}%)\n"
             f"TP1: {p['tp1_price']:,.0f} (+5%, referensi konservatif){tp1_note}\n"
             f"TP2: {p['tp2_price']:,.0f} (+10%, referensi utama)"
+            f"{_ledger_filter_tag(p)}"
         )
 
     lines.append(f"\n💪 BOS — BUY ON STRENGTH ({len(bos_active)})\n{lane_guide.bos_guide()}")
@@ -4604,6 +4607,44 @@ async def swing_command(update, context):
     if _hindari_note:
         lines.append(_hindari_note)
     await core.safe_reply(update.message, "\n\n".join(lines))
+
+
+def _ledger_filter_tag(p: dict) -> str:
+    """Tag FILTER dd60/RSI (riset 2026-11-18, lihat engine/pick_ledger.py): pick yg lolos (turun >=20% dari high 60h & RSI14>=31 di bar sinyal) boleh
+    ditahan lebih lama dgn target TP10. Hanya BOW/OSB-v2 (populasi yg diriset). Aturan lane utk tracking (SL/expiry) TIDAK diubah; hasil aturan baru: /ledger."""
+    info = pick_ledger_engine.filter_info(p.get("ticker"), p.get("trigger_date"))
+    if not info or not info["filt"]:
+        return ""
+    ep = p.get("entry_ref_price")
+    lv = f" -> TP10 {ep * 1.10:,.0f}, SL lebar {ep * 0.80:,.0f} (-20%)" if ep else ""
+    return (f"\n🎯 FILTER dd60/RSI ✅ (turun {abs(info['dd60']):.0f}% dari high 60h, RSI {info['rsi14']:.0f}): boleh TAHAN LEBIH LAMA (s/d ~30-60 hari), "
+            f"target TP10 (+10%){lv}, ukuran kecil. Riset (n=227): TP10 win 83-93%, mean +5..8%/trade; lemah di awal crash. Detail: /ledger")
+
+
+async def ledger_command(update, context):
+    """
+    /ledger — MBSS v2 (2026-11-18). Buku besar hasil pick: setiap sinyal lane (BOW/OSBv2/BOS/BULL) dinilai otomatis terhadap beberapa aturan exit
+    (aturan produksi OSB-v2 & BOW vs TP10/TP12 + SL20 vs TP10 tanpa SL), entry open T+1, biaya 0.4%. Lihat engine/pick_ledger.py.
+    Usage: /ledger  |  /ledger OSBv2 | BOW | BOS | BULL  |  /ledger live | replay | replay_oos  |  /ledger 30 (sinyal 30 hari terakhir)
+    Argumen boleh digabung, mis. /ledger BOW 60.
+    """
+    import engine.pick_ledger as pick_ledger_engine
+    lane = source = since = None
+    lanes = {"bow": "BOW", "osbv2": "OSBv2", "osb": "OSBv2", "bos": "BOS", "bull": "BULL"}
+    for a in (context.args or []):
+        k = a.strip().lower()
+        if k in lanes:
+            lane = lanes[k]
+        elif k in ("live", "replay", "replay_oos", "replay_in_sample"):
+            source = k
+        elif k.isdigit():
+            since = (datetime.date.today() - datetime.timedelta(days=int(k))).isoformat()
+        else:
+            await core.safe_reply(update.message, "⚠️ Format: /ledger [BOW|OSBv2|BOS|BULL] [live|replay|replay_oos] [jumlah_hari]. Contoh: /ledger OSBv2 live 60")
+            return
+    await asyncio.to_thread(pick_ledger_engine.resolve_all)
+    msg = await asyncio.to_thread(pick_ledger_engine.build_ledger_message, lane, since, source)
+    await core.safe_reply(update.message, msg)
 
 
 async def rank_command(update, context):

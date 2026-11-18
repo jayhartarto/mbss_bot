@@ -7993,6 +7993,8 @@ def build_app():
     # (return/day + win-rate, weighted) across BOW/OSB-v2/VCP/MACD-confirm's
     # active picks. BSJP deliberately excluded, see engine/capital_rank.py.
     app.add_handler(CommandHandler(["rank"], commands_scan.rank_command))
+    # MBSS v2 (2026-11-18): /ledger -- buku besar hasil pick (engine/pick_ledger.py), live + replay.
+    app.add_handler(CommandHandler(["ledger"], commands_scan.ledger_command))
     # MBSS v2 (user request 2026-09-21): /entrypagi DINONAKTIFKAN --
     # profitable 46.5% (di bawah 50%!), mean cuma +0.71%, tidak lolos bar
     # "profitable meyakinkan" utk daytrade family (lihat memory
